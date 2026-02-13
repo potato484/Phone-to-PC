@@ -1,0 +1,9 @@
+{
+  "name": "C2P",
+  "short_name": "C2P",
+  "display": "standalone",
+  "start_url": "/",
+  "background_color": "#0f1220",
+  "theme_color": "#1a1a2e",
+  "description": "Phone to computer CLI controller"
+}
