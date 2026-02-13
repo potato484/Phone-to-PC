@@ -1,34 +1,79 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="theme-color" content="#1a1a2e" />
     <title>C2P Controller</title>
     <link rel="manifest" href="/manifest.json" />
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <link rel="stylesheet" href="/vendor/xterm.css" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <header class="toolbar">
-      <select id="cli-select" aria-label="CLI">
-        <option value="claude">Claude</option>
-        <option value="codex">Codex</option>
-        <option value="gemini">Gemini</option>
-      </select>
-      <input id="prompt-input" type="text" placeholder="Optional prompt for one-shot run" />
-      <button id="start-btn" type="button">Start</button>
-      <button id="kill-btn" type="button" disabled>Kill</button>
-      <span id="status" class="status">Disconnected</span>
-    </header>
+    <div class="app">
+      <header class="status-bar" aria-label="连接状态">
+        <div class="status-indicators">
+          <span id="control-signal" class="signal is-offline" aria-label="Control status"></span>
+          <span class="signal-label">Control</span>
+          <span id="terminal-signal" class="signal is-offline" aria-label="Terminal status"></span>
+          <span class="signal-label">Terminal</span>
+        </div>
+        <p id="status-text" class="status-text">未连接</p>
+        <button id="session-pill" class="session-pill" type="button" hidden title="复制会话 ID">
+          会话 -
+        </button>
+      </header>
 
-    <main id="terminal-wrap">
-      <div id="terminal"></div>
-    </main>
+      <main id="terminal-wrap" aria-label="终端区域">
+        <div id="terminal"></div>
+      </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-attach@0.9.0/lib/xterm-addon-attach.js"></script>
+      <section id="dock" class="dock" aria-label="底部控制坞">
+        <div id="quick-keys" class="quick-keys" role="group" aria-label="快捷键">
+          <button class="quick-key-btn" type="button" data-key="ctrl-c">^C</button>
+          <button class="quick-key-btn" type="button" data-key="tab">Tab</button>
+          <button class="quick-key-btn" type="button" data-key="up">↑</button>
+          <button class="quick-key-btn" type="button" data-key="down">↓</button>
+          <button class="quick-key-btn" type="button" data-key="esc">Esc</button>
+          <button class="quick-key-btn" type="button" data-key="enter">⏎</button>
+        </div>
+
+        <button id="dock-handle" class="dock-handle" type="button" aria-expanded="false">
+          控制面板
+        </button>
+
+        <div id="dock-panel" class="dock-panel">
+          <div id="cli-segment" class="cli-segment" role="group" aria-label="CLI 选择">
+            <button class="cli-btn is-active" type="button" data-cli="claude" aria-pressed="true">
+              Claude
+            </button>
+            <button class="cli-btn" type="button" data-cli="codex" aria-pressed="false">Codex</button>
+            <button class="cli-btn" type="button" data-cli="gemini" aria-pressed="false">
+              Gemini
+            </button>
+          </div>
+
+          <label class="prompt-label" for="prompt-input">提示词</label>
+          <input id="prompt-input" type="text" placeholder="可选：输入一次性任务提示词" />
+
+          <div class="action-row">
+            <button id="start-btn" class="btn btn-accent" type="button">启动</button>
+            <button id="kill-btn" class="btn btn-danger" type="button" disabled>终止</button>
+            <button id="notify-btn" class="btn" type="button">通知</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/xterm-addon-fit.js"></script>
+    <script src="/vendor/xterm-addon-attach.js"></script>
+    <script src="/vendor/xterm-addon-webgl.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

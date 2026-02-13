@@ -1,77 +1,131 @@
 :root {
   --bg: #0f1220;
-  --panel: #1a1a2e;
+  --surface: #1a1a2e;
+  --surface-high: #222640;
   --text: #f0f2f8;
-  --muted: #9ca3b5;
+  --text-muted: #9ca3b5;
   --border: #2b2f45;
   --accent: #36c7a4;
+  --danger: #e74c5e;
+  --warning: #f0a030;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --keyboard-offset: 0px;
 }
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
 html,
 body {
   margin: 0;
   height: 100%;
-  background: radial-gradient(circle at top right, #1e2140, #0f1220 45%);
+  background: #060814;
   color: var(--text);
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
-.toolbar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 10;
-  display: grid;
-  grid-template-columns: 110px 1fr auto auto;
-  gap: 8px;
-  align-items: center;
-  padding: 10px;
-  min-height: 56px;
-  background: rgba(26, 26, 46, 0.92);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
+body {
+  overflow: hidden;
 }
 
-.toolbar select,
-.toolbar input,
-.toolbar button {
+button,
+input {
   min-height: 44px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: #121528;
+  border-radius: 12px;
+  background: #141833;
   color: var(--text);
-  padding: 0 12px;
-  font-size: 14px;
+  font: inherit;
 }
 
-.toolbar button {
+button {
   cursor: pointer;
-  font-weight: 600;
 }
 
-.toolbar button:hover:enabled {
-  border-color: var(--accent);
+button:active {
+  transform: scale(0.985);
 }
 
-.toolbar button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+.app {
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background:
+    radial-gradient(circle at 80% -20%, #2b315b 0%, rgba(43, 49, 91, 0) 48%),
+    radial-gradient(circle at 20% 120%, #1f2242 0%, rgba(31, 34, 66, 0) 54%),
+    var(--bg);
 }
 
-.status {
-  grid-column: 1 / -1;
-  color: var(--muted);
+.status-bar {
+  position: relative;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 8px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(to bottom, rgba(17, 21, 44, 0.94), rgba(17, 21, 44, 0.74));
+  backdrop-filter: blur(8px);
+}
+
+.status-indicators {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.signal {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #46506e;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.signal.is-online {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(54, 199, 164, 0.6);
+}
+
+.signal.is-warn {
+  background: var(--warning);
+  box-shadow: 0 0 8px rgba(240, 160, 48, 0.55);
+}
+
+.signal.is-offline {
+  background: #5b6277;
+}
+
+.signal-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.status-text {
+  margin: 0;
   font-size: 13px;
+  color: var(--text);
+  text-align: center;
+}
+
+.session-pill {
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(54, 199, 164, 0.45);
+  background: rgba(54, 199, 164, 0.12);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 #terminal-wrap {
-  position: fixed;
-  inset: 88px 0 0;
+  min-height: 0;
   padding: 10px;
 }
 
@@ -79,25 +133,245 @@ body {
   width: 100%;
   height: 100%;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 14px;
   overflow: hidden;
   background: #090b14;
+  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.3);
 }
 
-@media (max-width: 720px) {
-  .toolbar {
-    grid-template-columns: 1fr 1fr;
+.dock {
+  border-top: 1px solid var(--border);
+  background:
+    linear-gradient(to bottom, rgba(14, 17, 35, 0.92), rgba(14, 17, 35, 0.98)),
+    var(--surface);
+  backdrop-filter: blur(10px);
+  padding: 8px 10px calc(10px + var(--safe-bottom) + var(--keyboard-offset));
+}
+
+.quick-keys {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.quick-key-btn {
+  min-height: 44px;
+  border-radius: 10px;
+  border-color: #363c55;
+  background: #1a1f3a;
+  color: var(--text);
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+  user-select: none;
+}
+
+.quick-key-btn:active {
+  border-color: var(--accent);
+  background: #202744;
+}
+
+.dock-handle {
+  width: 100%;
+  margin-top: 8px;
+  background: #14192f;
+  border-color: #343a54;
+  color: var(--text-muted);
+  font-size: 12px;
+  display: inline-flex;
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+}
+
+.dock-handle::before {
+  content: "";
+  width: 36px;
+  height: 4px;
+  border-radius: 999px;
+  background: #57617f;
+}
+
+.dock-panel {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition:
+    max-height 240ms ease,
+    opacity 180ms ease,
+    transform 220ms ease;
+}
+
+.dock.is-expanded .dock-panel {
+  margin-top: 10px;
+  max-height: 320px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.cli-segment {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cli-btn {
+  min-height: 44px;
+  background: #151a31;
+  border-color: #3a3f5c;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.cli-btn.is-active {
+  background: rgba(54, 199, 164, 0.22);
+  color: #d8fff4;
+  border-color: rgba(54, 199, 164, 0.8);
+}
+
+.prompt-label {
+  display: block;
+  margin-top: 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+#prompt-input {
+  width: 100%;
+  padding: 0 12px;
+}
+
+.action-row {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.btn {
+  border-color: #3a3f5c;
+  background: #171c35;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-accent {
+  border-color: rgba(54, 199, 164, 0.8);
+  background: rgba(54, 199, 164, 0.15);
+}
+
+.btn-danger {
+  border-color: rgba(231, 76, 94, 0.75);
+  background: rgba(231, 76, 94, 0.12);
+}
+
+#kill-btn.is-confirm {
+  background: rgba(231, 76, 94, 0.26);
+  border-color: rgba(231, 76, 94, 0.95);
+  color: #ffdce0;
+}
+
+.toast-root {
+  position: fixed;
+  left: 50%;
+  top: calc(10px + env(safe-area-inset-top, 0px));
+  z-index: 30;
+  transform: translateX(-50%);
+  width: min(92vw, 380px);
+  display: grid;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-left-color: var(--accent);
+  border-radius: 10px;
+  background: rgba(18, 23, 42, 0.96);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 9px 12px;
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.28);
+  animation: toast-in 180ms ease;
+}
+
+.toast.is-danger {
+  border-left-color: var(--danger);
+}
+
+.toast.is-warn {
+  border-left-color: var(--warning);
+}
+
+.toast.is-success {
+  border-left-color: var(--accent);
+}
+
+.toast.is-leaving {
+  animation: toast-out 200ms ease forwards;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+@media (min-width: 900px) {
+  body {
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(circle at 15% 5%, #202859 0%, rgba(32, 40, 89, 0) 35%),
+      radial-gradient(circle at 85% 90%, #1a203f 0%, rgba(26, 32, 63, 0) 30%),
+      #050712;
   }
 
-  .toolbar input {
-    grid-column: 1 / -1;
+  .app {
+    width: min(100vw, 980px);
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+  }
+}
+
+@media (max-width: 460px) {
+  .status-bar {
+    grid-template-columns: 1fr;
+    gap: 6px;
+    text-align: center;
   }
 
-  .status {
-    font-size: 12px;
+  .status-indicators {
+    justify-content: center;
   }
 
-  #terminal-wrap {
-    inset: 148px 0 0;
+  .session-pill {
+    justify-self: center;
   }
 }

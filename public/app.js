@@ -1,30 +1,78 @@
 (function () {
-  const cliSelect = document.getElementById('cli-select');
-  const promptInput = document.getElementById('prompt-input');
-  const startBtn = document.getElementById('start-btn');
-  const killBtn = document.getElementById('kill-btn');
-  const statusEl = document.getElementById('status');
-  const terminalRoot = document.getElementById('terminal');
+  const DOM = {
+    terminalRoot: document.getElementById('terminal'),
+    terminalWrap: document.getElementById('terminal-wrap'),
+    statusText: document.getElementById('status-text'),
+    controlSignal: document.getElementById('control-signal'),
+    terminalSignal: document.getElementById('terminal-signal'),
+    sessionPill: document.getElementById('session-pill'),
+    dock: document.getElementById('dock'),
+    dockHandle: document.getElementById('dock-handle'),
+    quickKeys: document.getElementById('quick-keys'),
+    cliSegment: document.getElementById('cli-segment'),
+    promptInput: document.getElementById('prompt-input'),
+    startBtn: document.getElementById('start-btn'),
+    killBtn: document.getElementById('kill-btn'),
+    notifyBtn: document.getElementById('notify-btn'),
+    toastRoot: document.getElementById('toast-root')
+  };
 
   const TOKEN_STORAGE_KEY = 'c2p_token';
+  const SIGNAL_STATES = ['is-online', 'is-warn', 'is-offline'];
+  const QUICK_KEY_SEQUENCES = {
+    'ctrl-c': '\x03',
+    tab: '\t',
+    up: '\x1b[A',
+    down: '\x1b[B',
+    esc: '\x1b',
+    enter: '\r'
+  };
+
   const TerminalCtor = window.Terminal;
   const FitAddonCtor = window.FitAddon && window.FitAddon.FitAddon;
   const AttachAddonCtor = window.AttachAddon && window.AttachAddon.AttachAddon;
+  const WebglAddonCtor =
+    (window.WebglAddon && window.WebglAddon.WebglAddon) ||
+    (window.WebglAddon && window.WebglAddon.default) ||
+    window.WebglAddon;
 
-  let token = '';
-  let terminal = null;
-  let fitAddon = null;
-  let attachAddon = null;
-  let controlSocket = null;
-  let terminalSocket = null;
-  let terminalInputDisposable = null;
-  let currentSessionId = '';
-  let reconnectDelayMs = 1000;
-  let reconnectTimer = null;
-  let pushRegistered = false;
+  const State = {
+    token: '',
+    selectedCli: 'claude',
+    controlSocket: null,
+    terminalSocket: null,
+    terminal: null,
+    fitAddon: null,
+    attachAddon: null,
+    webglAddon: null,
+    terminalInputDisposable: null,
+    resizeObserver: null,
+    resizeRafId: 0,
+    controlConnected: false,
+    terminalConnected: false,
+    reconnectDelayMs: 1000,
+    reconnectTimer: 0,
+    currentSessionId: '',
+    pushRegistered: false,
+    serviceWorkerRegistration: null,
+    killConfirmTimer: 0,
+    killConfirmArmed: false,
+    killRequested: false
+  };
 
-  function setStatus(text) {
-    statusEl.textContent = text;
+  function setSignalState(signalEl, stateClass) {
+    if (!signalEl) {
+      return;
+    }
+    signalEl.classList.remove(...SIGNAL_STATES);
+    signalEl.classList.add(stateClass);
+  }
+
+  function shortenSessionId(sessionId) {
+    if (sessionId.length <= 12) {
+      return sessionId;
+    }
+    return `${sessionId.slice(0, 6)}...${sessionId.slice(-4)}`;
   }
 
   function readTokenFromHash() {
@@ -36,27 +84,16 @@
     return params.get('token') || '';
   }
 
-  function initToken() {
-    const hashToken = readTokenFromHash();
-    if (hashToken) {
-      localStorage.setItem(TOKEN_STORAGE_KEY, hashToken);
-      token = hashToken;
-      return;
-    }
-
-    token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
-  }
-
   function apiUrl(path) {
     const url = new URL(path, window.location.origin);
-    url.searchParams.set('token', token);
+    url.searchParams.set('token', State.token);
     return url.toString();
   }
 
   function wsUrl(path, extraParams) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = new URL(path, `${protocol}//${window.location.host}`);
-    url.searchParams.set('token', token);
+    url.searchParams.set('token', State.token);
     if (extraParams) {
       Object.keys(extraParams).forEach((key) => {
         const value = extraParams[key];
@@ -66,213 +103,6 @@
       });
     }
     return url.toString();
-  }
-
-  function initTerminal() {
-    if (!TerminalCtor || !FitAddonCtor) {
-      setStatus('xterm.js CDN failed to load.');
-      return;
-    }
-
-    terminal = new TerminalCtor({
-      cursorBlink: true,
-      convertEol: true,
-      fontFamily: 'IBM Plex Mono, Menlo, Consolas, monospace',
-      theme: {
-        background: '#090b14',
-        foreground: '#f0f2f8'
-      }
-    });
-
-    fitAddon = new FitAddonCtor();
-    terminal.loadAddon(fitAddon);
-    terminal.open(terminalRoot);
-    fitAddon.fit();
-
-    const resizeObserver = new ResizeObserver(() => {
-      if (!fitAddon || !terminal) {
-        return;
-      }
-      fitAddon.fit();
-      sendResize();
-    });
-    resizeObserver.observe(terminalRoot);
-
-    window.addEventListener('resize', () => {
-      if (!fitAddon || !terminal) {
-        return;
-      }
-      fitAddon.fit();
-      sendResize();
-    });
-  }
-
-  function sendControl(payload) {
-    if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN) {
-      return false;
-    }
-    controlSocket.send(JSON.stringify(payload));
-    return true;
-  }
-
-  function sendResize() {
-    if (!currentSessionId || !terminal) {
-      return;
-    }
-    sendControl({
-      type: 'resize',
-      sessionId: currentSessionId,
-      cols: terminal.cols,
-      rows: terminal.rows
-    });
-  }
-
-  function closeTerminalSocket() {
-    if (attachAddon && typeof attachAddon.dispose === 'function') {
-      attachAddon.dispose();
-      attachAddon = null;
-    }
-    if (terminalInputDisposable) {
-      terminalInputDisposable.dispose();
-      terminalInputDisposable = null;
-    }
-    if (terminalSocket) {
-      terminalSocket.onclose = null;
-      terminalSocket.close();
-      terminalSocket = null;
-    }
-  }
-
-  function connectTerminal(sessionId) {
-    if (!terminal) {
-      return;
-    }
-
-    closeTerminalSocket();
-    terminal.write('\x1bc');
-
-    terminalSocket = new WebSocket(wsUrl('/ws/terminal', { session: sessionId }));
-    terminalSocket.binaryType = 'arraybuffer';
-
-    terminalSocket.onopen = () => {
-      setStatus(`Session ${sessionId} attached`);
-      if (AttachAddonCtor) {
-        attachAddon = new AttachAddonCtor(terminalSocket, { bidirectional: true });
-        terminal.loadAddon(attachAddon);
-        return;
-      }
-
-      terminalInputDisposable = terminal.onData((data) => {
-        if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
-          terminalSocket.send(data);
-        }
-      });
-    };
-
-    terminalSocket.onmessage = (event) => {
-      if (attachAddon) {
-        return;
-      }
-      if (typeof event.data === 'string') {
-        terminal.write(event.data);
-        return;
-      }
-      if (event.data instanceof ArrayBuffer) {
-        terminal.write(new TextDecoder().decode(event.data));
-      }
-    };
-
-    terminalSocket.onclose = () => {
-      if (currentSessionId === sessionId) {
-        setStatus(`Session ${sessionId} detached`);
-      }
-    };
-  }
-
-  function handleControlMessage(event) {
-    let payload;
-    try {
-      payload = JSON.parse(event.data);
-    } catch {
-      setStatus('Control payload parse failed');
-      return;
-    }
-
-    if (payload.type === 'spawned' && payload.sessionId) {
-      currentSessionId = payload.sessionId;
-      killBtn.disabled = false;
-      connectTerminal(currentSessionId);
-      sendResize();
-      return;
-    }
-
-    if (payload.type === 'exited' && payload.sessionId) {
-      if (payload.sessionId === currentSessionId) {
-        setStatus(`Session exited (${payload.exitCode})`);
-        killBtn.disabled = true;
-      }
-      return;
-    }
-
-    if (payload.type === 'sessions' && Array.isArray(payload.list)) {
-      if (currentSessionId) {
-        const stillAlive = payload.list.some((item) => item && item.id === currentSessionId);
-        if (!stillAlive) {
-          currentSessionId = '';
-          killBtn.disabled = true;
-        }
-      }
-      return;
-    }
-
-    if (payload.type === 'error') {
-      setStatus(payload.message || 'Control error');
-    }
-  }
-
-  function scheduleReconnect() {
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-    }
-
-    reconnectTimer = setTimeout(() => {
-      connectControl();
-      reconnectDelayMs = Math.min(reconnectDelayMs * 2, 20000);
-    }, reconnectDelayMs);
-  }
-
-  function connectControl() {
-    if (!token) {
-      setStatus('Missing token, open URL with #token=...');
-      return;
-    }
-
-    if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-      return;
-    }
-
-    controlSocket = new WebSocket(wsUrl('/ws/control'));
-
-    controlSocket.onopen = () => {
-      reconnectDelayMs = 1000;
-      setStatus('Control connected');
-      if (!pushRegistered) {
-        registerPush().catch(() => {
-          setStatus('Push registration skipped');
-        });
-      }
-    };
-
-    controlSocket.onmessage = handleControlMessage;
-
-    controlSocket.onclose = () => {
-      setStatus('Control disconnected, retrying...');
-      scheduleReconnect();
-    };
-
-    controlSocket.onerror = () => {
-      controlSocket.close();
-    };
   }
 
   function urlBase64ToUint8Array(base64String) {
@@ -286,85 +116,719 @@
     return output;
   }
 
-  async function registerPush() {
-    if (pushRegistered) {
-      return;
-    }
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-      return;
-    }
-
-    const keyResp = await fetch(apiUrl('/api/vapid-public-key'));
-    if (!keyResp.ok) {
-      return;
-    }
-    const keyData = await keyResp.json();
-    if (!keyData.publicKey) {
-      return;
-    }
-
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') {
-      return;
-    }
-
-    const registration = await navigator.serviceWorker.register('/sw.js');
-    const existing = await registration.pushManager.getSubscription();
-    const subscription =
-      existing ||
-      (await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(keyData.publicKey)
-      }));
-
-    const saveResp = await fetch(apiUrl('/api/push/subscribe'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(subscription)
-    });
-
-    if (saveResp.ok) {
-      pushRegistered = true;
-      setStatus('Push subscription ready');
-    }
-  }
-
-  function bindEvents() {
-    startBtn.addEventListener('click', () => {
-      if (!terminal) {
+  const Toast = {
+    show(message, type = 'info') {
+      if (!DOM.toastRoot || !message) {
         return;
       }
-      const cli = cliSelect.value;
-      const prompt = promptInput.value.trim();
-      const ok = sendControl({
+      const toast = document.createElement('div');
+      toast.className = `toast is-${type}`;
+      toast.textContent = message;
+      DOM.toastRoot.appendChild(toast);
+
+      window.setTimeout(() => {
+        toast.classList.add('is-leaving');
+      }, 1800);
+
+      window.setTimeout(() => {
+        toast.remove();
+      }, 2100);
+    }
+  };
+
+  const StatusBar = {
+    setControl(state) {
+      const cls = state === 'online' ? 'is-online' : state === 'warn' ? 'is-warn' : 'is-offline';
+      setSignalState(DOM.controlSignal, cls);
+    },
+    setTerminal(state) {
+      const cls = state === 'online' ? 'is-online' : state === 'warn' ? 'is-warn' : 'is-offline';
+      setSignalState(DOM.terminalSignal, cls);
+    },
+    setText(text) {
+      if (DOM.statusText) {
+        DOM.statusText.textContent = text;
+      }
+    },
+    setSession(sessionId) {
+      if (!DOM.sessionPill) {
+        return;
+      }
+      if (!sessionId) {
+        DOM.sessionPill.hidden = true;
+        DOM.sessionPill.dataset.sessionId = '';
+        return;
+      }
+      DOM.sessionPill.hidden = false;
+      DOM.sessionPill.dataset.sessionId = sessionId;
+      DOM.sessionPill.textContent = `会话 ${shortenSessionId(sessionId)}`;
+    }
+  };
+
+  const Dock = {
+    expand() {
+      if (!DOM.dock || !DOM.dockHandle) {
+        return;
+      }
+      DOM.dock.classList.add('is-expanded');
+      DOM.dockHandle.setAttribute('aria-expanded', 'true');
+    },
+    collapse() {
+      if (!DOM.dock || !DOM.dockHandle) {
+        return;
+      }
+      DOM.dock.classList.remove('is-expanded');
+      DOM.dockHandle.setAttribute('aria-expanded', 'false');
+    },
+    toggle() {
+      if (!DOM.dock) {
+        return;
+      }
+      if (DOM.dock.classList.contains('is-expanded')) {
+        this.collapse();
+      } else {
+        this.expand();
+      }
+    },
+    bind() {
+      if (!DOM.dockHandle) {
+        return;
+      }
+      DOM.dockHandle.addEventListener('click', () => this.toggle());
+
+      let touchStartY = 0;
+      DOM.dockHandle.addEventListener(
+        'touchstart',
+        (event) => {
+          touchStartY = event.changedTouches[0].clientY;
+        },
+        { passive: true }
+      );
+      DOM.dockHandle.addEventListener(
+        'touchend',
+        (event) => {
+          const touchEndY = event.changedTouches[0].clientY;
+          const delta = touchEndY - touchStartY;
+          if (delta < -18) {
+            this.expand();
+          }
+          if (delta > 18) {
+            this.collapse();
+          }
+        },
+        { passive: true }
+      );
+    }
+  };
+
+  const CliSelector = {
+    bind() {
+      if (!DOM.cliSegment) {
+        return;
+      }
+      DOM.cliSegment.addEventListener('click', (event) => {
+        const target = event.target.closest('[data-cli]');
+        if (!target) {
+          return;
+        }
+        State.selectedCli = target.dataset.cli || 'claude';
+        this.renderActiveState();
+      });
+      this.renderActiveState();
+    },
+    renderActiveState() {
+      if (!DOM.cliSegment) {
+        return;
+      }
+      DOM.cliSegment.querySelectorAll('[data-cli]').forEach((button) => {
+        const active = button.dataset.cli === State.selectedCli;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    },
+    getValue() {
+      return State.selectedCli;
+    }
+  };
+
+  const Term = {
+    init() {
+      if (!TerminalCtor || !FitAddonCtor || !DOM.terminalRoot) {
+        StatusBar.setText('xterm.js 本地资源加载失败');
+        Toast.show('xterm.js 本地资源加载失败', 'danger');
+        return;
+      }
+
+      State.terminal = new TerminalCtor({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: 'IBM Plex Mono, Menlo, Consolas, monospace',
+        fontSize: 14,
+        theme: {
+          background: '#090b14',
+          foreground: '#f0f2f8'
+        }
+      });
+
+      State.fitAddon = new FitAddonCtor();
+      State.terminal.loadAddon(State.fitAddon);
+      State.terminal.open(DOM.terminalRoot);
+      State.fitAddon.fit();
+
+      if (WebglAddonCtor) {
+        try {
+          State.webglAddon = new WebglAddonCtor();
+          State.terminal.loadAddon(State.webglAddon);
+          if (State.webglAddon && typeof State.webglAddon.onContextLoss === 'function') {
+            State.webglAddon.onContextLoss(() => {
+              Toast.show('WebGL 上下文丢失，已回退默认渲染', 'warn');
+              if (State.webglAddon && typeof State.webglAddon.dispose === 'function') {
+                State.webglAddon.dispose();
+              }
+              State.webglAddon = null;
+            });
+          }
+        } catch {
+          State.webglAddon = null;
+        }
+      }
+
+      this.bindResizeSources();
+      this.scheduleResize();
+    },
+    bindResizeSources() {
+      if (window.ResizeObserver && DOM.terminalWrap) {
+        State.resizeObserver = new ResizeObserver(() => {
+          this.scheduleResize();
+        });
+        State.resizeObserver.observe(DOM.terminalWrap);
+      }
+      window.addEventListener(
+        'resize',
+        () => {
+          this.scheduleResize();
+        },
+        { passive: true }
+      );
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener(
+          'resize',
+          () => {
+            this.scheduleResize();
+          },
+          { passive: true }
+        );
+      }
+    },
+    scheduleResize() {
+      if (!State.terminal || !State.fitAddon || State.resizeRafId) {
+        return;
+      }
+      State.resizeRafId = window.requestAnimationFrame(() => {
+        State.resizeRafId = 0;
+        if (!State.fitAddon || !State.terminal) {
+          return;
+        }
+        State.fitAddon.fit();
+        this.sendResize();
+      });
+    },
+    sendResize() {
+      if (!State.currentSessionId || !State.terminal) {
+        return;
+      }
+      Control.send({
+        type: 'resize',
+        sessionId: State.currentSessionId,
+        cols: State.terminal.cols,
+        rows: State.terminal.rows
+      });
+    },
+    sendData(data) {
+      if (!State.terminalSocket || State.terminalSocket.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+      State.terminalSocket.send(data);
+      return true;
+    },
+    disconnect() {
+      if (State.attachAddon && typeof State.attachAddon.dispose === 'function') {
+        State.attachAddon.dispose();
+        State.attachAddon = null;
+      }
+      if (State.terminalInputDisposable) {
+        State.terminalInputDisposable.dispose();
+        State.terminalInputDisposable = null;
+      }
+      if (State.terminalSocket) {
+        State.terminalSocket.onclose = null;
+        State.terminalSocket.close();
+        State.terminalSocket = null;
+      }
+      State.terminalConnected = false;
+      StatusBar.setTerminal('offline');
+    },
+    connect(sessionId) {
+      if (!State.terminal) {
+        return;
+      }
+
+      this.disconnect();
+      State.terminal.write('\x1bc');
+
+      const socket = new WebSocket(wsUrl('/ws/terminal', { session: sessionId }));
+      socket.binaryType = 'arraybuffer';
+      State.terminalSocket = socket;
+      StatusBar.setTerminal('warn');
+
+      socket.onopen = () => {
+        if (State.terminalSocket !== socket) {
+          return;
+        }
+        State.terminalConnected = true;
+        StatusBar.setTerminal('online');
+        StatusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
+
+        if (AttachAddonCtor) {
+          State.attachAddon = new AttachAddonCtor(socket, { bidirectional: true });
+          State.terminal.loadAddon(State.attachAddon);
+          return;
+        }
+
+        State.terminalInputDisposable = State.terminal.onData((data) => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(data);
+          }
+        });
+      };
+
+      socket.onmessage = (event) => {
+        if (State.attachAddon) {
+          return;
+        }
+        if (typeof event.data === 'string') {
+          State.terminal.write(event.data);
+          return;
+        }
+        if (event.data instanceof ArrayBuffer) {
+          State.terminal.write(new TextDecoder().decode(event.data));
+        }
+      };
+
+      socket.onclose = () => {
+        if (State.terminalSocket !== socket) {
+          return;
+        }
+        State.terminalSocket = null;
+        State.terminalConnected = false;
+        if (State.currentSessionId === sessionId) {
+          StatusBar.setTerminal('warn');
+          StatusBar.setText('终端连接断开');
+        }
+      };
+    }
+  };
+
+  const Control = {
+    send(payload) {
+      if (!State.controlSocket || State.controlSocket.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+      State.controlSocket.send(JSON.stringify(payload));
+      return true;
+    },
+    handleMessage(event) {
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        StatusBar.setText('控制消息解析失败');
+        Toast.show('控制消息解析失败', 'danger');
+        return;
+      }
+
+      if (payload.type === 'spawned' && payload.sessionId) {
+        State.currentSessionId = payload.sessionId;
+        State.killRequested = false;
+        StatusBar.setSession(payload.sessionId);
+        StatusBar.setTerminal('warn');
+        DOM.killBtn.disabled = false;
+        Actions.resetKillConfirm();
+        Term.connect(payload.sessionId);
+        Term.scheduleResize();
+        const cli = payload.cli || CliSelector.getValue();
+        StatusBar.setText(`已启动 ${cli}`);
+        Toast.show(`已启动 ${cli}，会话已附加`, 'success');
+        return;
+      }
+
+      if (payload.type === 'exited' && payload.sessionId === State.currentSessionId) {
+        const code = Number.isFinite(payload.exitCode) ? payload.exitCode : Number(payload.exitCode) || 0;
+        StatusBar.setText(`会话已退出 (code=${code})`);
+        if (State.killRequested) {
+          Toast.show('会话已终止', 'warn');
+        } else {
+          Toast.show(`会话已退出 (code=${code})`, code === 0 ? 'info' : 'danger');
+        }
+        State.currentSessionId = '';
+        State.killRequested = false;
+        StatusBar.setSession('');
+        DOM.killBtn.disabled = true;
+        Actions.resetKillConfirm();
+        Term.disconnect();
+        return;
+      }
+
+      if (payload.type === 'sessions' && Array.isArray(payload.list) && State.currentSessionId) {
+        const stillAlive = payload.list.some((item) => {
+          if (!item) {
+            return false;
+          }
+          if (typeof item === 'string') {
+            return item === State.currentSessionId;
+          }
+          return item.id === State.currentSessionId;
+        });
+        if (!stillAlive) {
+          State.currentSessionId = '';
+          State.killRequested = false;
+          StatusBar.setSession('');
+          DOM.killBtn.disabled = true;
+          Actions.resetKillConfirm();
+          Term.disconnect();
+        }
+        return;
+      }
+
+      if (payload.type === 'error') {
+        const message = payload.message || '控制通道错误';
+        StatusBar.setText(message);
+        Toast.show(message, 'danger');
+      }
+    },
+    scheduleReconnect() {
+      if (State.reconnectTimer) {
+        window.clearTimeout(State.reconnectTimer);
+      }
+      State.reconnectTimer = window.setTimeout(() => {
+        State.reconnectTimer = 0;
+        this.connect();
+        State.reconnectDelayMs = Math.min(State.reconnectDelayMs * 2, 20000);
+      }, State.reconnectDelayMs);
+    },
+    connect() {
+      if (!State.token) {
+        StatusBar.setText('缺少 token，请使用 #token=... 打开');
+        return;
+      }
+      if (
+        State.controlSocket &&
+        (State.controlSocket.readyState === WebSocket.OPEN ||
+          State.controlSocket.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
+
+      StatusBar.setControl('warn');
+      StatusBar.setText('正在连接控制通道...');
+      const socket = new WebSocket(wsUrl('/ws/control'));
+      State.controlSocket = socket;
+
+      socket.onopen = () => {
+        if (State.controlSocket !== socket) {
+          return;
+        }
+        State.reconnectDelayMs = 1000;
+        State.controlConnected = true;
+        StatusBar.setControl('online');
+        StatusBar.setText('控制通道已连接');
+      };
+
+      socket.onmessage = (event) => {
+        this.handleMessage(event);
+      };
+
+      socket.onclose = () => {
+        if (State.controlSocket !== socket) {
+          return;
+        }
+        State.controlSocket = null;
+        State.controlConnected = false;
+        StatusBar.setControl('warn');
+        StatusBar.setText('连接断开，正在重连...');
+        Toast.show('连接断开，正在重连...', 'warn');
+        this.scheduleReconnect();
+      };
+
+      socket.onerror = () => {
+        socket.close();
+      };
+    }
+  };
+
+  const Actions = {
+    bind() {
+      if (DOM.startBtn) {
+        DOM.startBtn.addEventListener('click', () => this.spawn());
+      }
+      if (DOM.killBtn) {
+        DOM.killBtn.addEventListener('click', () => this.kill());
+      }
+      if (DOM.notifyBtn) {
+        DOM.notifyBtn.addEventListener('click', () => {
+          this.requestPush().catch(() => {
+            Toast.show('通知订阅失败', 'danger');
+          });
+        });
+      }
+      if (DOM.promptInput) {
+        DOM.promptInput.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' && event.ctrlKey) {
+            this.spawn();
+          }
+        });
+      }
+    },
+    spawn() {
+      if (!State.terminal) {
+        Toast.show('终端尚未就绪', 'warn');
+        return;
+      }
+      const prompt = DOM.promptInput ? DOM.promptInput.value.trim() : '';
+      const ok = Control.send({
         type: 'spawn',
-        cli,
-        cols: terminal.cols,
-        rows: terminal.rows,
+        cli: CliSelector.getValue(),
+        cols: State.terminal.cols,
+        rows: State.terminal.rows,
         prompt: prompt || undefined
       });
-
       if (!ok) {
-        setStatus('Control channel not ready');
-      }
-    });
-
-    killBtn.addEventListener('click', () => {
-      if (!currentSessionId) {
+        StatusBar.setText('控制通道未就绪');
+        Toast.show('控制通道未就绪', 'warn');
         return;
       }
-      sendControl({
+      StatusBar.setText('启动请求已发送');
+      Dock.collapse();
+    },
+    resetKillConfirm() {
+      if (State.killConfirmTimer) {
+        window.clearTimeout(State.killConfirmTimer);
+        State.killConfirmTimer = 0;
+      }
+      State.killConfirmArmed = false;
+      if (DOM.killBtn) {
+        DOM.killBtn.textContent = '终止';
+        DOM.killBtn.classList.remove('is-confirm');
+      }
+    },
+    kill() {
+      if (!State.currentSessionId) {
+        return;
+      }
+      if (!State.killConfirmArmed) {
+        State.killConfirmArmed = true;
+        DOM.killBtn.textContent = '确认终止';
+        DOM.killBtn.classList.add('is-confirm');
+        StatusBar.setText('再次点击以确认终止');
+        State.killConfirmTimer = window.setTimeout(() => {
+          this.resetKillConfirm();
+        }, 3000);
+        return;
+      }
+
+      const ok = Control.send({
         type: 'kill',
-        sessionId: currentSessionId
+        sessionId: State.currentSessionId
       });
-      killBtn.disabled = true;
+      this.resetKillConfirm();
+      if (!ok) {
+        Toast.show('终止请求发送失败', 'danger');
+        return;
+      }
+      State.killRequested = true;
+      DOM.killBtn.disabled = true;
+      StatusBar.setText('终止请求已发送');
+      Toast.show('终止请求已发送', 'warn');
+    },
+    async initServiceWorker() {
+      if (!('serviceWorker' in navigator)) {
+        return;
+      }
+      try {
+        State.serviceWorkerRegistration = await navigator.serviceWorker.register('/sw.js');
+      } catch {
+        StatusBar.setText('Service Worker 注册失败');
+      }
+    },
+    async requestPush() {
+      if (State.pushRegistered) {
+        Toast.show('通知已启用', 'info');
+        return;
+      }
+      if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+        Toast.show('当前浏览器不支持推送通知', 'warn');
+        return;
+      }
+      const keyResp = await fetch(apiUrl('/api/vapid-public-key'));
+      if (!keyResp.ok) {
+        throw new Error('vapid key fetch failed');
+      }
+      const keyData = await keyResp.json();
+      if (!keyData.publicKey) {
+        throw new Error('missing public key');
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        Toast.show('通知权限未授予', 'warn');
+        return;
+      }
+
+      let registration = State.serviceWorkerRegistration;
+      if (!registration) {
+        registration = await navigator.serviceWorker.register('/sw.js');
+        State.serviceWorkerRegistration = registration;
+      }
+
+      const existing = await registration.pushManager.getSubscription();
+      const subscription =
+        existing ||
+        (await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(keyData.publicKey)
+        }));
+
+      const saveResp = await fetch(apiUrl('/api/push/subscribe'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(subscription)
+      });
+
+      if (!saveResp.ok) {
+        throw new Error('subscribe save failed');
+      }
+      State.pushRegistered = true;
+      if (DOM.notifyBtn) {
+        DOM.notifyBtn.textContent = '通知已启用';
+        DOM.notifyBtn.disabled = true;
+      }
+      Toast.show('通知订阅完成', 'success');
+    }
+  };
+
+  const QuickKeys = {
+    bind() {
+      if (!DOM.quickKeys) {
+        return;
+      }
+      DOM.quickKeys.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-key]');
+        if (!button) {
+          return;
+        }
+        const sequence = QUICK_KEY_SEQUENCES[button.dataset.key];
+        if (!sequence) {
+          return;
+        }
+        const sent = Term.sendData(sequence);
+        if (!sent) {
+          Toast.show('终端未连接', 'warn');
+          return;
+        }
+        if (navigator.vibrate) {
+          navigator.vibrate(10);
+        }
+      });
+    }
+  };
+
+  const Viewport = {
+    applyInset() {
+      if (!window.visualViewport) {
+        document.documentElement.style.setProperty('--keyboard-offset', '0px');
+        return;
+      }
+      const viewport = window.visualViewport;
+      const keyboardOffset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      document.documentElement.style.setProperty('--keyboard-offset', `${Math.round(keyboardOffset)}px`);
+      Term.scheduleResize();
+    },
+    bind() {
+      this.applyInset();
+      if (!window.visualViewport) {
+        return;
+      }
+      window.visualViewport.addEventListener(
+        'resize',
+        () => {
+          this.applyInset();
+        },
+        { passive: true }
+      );
+      window.visualViewport.addEventListener(
+        'scroll',
+        () => {
+          this.applyInset();
+        },
+        { passive: true }
+      );
+    }
+  };
+
+  const Auth = {
+    init() {
+      const hashToken = readTokenFromHash();
+      if (hashToken) {
+        localStorage.setItem(TOKEN_STORAGE_KEY, hashToken);
+        State.token = hashToken;
+        history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+        return;
+      }
+      State.token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+    }
+  };
+
+  function bindSessionCopy() {
+    if (!DOM.sessionPill) {
+      return;
+    }
+    DOM.sessionPill.addEventListener('click', async () => {
+      const sessionId = DOM.sessionPill.dataset.sessionId;
+      if (!sessionId) {
+        return;
+      }
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        Toast.show('当前环境不支持复制', 'warn');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(sessionId);
+        Toast.show('会话 ID 已复制', 'success');
+      } catch {
+        Toast.show('复制会话 ID 失败', 'danger');
+      }
     });
   }
 
-  initToken();
-  initTerminal();
-  bindEvents();
-  connectControl();
+  function bootstrap() {
+    StatusBar.setControl('offline');
+    StatusBar.setTerminal('offline');
+    StatusBar.setSession('');
+    StatusBar.setText('初始化中...');
+
+    CliSelector.bind();
+    Dock.bind();
+    QuickKeys.bind();
+    bindSessionCopy();
+    Actions.bind();
+    Viewport.bind();
+    Auth.init();
+    Term.init();
+    Actions.initServiceWorker().catch(() => {});
+    Control.connect();
+  }
+
+  bootstrap();
 })();
