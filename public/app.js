@@ -3,6 +3,7 @@
     terminalRoot: document.getElementById('terminal'),
     terminalWrap: document.getElementById('terminal-wrap'),
     statusText: document.getElementById('status-text'),
+    cwdText: document.getElementById('cwd-text'),
     controlSignal: document.getElementById('control-signal'),
     terminalSignal: document.getElementById('terminal-signal'),
     sessionPill: document.getElementById('session-pill'),
@@ -27,10 +28,14 @@
     esc: '\x1b',
     enter: '\r'
   };
+  const KEYBOARD_VISIBLE_THRESHOLD_PX = 80;
+  const TERMINAL_WRITE_HIGH_WATER_BYTES = 256 * 1024;
+  const TERMINAL_WRITE_LOW_WATER_BYTES = 96 * 1024;
+  const TERMINAL_INPUT_BATCH_CHARS = 4096;
+  const textDecoder = new TextDecoder();
 
   const TerminalCtor = window.Terminal;
   const FitAddonCtor = window.FitAddon && window.FitAddon.FitAddon;
-  const AttachAddonCtor = window.AttachAddon && window.AttachAddon.AttachAddon;
   const WebglAddonCtor =
     (window.WebglAddon && window.WebglAddon.WebglAddon) ||
     (window.WebglAddon && window.WebglAddon.default) ||
@@ -43,16 +48,25 @@
     terminalSocket: null,
     terminal: null,
     fitAddon: null,
-    attachAddon: null,
     webglAddon: null,
     terminalInputDisposable: null,
+    terminalInputQueue: '',
+    terminalInputRafId: 0,
+    terminalWriteQueue: [],
+    terminalWriteQueuedBytes: 0,
+    terminalWriteInProgress: false,
+    terminalBackpressured: false,
     resizeObserver: null,
     resizeRafId: 0,
+    keyboardVisible: false,
+    pendingResizeAfterKeyboard: false,
+    dockMeasureRafId: 0,
     controlConnected: false,
     terminalConnected: false,
     reconnectDelayMs: 1000,
     reconnectTimer: 0,
     currentSessionId: '',
+    cwd: '',
     pushRegistered: false,
     serviceWorkerRegistration: null,
     killConfirmTimer: 0,
@@ -150,6 +164,11 @@
         DOM.statusText.textContent = text;
       }
     },
+    setCwd(cwd) {
+      if (DOM.cwdText) {
+        DOM.cwdText.textContent = cwd || '-';
+      }
+    },
     setSession(sessionId) {
       if (!DOM.sessionPill) {
         return;
@@ -166,12 +185,30 @@
   };
 
   const Dock = {
+    updateHeight() {
+      if (!DOM.dock) {
+        return;
+      }
+      const height = Math.ceil(DOM.dock.getBoundingClientRect().height);
+      document.documentElement.style.setProperty('--dock-height', `${height}px`);
+    },
+    scheduleMeasure() {
+      if (State.dockMeasureRafId) {
+        return;
+      }
+      State.dockMeasureRafId = window.requestAnimationFrame(() => {
+        State.dockMeasureRafId = 0;
+        this.updateHeight();
+        Term.scheduleResize();
+      });
+    },
     expand() {
       if (!DOM.dock || !DOM.dockHandle) {
         return;
       }
       DOM.dock.classList.add('is-expanded');
       DOM.dockHandle.setAttribute('aria-expanded', 'true');
+      this.scheduleMeasure();
     },
     collapse() {
       if (!DOM.dock || !DOM.dockHandle) {
@@ -179,6 +216,7 @@
       }
       DOM.dock.classList.remove('is-expanded');
       DOM.dockHandle.setAttribute('aria-expanded', 'false');
+      this.scheduleMeasure();
     },
     toggle() {
       if (!DOM.dock) {
@@ -191,7 +229,7 @@
       }
     },
     bind() {
-      if (!DOM.dockHandle) {
+      if (!DOM.dock || !DOM.dockHandle) {
         return;
       }
       DOM.dockHandle.addEventListener('click', () => this.toggle());
@@ -218,6 +256,15 @@
         },
         { passive: true }
       );
+      DOM.dock.addEventListener('transitionend', () => this.scheduleMeasure());
+      window.addEventListener(
+        'resize',
+        () => {
+          this.scheduleMeasure();
+        },
+        { passive: true }
+      );
+      this.scheduleMeasure();
     }
   };
 
@@ -310,23 +357,22 @@
         },
         { passive: true }
       );
-      if (window.visualViewport) {
-        window.visualViewport.addEventListener(
-          'resize',
-          () => {
-            this.scheduleResize();
-          },
-          { passive: true }
-        );
-      }
     },
-    scheduleResize() {
+    scheduleResize(force = false) {
       if (!State.terminal || !State.fitAddon || State.resizeRafId) {
+        return;
+      }
+      if (State.keyboardVisible && !force) {
+        State.pendingResizeAfterKeyboard = true;
         return;
       }
       State.resizeRafId = window.requestAnimationFrame(() => {
         State.resizeRafId = 0;
         if (!State.fitAddon || !State.terminal) {
+          return;
+        }
+        if (State.keyboardVisible && !force) {
+          State.pendingResizeAfterKeyboard = true;
           return;
         }
         State.fitAddon.fit();
@@ -348,18 +394,84 @@
       if (!State.terminalSocket || State.terminalSocket.readyState !== WebSocket.OPEN) {
         return false;
       }
-      State.terminalSocket.send(data);
+      if (!data) {
+        return true;
+      }
+      State.terminalInputQueue += data;
+      if (State.terminalInputQueue.length >= TERMINAL_INPUT_BATCH_CHARS) {
+        if (State.terminalInputRafId) {
+          window.cancelAnimationFrame(State.terminalInputRafId);
+          State.terminalInputRafId = 0;
+        }
+        const socket = State.terminalSocket;
+        if (socket && socket.readyState === WebSocket.OPEN && State.terminalInputQueue) {
+          socket.send(State.terminalInputQueue);
+          State.terminalInputQueue = '';
+        }
+        return true;
+      }
+      if (!State.terminalInputRafId) {
+        State.terminalInputRafId = window.requestAnimationFrame(() => {
+          State.terminalInputRafId = 0;
+          const socket = State.terminalSocket;
+          if (!socket || socket.readyState !== WebSocket.OPEN || !State.terminalInputQueue) {
+            return;
+          }
+          socket.send(State.terminalInputQueue);
+          State.terminalInputQueue = '';
+        });
+      }
       return true;
     },
-    disconnect() {
-      if (State.attachAddon && typeof State.attachAddon.dispose === 'function') {
-        State.attachAddon.dispose();
-        State.attachAddon = null;
+    queueServerOutput(data) {
+      if (!State.terminal || !data) {
+        return;
       }
+      State.terminalWriteQueue.push(data);
+      State.terminalWriteQueuedBytes += data.length;
+      if (!State.terminalBackpressured && State.terminalWriteQueuedBytes >= TERMINAL_WRITE_HIGH_WATER_BYTES) {
+        State.terminalBackpressured = true;
+      }
+      this.drainServerOutput();
+    },
+    drainServerOutput() {
+      if (!State.terminal || State.terminalWriteInProgress) {
+        return;
+      }
+      const chunk = State.terminalWriteQueue.shift();
+      if (!chunk) {
+        if (State.terminalBackpressured && State.terminalWriteQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
+          State.terminalBackpressured = false;
+        }
+        return;
+      }
+      State.terminalWriteInProgress = true;
+      State.terminalWriteQueuedBytes = Math.max(0, State.terminalWriteQueuedBytes - chunk.length);
+      State.terminal.write(chunk, () => {
+        State.terminalWriteInProgress = false;
+        if (State.terminalBackpressured && State.terminalWriteQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
+          State.terminalBackpressured = false;
+        }
+        this.drainServerOutput();
+      });
+    },
+    resetIoBuffers() {
+      if (State.terminalInputRafId) {
+        window.cancelAnimationFrame(State.terminalInputRafId);
+        State.terminalInputRafId = 0;
+      }
+      State.terminalInputQueue = '';
+      State.terminalWriteQueue.length = 0;
+      State.terminalWriteQueuedBytes = 0;
+      State.terminalWriteInProgress = false;
+      State.terminalBackpressured = false;
+    },
+    disconnect() {
       if (State.terminalInputDisposable) {
         State.terminalInputDisposable.dispose();
         State.terminalInputDisposable = null;
       }
+      this.resetIoBuffers();
       if (State.terminalSocket) {
         State.terminalSocket.onclose = null;
         State.terminalSocket.close();
@@ -388,30 +500,20 @@
         State.terminalConnected = true;
         StatusBar.setTerminal('online');
         StatusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
-
-        if (AttachAddonCtor) {
-          State.attachAddon = new AttachAddonCtor(socket, { bidirectional: true });
-          State.terminal.loadAddon(State.attachAddon);
-          return;
-        }
-
         State.terminalInputDisposable = State.terminal.onData((data) => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(data);
-          }
+          this.sendData(data);
         });
       };
 
       socket.onmessage = (event) => {
-        if (State.attachAddon) {
-          return;
-        }
+        let data = '';
         if (typeof event.data === 'string') {
-          State.terminal.write(event.data);
-          return;
+          data = event.data;
+        } else if (event.data instanceof ArrayBuffer) {
+          data = textDecoder.decode(event.data);
         }
-        if (event.data instanceof ArrayBuffer) {
-          State.terminal.write(new TextDecoder().decode(event.data));
+        if (data) {
+          this.queueServerOutput(data);
         }
       };
 
@@ -421,6 +523,7 @@
         }
         State.terminalSocket = null;
         State.terminalConnected = false;
+        this.resetIoBuffers();
         if (State.currentSessionId === sessionId) {
           StatusBar.setTerminal('warn');
           StatusBar.setText('终端连接断开');
@@ -450,6 +553,10 @@
       if (payload.type === 'spawned' && payload.sessionId) {
         State.currentSessionId = payload.sessionId;
         State.killRequested = false;
+        if (typeof payload.cwd === 'string' && payload.cwd) {
+          State.cwd = payload.cwd;
+          StatusBar.setCwd(payload.cwd);
+        }
         StatusBar.setSession(payload.sessionId);
         StatusBar.setTerminal('warn');
         DOM.killBtn.disabled = false;
@@ -598,6 +705,7 @@
       const ok = Control.send({
         type: 'spawn',
         cli: CliSelector.getValue(),
+        cwd: State.cwd || undefined,
         cols: State.terminal.cols,
         rows: State.terminal.rows,
         prompt: prompt || undefined
@@ -747,13 +855,31 @@
   const Viewport = {
     applyInset() {
       if (!window.visualViewport) {
-        document.documentElement.style.setProperty('--keyboard-offset', '0px');
+        document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
+        if (State.keyboardVisible) {
+          State.keyboardVisible = false;
+          if (State.pendingResizeAfterKeyboard) {
+            State.pendingResizeAfterKeyboard = false;
+            Term.scheduleResize(true);
+          }
+        }
         return;
       }
       const viewport = window.visualViewport;
       const keyboardOffset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
-      document.documentElement.style.setProperty('--keyboard-offset', `${Math.round(keyboardOffset)}px`);
-      Term.scheduleResize();
+      document.documentElement.style.setProperty('--dock-bottom-offset', `${Math.round(keyboardOffset)}px`);
+
+      const nextKeyboardVisible = keyboardOffset > KEYBOARD_VISIBLE_THRESHOLD_PX;
+      if (nextKeyboardVisible !== State.keyboardVisible) {
+        State.keyboardVisible = nextKeyboardVisible;
+        if (!nextKeyboardVisible && State.pendingResizeAfterKeyboard) {
+          State.pendingResizeAfterKeyboard = false;
+          Term.scheduleResize(true);
+        }
+      }
+      if (!nextKeyboardVisible) {
+        Term.scheduleResize();
+      }
     },
     bind() {
       this.applyInset();
@@ -790,6 +916,30 @@
     }
   };
 
+  const Runtime = {
+    async load() {
+      if (!State.token) {
+        StatusBar.setCwd('-');
+        return;
+      }
+      try {
+        const response = await fetch(apiUrl('/api/runtime'));
+        if (!response.ok) {
+          throw new Error('runtime fetch failed');
+        }
+        const payload = await response.json();
+        if (payload && typeof payload.cwd === 'string' && payload.cwd) {
+          State.cwd = payload.cwd;
+          StatusBar.setCwd(payload.cwd);
+          return;
+        }
+      } catch {
+        // keep existing cwd fallback
+      }
+      StatusBar.setCwd(State.cwd || '-');
+    }
+  };
+
   function bindSessionCopy() {
     if (!DOM.sessionPill) {
       return;
@@ -817,17 +967,20 @@
     StatusBar.setTerminal('offline');
     StatusBar.setSession('');
     StatusBar.setText('初始化中...');
+    StatusBar.setCwd('读取中...');
 
     CliSelector.bind();
     Dock.bind();
     QuickKeys.bind();
     bindSessionCopy();
     Actions.bind();
-    Viewport.bind();
     Auth.init();
     Term.init();
+    Viewport.bind();
     Actions.initServiceWorker().catch(() => {});
-    Control.connect();
+    Runtime.load().finally(() => {
+      Control.connect();
+    });
   }
 
   bootstrap();

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=overlays-content"
     />
     <meta name="theme-color" content="#1a1a2e" />
     <title>C2P Controller</title>
@@ -21,7 +21,10 @@
           <span id="terminal-signal" class="signal is-offline" aria-label="Terminal status"></span>
           <span class="signal-label">Terminal</span>
         </div>
-        <p id="status-text" class="status-text">未连接</p>
+        <div class="status-main">
+          <p id="status-text" class="status-text">未连接</p>
+          <p class="cwd-text">目录 <span id="cwd-text">-</span></p>
+        </div>
         <button id="session-pill" class="session-pill" type="button" hidden title="复制会话 ID">
           会话 -
         </button>
@@ -72,7 +75,6 @@
 
     <script src="/vendor/xterm.js"></script>
     <script src="/vendor/xterm-addon-fit.js"></script>
-    <script src="/vendor/xterm-addon-attach.js"></script>
     <script src="/vendor/xterm-addon-webgl.js"></script>
     <script src="/app.js"></script>
   </body>

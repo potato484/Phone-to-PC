@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -42,10 +43,18 @@ interface ControlKillMessage {
 type ControlMessage = ControlSpawnMessage | ControlResizeMessage | ControlKillMessage;
 
 type ControlOutbound =
-  | { type: 'spawned'; sessionId: string; cli: CliKind }
+  | { type: 'spawned'; sessionId: string; cli: CliKind; cwd: string }
   | { type: 'exited'; sessionId: string; exitCode: number }
   | { type: 'sessions'; list: unknown[] }
   | { type: 'error'; message: string };
+
+interface ServerCliOptions {
+  cwd?: string;
+}
+
+const TERMINAL_SEND_BATCH_MS = 16;
+const TERMINAL_SEND_HIGH_WATER_BYTES = 64 * 1024;
+const TERMINAL_SEND_LOW_WATER_BYTES = 32 * 1024;
 
 function isCliKind(value: unknown): value is CliKind {
   return value === 'claude' || value === 'codex' || value === 'gemini';
@@ -61,6 +70,43 @@ function normalizeDimension(value: unknown, fallback: number): number {
     return fallback;
   }
   return rounded;
+}
+
+function parseServerCliOptions(args: string[]): ServerCliOptions {
+  const options: ServerCliOptions = {};
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--cwd') {
+      const next = args[i + 1];
+      if (!next || next.startsWith('--')) {
+        console.log('[c2p] cli: missing value for --cwd');
+        continue;
+      }
+      options.cwd = next;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--cwd=')) {
+      options.cwd = arg.slice('--cwd='.length);
+    }
+  }
+  return options;
+}
+
+function resolveDefaultWorkingDirectory(rawCwd: string | undefined): string {
+  if (!rawCwd || rawCwd.trim().length === 0) {
+    return process.cwd();
+  }
+  const candidate = path.resolve(rawCwd.trim());
+  try {
+    if (fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+  } catch {
+    // fall through to default
+  }
+  console.log(`[c2p] cli: invalid --cwd=${rawCwd}, fallback to ${process.cwd()}`);
+  return process.cwd();
 }
 
 function parseControlMessage(raw: RawData): ControlMessage | undefined {
@@ -299,11 +345,13 @@ async function startTunnel(port: number, tokenValue: string): Promise<string | n
   return appendToken(publicUrl, tokenValue);
 }
 
+const cliOptions = parseServerCliOptions(process.argv.slice(2));
+const defaultWorkingDirectory = resolveDefaultWorkingDirectory(cliOptions.cwd);
 const port = Number(process.env.PORT ?? 3000);
 const store = new C2PStore();
 const token = ensureAuthToken();
 const authMiddleware = createAuthMiddleware(token);
-const ptyManager = new PtyManager();
+const ptyManager = new PtyManager(defaultWorkingDirectory);
 const killRequested = new Set<string>();
 const pushService = new PushService(store);
 pushService.init({
@@ -326,6 +374,10 @@ app.get('/api/tasks', (_req: Request, res: Response) => {
 
 app.get('/api/sessions', (_req: Request, res: Response) => {
   res.json({ sessions: ptyManager.listSessions() });
+});
+
+app.get('/api/runtime', (_req: Request, res: Response) => {
+  res.json({ cwd: defaultWorkingDirectory });
 });
 
 app.get('/api/vapid-public-key', (_req: Request, res: Response) => {
@@ -429,7 +481,7 @@ controlWss.on('connection', (ws) => {
         };
 
         store.addTask(task);
-        sendControlMessage(ws, { type: 'spawned', sessionId, cli: message.cli });
+        sendControlMessage(ws, { type: 'spawned', sessionId, cli: message.cli, cwd: info.cwd });
         broadcastSessions();
       } catch (error) {
         const text = error instanceof Error ? error.message : 'spawn failed';
@@ -466,14 +518,101 @@ terminalWss.on('connection', (ws, request) => {
     return;
   }
 
+  const sendQueue: string[] = [];
+  let queuedBytes = 0;
+  let flushTimer: NodeJS.Timeout | null = null;
+  let drainTimer: NodeJS.Timeout | null = null;
+
+  const clearTimers = (): void => {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    if (drainTimer) {
+      clearTimeout(drainTimer);
+      drainTimer = null;
+    }
+  };
+
+  const scheduleFlush = (): void => {
+    if (flushTimer || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushQueue();
+    }, TERMINAL_SEND_BATCH_MS);
+  };
+
+  const waitForDrain = (): void => {
+    if (drainTimer || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const checkDrain = (): void => {
+      drainTimer = null;
+      if (ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (ws.bufferedAmount <= TERMINAL_SEND_LOW_WATER_BYTES) {
+        if (sendQueue.length > 0) {
+          scheduleFlush();
+        }
+        return;
+      }
+      drainTimer = setTimeout(checkDrain, TERMINAL_SEND_BATCH_MS);
+    };
+    drainTimer = setTimeout(checkDrain, TERMINAL_SEND_BATCH_MS);
+  };
+
+  const flushQueue = (): void => {
+    if (ws.readyState !== WebSocket.OPEN || sendQueue.length === 0) {
+      return;
+    }
+    if (ws.bufferedAmount > TERMINAL_SEND_HIGH_WATER_BYTES) {
+      waitForDrain();
+      return;
+    }
+
+    const payload = sendQueue.join('');
+    sendQueue.length = 0;
+    queuedBytes = 0;
+
+    ws.send(payload, (error) => {
+      if (error && ws.readyState === WebSocket.OPEN) {
+        ws.close(1011, 'terminal send failed');
+        return;
+      }
+      if (sendQueue.length > 0) {
+        scheduleFlush();
+      }
+    });
+
+    if (ws.bufferedAmount > TERMINAL_SEND_HIGH_WATER_BYTES) {
+      waitForDrain();
+    }
+  };
+
+  const enqueueOutput = (data: string): void => {
+    if (!data || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    sendQueue.push(data);
+    queuedBytes += Buffer.byteLength(data, 'utf8');
+    if (queuedBytes >= TERMINAL_SEND_HIGH_WATER_BYTES) {
+      flushQueue();
+      return;
+    }
+    scheduleFlush();
+  };
+
   const replay = ptyManager.getBuffer(sessionId);
   if (replay.length > 0) {
-    ws.send(replay);
+    enqueueOutput(replay);
   }
 
   const offData = ptyManager.onData((id, data) => {
-    if (id === sessionId && ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
+    if (id === sessionId) {
+      enqueueOutput(data);
     }
   });
 
@@ -491,6 +630,7 @@ terminalWss.on('connection', (ws, request) => {
   });
 
   ws.on('close', () => {
+    clearTimers();
     offData();
     offExit();
   });
@@ -528,6 +668,7 @@ server.listen(port, async () => {
   const lan = getLanAddress();
 
   console.log(`[c2p] listening on ${port}`);
+  console.log(`[c2p] default cwd: ${defaultWorkingDirectory}`);
   console.log(`[c2p] local: ${localUrl}`);
   if (lan) {
     console.log(`[c2p] lan: http://${lan}:${port}/#token=${token}`);

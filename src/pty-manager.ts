@@ -3,6 +3,8 @@ import { spawn, type IPty } from 'node-pty';
 import type { CliKind } from './store.js';
 
 const BUFFER_LIMIT_BYTES = 50 * 1024;
+const BUFFER_FLUSH_INTERVAL_MS = 16;
+const RING_INITIAL_CAPACITY = 16;
 
 export interface SpawnOptions {
   id: string;
@@ -25,26 +27,100 @@ export interface SessionInfo {
 interface SessionRecord {
   info: SessionInfo;
   pty: IPty;
-  buffer: Buffer[];
-  bufferedBytes: number;
+  buffer: BufferRing;
+  pendingData: string[];
+  flushTimer: NodeJS.Timeout | null;
 }
 
 type DataListener = (sessionId: string, data: string) => void;
 type ExitListener = (sessionId: string, exitCode: number) => void;
 
+interface BufferRing {
+  chunks: Array<Buffer | undefined>;
+  head: number;
+  length: number;
+  totalBytes: number;
+}
+
 function quoteForShell(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function normalizeCwd(rawCwd: string | undefined): string {
-  if (!rawCwd || rawCwd.trim().length === 0) {
-    return process.cwd();
+function resolveDirectory(rawPath: string | undefined): string | undefined {
+  if (!rawPath) {
+    return undefined;
   }
-  const candidate = rawCwd.trim();
-  if (fs.existsSync(candidate)) {
-    return candidate;
+  const candidate = rawPath.trim();
+  if (candidate.length === 0) {
+    return undefined;
   }
-  return process.cwd();
+  try {
+    if (fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function normalizeCwd(rawCwd: string | undefined, fallbackCwd: string): string {
+  return resolveDirectory(rawCwd) ?? resolveDirectory(fallbackCwd) ?? process.cwd();
+}
+
+function createBufferRing(capacity = RING_INITIAL_CAPACITY): BufferRing {
+  return {
+    chunks: new Array<Buffer | undefined>(capacity),
+    head: 0,
+    length: 0,
+    totalBytes: 0
+  };
+}
+
+function ensureRingCapacity(ring: BufferRing): void {
+  if (ring.length < ring.chunks.length) {
+    return;
+  }
+  const nextChunks = new Array<Buffer | undefined>(ring.chunks.length * 2);
+  for (let i = 0; i < ring.length; i += 1) {
+    const sourceIndex = (ring.head + i) % ring.chunks.length;
+    nextChunks[i] = ring.chunks[sourceIndex];
+  }
+  ring.chunks = nextChunks;
+  ring.head = 0;
+}
+
+function pushRingChunk(ring: BufferRing, chunk: Buffer): void {
+  ensureRingCapacity(ring);
+  const tail = (ring.head + ring.length) % ring.chunks.length;
+  ring.chunks[tail] = chunk;
+  ring.length += 1;
+  ring.totalBytes += chunk.byteLength;
+}
+
+function shiftRingChunk(ring: BufferRing): Buffer | undefined {
+  if (ring.length === 0) {
+    return undefined;
+  }
+  const chunk = ring.chunks[ring.head];
+  ring.chunks[ring.head] = undefined;
+  ring.head = (ring.head + 1) % ring.chunks.length;
+  ring.length -= 1;
+  if (chunk) {
+    ring.totalBytes -= chunk.byteLength;
+  }
+  return chunk;
+}
+
+function ringToBufferArray(ring: BufferRing): Buffer[] {
+  const result: Buffer[] = [];
+  for (let i = 0; i < ring.length; i += 1) {
+    const chunk = ring.chunks[(ring.head + i) % ring.chunks.length];
+    if (chunk) {
+      result.push(chunk);
+    }
+  }
+  return result;
 }
 
 function buildCliCommand(cli: CliKind, prompt?: string): string {
@@ -64,9 +140,35 @@ function buildCliCommand(cli: CliKind, prompt?: string): string {
 }
 
 export class PtyManager {
+  private readonly defaultCwd: string;
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly dataListeners = new Set<DataListener>();
   private readonly exitListeners = new Set<ExitListener>();
+
+  constructor(defaultCwd = process.cwd()) {
+    this.defaultCwd = normalizeCwd(defaultCwd, process.cwd());
+  }
+
+  private flushData(sessionId: string, record: SessionRecord): void {
+    record.flushTimer = null;
+    if (record.pendingData.length === 0) {
+      return;
+    }
+    const merged = record.pendingData.join('');
+    record.pendingData.length = 0;
+    for (const listener of this.dataListeners) {
+      listener(sessionId, merged);
+    }
+  }
+
+  private scheduleDataFlush(sessionId: string, record: SessionRecord): void {
+    if (record.flushTimer) {
+      return;
+    }
+    record.flushTimer = setTimeout(() => {
+      this.flushData(sessionId, record);
+    }, BUFFER_FLUSH_INTERVAL_MS);
+  }
 
   onData(listener: DataListener): () => void {
     this.dataListeners.add(listener);
@@ -83,7 +185,7 @@ export class PtyManager {
       throw new Error(`Session already exists: ${options.id}`);
     }
 
-    const cwd = normalizeCwd(options.cwd);
+    const cwd = normalizeCwd(options.cwd, this.defaultCwd);
     const command = buildCliCommand(options.cli, options.prompt);
 
     const pty = spawn('/bin/bash', ['-lc', command], {
@@ -109,28 +211,28 @@ export class PtyManager {
     const record: SessionRecord = {
       info,
       pty,
-      buffer: [],
-      bufferedBytes: 0
+      buffer: createBufferRing(),
+      pendingData: [],
+      flushTimer: null
     };
 
     pty.onData((data) => {
       const chunk = Buffer.from(data, 'utf8');
-      record.buffer.push(chunk);
-      record.bufferedBytes += chunk.byteLength;
+      pushRingChunk(record.buffer, chunk);
 
-      while (record.bufferedBytes > BUFFER_LIMIT_BYTES && record.buffer.length > 0) {
-        const removed = record.buffer.shift();
-        if (removed) {
-          record.bufferedBytes -= removed.byteLength;
-        }
+      while (record.buffer.totalBytes > BUFFER_LIMIT_BYTES && record.buffer.length > 0) {
+        shiftRingChunk(record.buffer);
       }
-
-      for (const listener of this.dataListeners) {
-        listener(options.id, data);
-      }
+      record.pendingData.push(data);
+      this.scheduleDataFlush(options.id, record);
     });
 
     pty.onExit(({ exitCode }) => {
+      if (record.flushTimer) {
+        clearTimeout(record.flushTimer);
+        record.flushTimer = null;
+      }
+      this.flushData(options.id, record);
       this.sessions.delete(options.id);
       for (const listener of this.exitListeners) {
         listener(options.id, exitCode);
@@ -172,7 +274,7 @@ export class PtyManager {
     if (!session || session.buffer.length === 0) {
       return '';
     }
-    return Buffer.concat(session.buffer).toString('utf8');
+    return Buffer.concat(ringToBufferArray(session.buffer)).toString('utf8');
   }
 
   hasSession(sessionId: string): boolean {

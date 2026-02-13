@@ -9,7 +9,8 @@
   --danger: #e74c5e;
   --warning: #f0a030;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
-  --keyboard-offset: 0px;
+  --dock-bottom-offset: 0px;
+  --dock-height: 180px;
 }
 
 * {
@@ -52,7 +53,7 @@ button:active {
   height: 100vh;
   height: 100dvh;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr;
   background:
     radial-gradient(circle at 80% -20%, #2b315b 0%, rgba(43, 49, 91, 0) 48%),
     radial-gradient(circle at 20% 120%, #1f2242 0%, rgba(31, 34, 66, 0) 54%),
@@ -106,11 +107,25 @@ button:active {
   color: var(--text-muted);
 }
 
+.status-main {
+  min-width: 0;
+}
+
 .status-text {
   margin: 0;
   font-size: 13px;
   color: var(--text);
   text-align: center;
+}
+
+.cwd-text {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-pill {
@@ -126,7 +141,7 @@ button:active {
 
 #terminal-wrap {
   min-height: 0;
-  padding: 10px;
+  padding: 10px 10px calc(12px + var(--dock-height));
 }
 
 #terminal {
@@ -140,12 +155,17 @@ button:active {
 }
 
 .dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--dock-bottom-offset);
+  z-index: 10;
   border-top: 1px solid var(--border);
   background:
     linear-gradient(to bottom, rgba(14, 17, 35, 0.92), rgba(14, 17, 35, 0.98)),
     var(--surface);
   backdrop-filter: blur(10px);
-  padding: 8px 10px calc(10px + var(--safe-bottom) + var(--keyboard-offset));
+  padding: 8px 10px calc(10px + var(--safe-bottom));
 }
 
 .quick-keys {
@@ -357,6 +377,12 @@ button:active {
     width: min(100vw, 980px);
     border-left: 1px solid rgba(255, 255, 255, 0.08);
     border-right: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .dock {
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(100vw, 980px);
   }
 }
 

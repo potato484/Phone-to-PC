@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+const PERSIST_DEBOUNCE_MS = 500;
+
 export type CliKind = 'claude' | 'codex' | 'gemini';
 export type TaskStatus = 'running' | 'done' | 'error' | 'killed';
 
@@ -34,6 +36,9 @@ interface StoreData {
 export class C2PStore {
   private readonly filePath: string;
   private data: StoreData = { tasks: [], subscriptions: [] };
+  private persistTimer: NodeJS.Timeout | null = null;
+  private persistInFlight = false;
+  private persistDirty = false;
 
   constructor(filePath = path.resolve(process.cwd(), '.c2p-store.json')) {
     this.filePath = filePath;
@@ -42,7 +47,7 @@ export class C2PStore {
 
   private load(): void {
     if (!fs.existsSync(this.filePath)) {
-      this.persist();
+      this.schedulePersist(true);
       return;
     }
 
@@ -53,15 +58,51 @@ export class C2PStore {
       this.data.subscriptions = Array.isArray(parsed.subscriptions) ? parsed.subscriptions : [];
     } catch {
       this.data = { tasks: [], subscriptions: [] };
-      this.persist();
+      this.schedulePersist(true);
     }
   }
 
-  private persist(): void {
+  private schedulePersist(forceNow = false): void {
+    this.persistDirty = true;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    if (forceNow) {
+      void this.flushPersist();
+      return;
+    }
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.flushPersist();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  private async flushPersist(): Promise<void> {
+    if (this.persistInFlight || !this.persistDirty) {
+      return;
+    }
+    this.persistInFlight = true;
+    this.persistDirty = false;
+
     const next = JSON.stringify(this.data, null, 2);
     const tempPath = `${this.filePath}.tmp`;
-    fs.writeFileSync(tempPath, `${next}\n`, { encoding: 'utf8', mode: 0o600 });
-    fs.renameSync(tempPath, this.filePath);
+    try {
+      await fs.promises.writeFile(tempPath, `${next}\n`, { encoding: 'utf8', mode: 0o600 });
+      await fs.promises.rename(tempPath, this.filePath);
+    } catch (error) {
+      this.persistDirty = true;
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`[c2p] store persist failed: ${text}`);
+    } finally {
+      this.persistInFlight = false;
+      if (this.persistDirty && !this.persistTimer) {
+        this.persistTimer = setTimeout(() => {
+          this.persistTimer = null;
+          void this.flushPersist();
+        }, PERSIST_DEBOUNCE_MS);
+      }
+    }
   }
 
   listTasks(): TaskRecord[] {
@@ -77,7 +118,7 @@ export class C2PStore {
     if (this.data.tasks.length > 100) {
       this.data.tasks.splice(0, this.data.tasks.length - 100);
     }
-    this.persist();
+    this.schedulePersist();
   }
 
   updateTask(taskId: string, patch: Partial<TaskRecord>): void {
@@ -87,7 +128,7 @@ export class C2PStore {
     }
     Object.assign(task, patch);
     task.updatedAt = new Date().toISOString();
-    this.persist();
+    this.schedulePersist();
   }
 
   listSubscriptions(): PushSubscriptionRecord[] {
@@ -101,14 +142,14 @@ export class C2PStore {
     } else {
       this.data.subscriptions.push(subscription);
     }
-    this.persist();
+    this.schedulePersist();
   }
 
   removeSubscription(endpoint: string): void {
     const before = this.data.subscriptions.length;
     this.data.subscriptions = this.data.subscriptions.filter((item) => item.endpoint !== endpoint);
     if (this.data.subscriptions.length !== before) {
-      this.persist();
+      this.schedulePersist();
     }
   }
 }
