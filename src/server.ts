@@ -1,10 +1,11 @@
 import 'dotenv/config';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import express, { type Request, type Response } from 'express';
 import qrcode from 'qrcode-terminal';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
@@ -217,12 +218,31 @@ function rawDataToString(raw: RawData): string {
   return Buffer.concat(raw.map((part) => (Buffer.isBuffer(part) ? part : Buffer.from(part)))).toString('utf8');
 }
 
-type TunnelMode = 'auto' | 'cloudflare' | 'off';
+interface TailscaleStatusSelf {
+  DNSName?: string;
+  Online?: boolean;
+  TailscaleIPs?: string[];
+}
+
+interface TailscaleStatus {
+  Self?: TailscaleStatusSelf;
+}
+
+type TunnelMode = 'auto' | 'cloudflare' | 'tailscale' | 'off';
 
 const TUNNEL_INSTALL_DOC =
   'https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/';
+const TAILSCALE_INSTALL_DOC = 'https://tailscale.com/download';
 const TUNNEL_URL_RE = /https:\/\/[-a-z0-9]+\.trycloudflare\.com/i;
 const TUNNEL_START_TIMEOUT_MS = 15_000;
+const execFileAsync = promisify(execFile);
+
+function isEnabledEnvFlag(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  return /^(1|true|yes|on)$/i.test(value.trim());
+}
 
 function resolveTunnelMode(): TunnelMode {
   const raw = (process.env.TUNNEL ?? 'auto').trim().toLowerCase();
@@ -231,6 +251,9 @@ function resolveTunnelMode(): TunnelMode {
   }
   if (raw === 'cloudflare') {
     return 'cloudflare';
+  }
+  if (raw === 'tailscale') {
+    return 'tailscale';
   }
   if (raw === 'off') {
     return 'off';
@@ -271,10 +294,76 @@ function registerTunnelCleanup(child: ChildProcess): void {
   });
 }
 
+async function readTailscaleStatus(): Promise<TailscaleStatus | null> {
+  try {
+    const { stdout } = await execFileAsync('tailscale', ['status', '--json']);
+    const output = Buffer.isBuffer(stdout) ? stdout.toString('utf8') : stdout;
+    return JSON.parse(output) as TailscaleStatus;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === 'ENOENT') {
+      console.log('[c2p] tunnel: tailscale not found, LAN-only mode');
+      console.log(`[c2p] install: ${TAILSCALE_INSTALL_DOC}`);
+    } else if (error instanceof SyntaxError) {
+      console.log('[c2p] tunnel: failed to parse tailscale status, LAN-only mode');
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`[c2p] tunnel: tailscale status failed (${message})`);
+    }
+    return null;
+  }
+}
+
+async function startTailscaleTunnel(port: number, tokenValue: string): Promise<string | null> {
+  const status = await readTailscaleStatus();
+  if (!status) {
+    return null;
+  }
+
+  const self = status.Self;
+  const rawDnsName = typeof self?.DNSName === 'string' ? self.DNSName.trim() : '';
+  const dnsName = rawDnsName.endsWith('.') ? rawDnsName.slice(0, -1) : rawDnsName;
+  if (!dnsName) {
+    console.log('[c2p] tunnel: tailscale DNS name unavailable, LAN-only mode');
+    return null;
+  }
+  if (self?.Online !== true) {
+    console.log('[c2p] tunnel: tailscale node is offline, LAN-only mode');
+    return null;
+  }
+
+  const tailscaleIp = Array.isArray(self.TailscaleIPs)
+    ? self.TailscaleIPs.find((ip) => /^100\./.test(ip.trim()))
+    : undefined;
+  if (tailscaleIp) {
+    console.log(`[c2p] tailscale ip: ${tailscaleIp}`);
+  }
+
+  const tunnelCommand = isEnabledEnvFlag(process.env.TAILSCALE_FUNNEL) ? 'funnel' : 'serve';
+  try {
+    await execFileAsync('tailscale', [tunnelCommand, '--bg', '--https=443', `http://localhost:${port}`]);
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === 'ENOENT') {
+      console.log('[c2p] tunnel: tailscale not found, LAN-only mode');
+      console.log(`[c2p] install: ${TAILSCALE_INSTALL_DOC}`);
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`[c2p] tunnel: tailscale ${tunnelCommand} failed (${message})`);
+    }
+    return null;
+  }
+
+  return appendToken(`https://${dnsName}`, tokenValue);
+}
+
 async function startTunnel(port: number, tokenValue: string): Promise<string | null> {
   const mode = resolveTunnelMode();
   if (mode === 'off') {
     return null;
+  }
+  if (mode === 'tailscale') {
+    return startTailscaleTunnel(port, tokenValue);
   }
 
   const tunnelHostname = process.env.TUNNEL_HOSTNAME?.trim();
@@ -758,7 +847,12 @@ server.listen(port, async () => {
 
   const tunnelUrl = await startTunnel(port, token);
   if (tunnelUrl) {
-    console.log(`[c2p] tunnel: ${tunnelUrl}`);
+    if (resolveTunnelMode() === 'tailscale') {
+      const tunnelCommand = isEnabledEnvFlag(process.env.TAILSCALE_FUNNEL) ? 'funnel' : 'serve';
+      console.log(`[c2p] tunnel: tailscale ${tunnelCommand} -> ${tunnelUrl}`);
+    } else {
+      console.log(`[c2p] tunnel: ${tunnelUrl}`);
+    }
     console.log('[c2p] scan to connect:');
     qrcode.generate(tunnelUrl, { small: true });
     void pushService.notify('C2P 已启动', '点击连接', {
