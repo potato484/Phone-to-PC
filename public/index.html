@@ -35,6 +35,8 @@
       </main>
 
       <section id="dock" class="dock" aria-label="底部控制坞">
+        <div id="session-tabs" class="session-tabs" role="tablist" aria-label="活跃会话" hidden></div>
+
         <div id="quick-keys" class="quick-keys" role="group" aria-label="快捷键">
           <button class="quick-key-btn" type="button" data-key="ctrl-c">^C</button>
           <button class="quick-key-btn" type="button" data-key="tab">Tab</button>
@@ -57,6 +59,7 @@
             <button class="cli-btn" type="button" data-cli="gemini" aria-pressed="false">
               Gemini
             </button>
+            <button class="cli-btn" type="button" data-cli="shell" aria-pressed="false">Shell</button>
           </div>
 
           <label class="prompt-label" for="prompt-input">提示词</label>

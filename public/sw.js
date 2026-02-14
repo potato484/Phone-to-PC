@@ -89,10 +89,19 @@ self.addEventListener('push', (event) => {
     }
   }
 
+  const data = payload && payload.data && typeof payload.data === 'object' ? payload.data : { url: '/' };
+  if (typeof data.url !== 'string' || data.url.length === 0) {
+    data.url = '/';
+  }
+  if (data.type === 'url-update') {
+    payload.title = payload.title || 'C2P 已启动';
+    payload.body = payload.body || '点击连接';
+  }
+
   event.waitUntil(
     self.registration.showNotification(payload.title || 'C2P Update', {
       body: payload.body || 'Task status changed.',
-      data: payload.data || { url: '/' }
+      data
     })
   );
 });

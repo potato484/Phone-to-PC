@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -57,7 +57,7 @@ const TERMINAL_SEND_HIGH_WATER_BYTES = 64 * 1024;
 const TERMINAL_SEND_LOW_WATER_BYTES = 32 * 1024;
 
 function isCliKind(value: unknown): value is CliKind {
-  return value === 'claude' || value === 'codex' || value === 'gemini';
+  return value === 'claude' || value === 'codex' || value === 'gemini' || value === 'shell';
 }
 
 function normalizeDimension(value: unknown, fallback: number): number {
@@ -240,10 +240,105 @@ function appendToken(baseUrl: string, tokenValue: string): string {
   return url.toString();
 }
 
+function registerTunnelCleanup(child: ChildProcess): void {
+  const cleanup = (): void => {
+    if (child.exitCode === null && !child.killed) {
+      child.kill('SIGTERM');
+    }
+  };
+
+  const onSigint = (): void => {
+    cleanup();
+    process.exit(0);
+  };
+  const onSigterm = (): void => {
+    cleanup();
+    process.exit(0);
+  };
+
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
+  process.once('exit', cleanup);
+  child.once('exit', () => {
+    process.off('SIGINT', onSigint);
+    process.off('SIGTERM', onSigterm);
+    process.off('exit', cleanup);
+  });
+}
+
 async function startTunnel(port: number, tokenValue: string): Promise<string | null> {
   const mode = resolveTunnelMode();
   if (mode === 'off') {
     return null;
+  }
+
+  const tunnelHostname = process.env.TUNNEL_HOSTNAME?.trim();
+  if (tunnelHostname) {
+    const child = spawn('cloudflared', ['tunnel', 'run'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let logBuffer = '';
+
+    const ready = await new Promise<boolean>((resolve) => {
+      let done = false;
+
+      const settle = (value: boolean): void => {
+        if (done) {
+          return;
+        }
+        done = true;
+        clearTimeout(timer);
+        child.stdout.off('data', onData);
+        child.stderr.off('data', onData);
+        child.off('error', onError);
+        child.off('exit', onExit);
+        resolve(value);
+      };
+
+      const onData = (chunk: Buffer): void => {
+        logBuffer += chunk.toString('utf8');
+        if (/Registered tunnel connection/i.test(logBuffer)) {
+          settle(true);
+          return;
+        }
+        if (logBuffer.length > 8_192) {
+          logBuffer = logBuffer.slice(-2_048);
+        }
+      };
+
+      const onError = (error: Error): void => {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === 'ENOENT') {
+          console.log('[c2p] tunnel: cloudflared not found, LAN-only mode');
+          console.log(`[c2p] install: ${TUNNEL_INSTALL_DOC}`);
+        } else {
+          console.log(`[c2p] tunnel: failed to start named tunnel (${error.message})`);
+        }
+        settle(false);
+      };
+
+      const onExit = (): void => {
+        settle(false);
+      };
+
+      const timer = setTimeout(() => {
+        console.log('[c2p] tunnel: timeout waiting for named tunnel readiness');
+        if (child.exitCode === null && !child.killed) {
+          child.kill('SIGTERM');
+        }
+        settle(false);
+      }, TUNNEL_START_TIMEOUT_MS);
+
+      child.stdout.on('data', onData);
+      child.stderr.on('data', onData);
+      child.once('error', onError);
+      child.once('exit', onExit);
+    });
+
+    if (!ready) {
+      return null;
+    }
+
+    registerTunnelCleanup(child);
+    return appendToken(`https://${tunnelHostname}`, tokenValue);
   }
 
   const child = spawn(
@@ -317,30 +412,7 @@ async function startTunnel(port: number, tokenValue: string): Promise<string | n
   if (!publicUrl) {
     return null;
   }
-
-  const cleanup = (): void => {
-    if (child.exitCode === null && !child.killed) {
-      child.kill('SIGTERM');
-    }
-  };
-
-  const onSigint = (): void => {
-    cleanup();
-    process.exit(0);
-  };
-  const onSigterm = (): void => {
-    cleanup();
-    process.exit(0);
-  };
-
-  process.once('SIGINT', onSigint);
-  process.once('SIGTERM', onSigterm);
-  process.once('exit', cleanup);
-  child.once('exit', () => {
-    process.off('SIGINT', onSigint);
-    process.off('SIGTERM', onSigterm);
-    process.off('exit', cleanup);
-  });
+  registerTunnelCleanup(child);
 
   return appendToken(publicUrl, tokenValue);
 }
@@ -679,5 +751,9 @@ server.listen(port, async () => {
     console.log(`[c2p] tunnel: ${tunnelUrl}`);
     console.log('[c2p] scan to connect:');
     qrcode.generate(tunnelUrl, { small: true });
+    void pushService.notify('C2P 已启动', '点击连接', {
+      type: 'url-update',
+      url: tunnelUrl
+    });
   }
 });

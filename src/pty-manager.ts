@@ -123,7 +123,11 @@ function ringToBufferArray(ring: BufferRing): Buffer[] {
   return result;
 }
 
-function buildCliCommand(cli: CliKind, prompt?: string): string {
+function buildCliCommand(cli: CliKind, prompt?: string): string | null {
+  if (cli === 'shell') {
+    return null;
+  }
+
   let base = '';
   if (cli === 'claude') {
     base = 'claude --dangerously-skip-permissions';
@@ -188,16 +192,27 @@ export class PtyManager {
     const cwd = normalizeCwd(options.cwd, this.defaultCwd);
     const command = buildCliCommand(options.cli, options.prompt);
 
-    const pty = spawn('/bin/bash', ['-lc', command], {
-      name: 'xterm-256color',
-      cols: options.cols,
-      rows: options.rows,
-      cwd,
-      env: {
-        ...process.env,
-        TERM: 'xterm-256color'
-      }
-    });
+    const pty = command
+      ? spawn('/bin/bash', ['-lc', command], {
+          name: 'xterm-256color',
+          cols: options.cols,
+          rows: options.rows,
+          cwd,
+          env: {
+            ...process.env,
+            TERM: 'xterm-256color'
+          }
+        })
+      : spawn('/bin/bash', ['-l'], {
+          name: 'xterm-256color',
+          cols: options.cols,
+          rows: options.rows,
+          cwd,
+          env: {
+            ...process.env,
+            TERM: 'xterm-256color'
+          }
+        });
 
     const info: SessionInfo = {
       id: options.id,

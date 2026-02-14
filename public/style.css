@@ -168,6 +168,37 @@ button:active {
   padding: 8px 10px calc(10px + var(--safe-bottom));
 }
 
+.session-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.session-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.session-tab {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #14192f;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.session-tab.is-active {
+  border-color: rgba(54, 199, 164, 0.8);
+  background: rgba(54, 199, 164, 0.15);
+  color: var(--text);
+}
+
 .quick-keys {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -233,7 +264,7 @@ button:active {
 
 .cli-segment {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 

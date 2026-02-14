@@ -9,6 +9,7 @@
     sessionPill: document.getElementById('session-pill'),
     dock: document.getElementById('dock'),
     dockHandle: document.getElementById('dock-handle'),
+    sessionTabs: document.getElementById('session-tabs'),
     quickKeys: document.getElementById('quick-keys'),
     cliSegment: document.getElementById('cli-segment'),
     promptInput: document.getElementById('prompt-input'),
@@ -87,6 +88,31 @@
       return sessionId;
     }
     return `${sessionId.slice(0, 6)}...${sessionId.slice(-4)}`;
+  }
+
+  function normalizeSessionEntry(entry) {
+    if (!entry) {
+      return null;
+    }
+    if (typeof entry === 'string') {
+      return {
+        id: entry,
+        cli: '',
+        cwd: ''
+      };
+    }
+    if (typeof entry !== 'object') {
+      return null;
+    }
+    const id = typeof entry.id === 'string' ? entry.id : '';
+    if (!id) {
+      return null;
+    }
+    return {
+      id,
+      cli: typeof entry.cli === 'string' ? entry.cli : '',
+      cwd: typeof entry.cwd === 'string' ? entry.cwd : ''
+    };
   }
 
   function readTokenFromHash() {
@@ -292,9 +318,93 @@
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
       });
+      const isShell = State.selectedCli === 'shell';
+      const promptLabel = document.querySelector('.prompt-label');
+      if (promptLabel) {
+        promptLabel.hidden = isShell;
+      }
+      if (DOM.promptInput) {
+        DOM.promptInput.hidden = isShell;
+      }
     },
     getValue() {
       return State.selectedCli;
+    }
+  };
+
+  const SessionTabs = {
+    bind() {
+      if (!DOM.sessionTabs) {
+        return;
+      }
+      DOM.sessionTabs.addEventListener('click', (event) => {
+        const tab = event.target.closest('.session-tab[data-session-id]');
+        if (!tab) {
+          return;
+        }
+        const sessionId = tab.dataset.sessionId;
+        if (!sessionId || sessionId === State.currentSessionId) {
+          return;
+        }
+        State.currentSessionId = sessionId;
+        State.killRequested = false;
+        StatusBar.setSession(sessionId);
+        if (tab.dataset.cwd) {
+          State.cwd = tab.dataset.cwd;
+          StatusBar.setCwd(tab.dataset.cwd);
+        }
+        if (DOM.killBtn) {
+          DOM.killBtn.disabled = false;
+        }
+        Actions.resetKillConfirm();
+        this.renderActiveState();
+        Term.connect(sessionId);
+        Term.scheduleResize();
+        StatusBar.setText(`已切换到会话 ${shortenSessionId(sessionId)}`);
+      });
+    },
+    renderActiveState() {
+      if (!DOM.sessionTabs) {
+        return;
+      }
+      DOM.sessionTabs.querySelectorAll('.session-tab[data-session-id]').forEach((button) => {
+        const active = button.dataset.sessionId === State.currentSessionId;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+    },
+    update(list) {
+      if (!DOM.sessionTabs) {
+        return [];
+      }
+      const sessions = Array.isArray(list) ? list.map((item) => normalizeSessionEntry(item)).filter(Boolean) : [];
+      DOM.sessionTabs.textContent = '';
+      if (sessions.length === 0) {
+        DOM.sessionTabs.hidden = true;
+        return sessions;
+      }
+
+      const fragment = document.createDocumentFragment();
+      sessions.forEach((session) => {
+        const button = document.createElement('button');
+        const active = session.id === State.currentSessionId;
+        button.type = 'button';
+        button.className = active ? 'session-tab is-active' : 'session-tab';
+        button.dataset.sessionId = session.id;
+        if (session.cwd) {
+          button.dataset.cwd = session.cwd;
+          button.title = session.cwd;
+        }
+        button.setAttribute('role', 'tab');
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+        const cliLabel = session.cli || 'session';
+        button.textContent = `${cliLabel} ${shortenSessionId(session.id)}`;
+        fragment.appendChild(button);
+      });
+
+      DOM.sessionTabs.appendChild(fragment);
+      DOM.sessionTabs.hidden = false;
+      return sessions;
     }
   };
 
@@ -586,24 +696,42 @@
         return;
       }
 
-      if (payload.type === 'sessions' && Array.isArray(payload.list) && State.currentSessionId) {
-        const stillAlive = payload.list.some((item) => {
-          if (!item) {
-            return false;
+      if (payload.type === 'sessions' && Array.isArray(payload.list)) {
+        const sessions = SessionTabs.update(payload.list);
+
+        if (State.currentSessionId) {
+          const activeSession = sessions.find((item) => item.id === State.currentSessionId);
+          if (!activeSession) {
+            State.currentSessionId = '';
+            State.killRequested = false;
+            StatusBar.setSession('');
+            if (DOM.killBtn) {
+              DOM.killBtn.disabled = true;
+            }
+            Actions.resetKillConfirm();
+            Term.disconnect();
+          } else if (activeSession.cwd) {
+            State.cwd = activeSession.cwd;
+            StatusBar.setCwd(activeSession.cwd);
           }
-          if (typeof item === 'string') {
-            return item === State.currentSessionId;
-          }
-          return item.id === State.currentSessionId;
-        });
-        if (!stillAlive) {
-          State.currentSessionId = '';
+        } else if (sessions.length > 0) {
+          const latest = sessions[sessions.length - 1];
+          State.currentSessionId = latest.id;
           State.killRequested = false;
-          StatusBar.setSession('');
-          DOM.killBtn.disabled = true;
+          StatusBar.setSession(latest.id);
+          if (latest.cwd) {
+            State.cwd = latest.cwd;
+            StatusBar.setCwd(latest.cwd);
+          }
+          if (DOM.killBtn) {
+            DOM.killBtn.disabled = false;
+          }
           Actions.resetKillConfirm();
-          Term.disconnect();
+          Term.connect(latest.id);
+          Term.scheduleResize();
         }
+
+        SessionTabs.renderActiveState();
         return;
       }
 
@@ -701,10 +829,11 @@
         Toast.show('终端尚未就绪', 'warn');
         return;
       }
-      const prompt = DOM.promptInput ? DOM.promptInput.value.trim() : '';
+      const cli = CliSelector.getValue();
+      const prompt = cli === 'shell' ? '' : DOM.promptInput ? DOM.promptInput.value.trim() : '';
       const ok = Control.send({
         type: 'spawn',
-        cli: CliSelector.getValue(),
+        cli,
         cwd: State.cwd || undefined,
         cols: State.terminal.cols,
         rows: State.terminal.rows,
@@ -970,6 +1099,7 @@
     StatusBar.setCwd('读取中...');
 
     CliSelector.bind();
+    SessionTabs.bind();
     Dock.bind();
     QuickKeys.bind();
     bindSessionCopy();
