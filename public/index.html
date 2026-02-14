@@ -40,6 +40,8 @@
         <div id="quick-keys" class="quick-keys" role="group" aria-label="快捷键">
           <button class="quick-key-btn" type="button" data-key="ctrl-c">^C</button>
           <button class="quick-key-btn" type="button" data-key="tab">Tab</button>
+          <button class="quick-key-btn" type="button" data-key="shift-tab">⇤</button>
+          <button class="quick-key-btn" type="button" data-key="/">/</button>
           <button class="quick-key-btn" type="button" data-key="up">↑</button>
           <button class="quick-key-btn" type="button" data-key="down">↓</button>
           <button class="quick-key-btn" type="button" data-key="esc">Esc</button>
@@ -51,24 +53,8 @@
         </button>
 
         <div id="dock-panel" class="dock-panel">
-          <div id="cli-segment" class="cli-segment" role="group" aria-label="CLI 选择">
-            <button class="cli-btn is-active" type="button" data-cli="claude" aria-pressed="true">
-              Claude
-            </button>
-            <button class="cli-btn" type="button" data-cli="codex" aria-pressed="false">Codex</button>
-            <button class="cli-btn" type="button" data-cli="gemini" aria-pressed="false">
-              Gemini
-            </button>
-            <button class="cli-btn" type="button" data-cli="shell" aria-pressed="false">Shell</button>
-          </div>
-
-          <label class="prompt-label" for="prompt-input">提示词</label>
-          <input id="prompt-input" type="text" placeholder="可选：输入一次性任务提示词" />
-
           <div class="action-row">
-            <button id="start-btn" class="btn btn-accent" type="button">启动</button>
             <button id="kill-btn" class="btn btn-danger" type="button" disabled>终止</button>
-            <button id="notify-btn" class="btn" type="button">通知</button>
           </div>
         </div>
       </section>

@@ -11,11 +11,7 @@
     dockHandle: document.getElementById('dock-handle'),
     sessionTabs: document.getElementById('session-tabs'),
     quickKeys: document.getElementById('quick-keys'),
-    cliSegment: document.getElementById('cli-segment'),
-    promptInput: document.getElementById('prompt-input'),
-    startBtn: document.getElementById('start-btn'),
     killBtn: document.getElementById('kill-btn'),
-    notifyBtn: document.getElementById('notify-btn'),
     toastRoot: document.getElementById('toast-root')
   };
 
@@ -24,6 +20,8 @@
   const QUICK_KEY_SEQUENCES = {
     'ctrl-c': '\x03',
     tab: '\t',
+    'shift-tab': '\x1b[Z',
+    '/': '/',
     up: '\x1b[A',
     down: '\x1b[B',
     esc: '\x1b',
@@ -32,6 +30,7 @@
   const KEYBOARD_VISIBLE_THRESHOLD_PX = 80;
   const TERMINAL_WRITE_HIGH_WATER_BYTES = 256 * 1024;
   const TERMINAL_WRITE_LOW_WATER_BYTES = 96 * 1024;
+  const TERMINAL_INPUT_DIRECT_CHARS = 8;
   const TERMINAL_INPUT_BATCH_CHARS = 4096;
   const textDecoder = new TextDecoder();
 
@@ -44,7 +43,6 @@
 
   const State = {
     token: '',
-    selectedCli: 'claude',
     controlSocket: null,
     terminalSocket: null,
     terminal: null,
@@ -66,9 +64,11 @@
     terminalConnected: false,
     reconnectDelayMs: 1000,
     reconnectTimer: 0,
+    initialSessionsReceived: false,
     currentSessionId: '',
     cwd: '',
     pushRegistered: false,
+    pushAutoRequested: false,
     serviceWorkerRegistration: null,
     killConfirmTimer: 0,
     killConfirmArmed: false,
@@ -294,50 +294,17 @@
     }
   };
 
-  const CliSelector = {
-    bind() {
-      if (!DOM.cliSegment) {
-        return;
-      }
-      DOM.cliSegment.addEventListener('click', (event) => {
-        const target = event.target.closest('[data-cli]');
-        if (!target) {
-          return;
-        }
-        State.selectedCli = target.dataset.cli || 'claude';
-        this.renderActiveState();
-      });
-      this.renderActiveState();
-    },
-    renderActiveState() {
-      if (!DOM.cliSegment) {
-        return;
-      }
-      DOM.cliSegment.querySelectorAll('[data-cli]').forEach((button) => {
-        const active = button.dataset.cli === State.selectedCli;
-        button.classList.toggle('is-active', active);
-        button.setAttribute('aria-pressed', active ? 'true' : 'false');
-      });
-      const isShell = State.selectedCli === 'shell';
-      const promptLabel = document.querySelector('.prompt-label');
-      if (promptLabel) {
-        promptLabel.hidden = isShell;
-      }
-      if (DOM.promptInput) {
-        DOM.promptInput.hidden = isShell;
-      }
-    },
-    getValue() {
-      return State.selectedCli;
-    }
-  };
-
   const SessionTabs = {
     bind() {
       if (!DOM.sessionTabs) {
         return;
       }
       DOM.sessionTabs.addEventListener('click', (event) => {
+        const addButton = event.target.closest('.session-tab-add');
+        if (addButton) {
+          Actions.spawn();
+          return;
+        }
         const tab = event.target.closest('.session-tab[data-session-id]');
         if (!tab) {
           return;
@@ -379,10 +346,6 @@
       }
       const sessions = Array.isArray(list) ? list.map((item) => normalizeSessionEntry(item)).filter(Boolean) : [];
       DOM.sessionTabs.textContent = '';
-      if (sessions.length === 0) {
-        DOM.sessionTabs.hidden = true;
-        return sessions;
-      }
 
       const fragment = document.createDocumentFragment();
       sessions.forEach((session) => {
@@ -401,6 +364,14 @@
         button.textContent = `${cliLabel} ${shortenSessionId(session.id)}`;
         fragment.appendChild(button);
       });
+
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'session-tab session-tab-add';
+      add.setAttribute('aria-label', '添加新终端');
+      add.title = '添加新终端';
+      add.textContent = '+';
+      fragment.appendChild(add);
 
       DOM.sessionTabs.appendChild(fragment);
       DOM.sessionTabs.hidden = false;
@@ -500,35 +471,55 @@
         rows: State.terminal.rows
       });
     },
+    flushQueuedInput(socket) {
+      if (!State.terminalInputQueue) {
+        return;
+      }
+      socket.send(State.terminalInputQueue);
+      State.terminalInputQueue = '';
+    },
     sendData(data) {
-      if (!State.terminalSocket || State.terminalSocket.readyState !== WebSocket.OPEN) {
+      const socket = State.terminalSocket;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
         return false;
       }
       if (!data) {
         return true;
       }
+
+      if (data.length <= TERMINAL_INPUT_DIRECT_CHARS && !State.terminalInputQueue) {
+        socket.send(data);
+        return true;
+      }
+
+      if (data.length >= TERMINAL_INPUT_BATCH_CHARS) {
+        if (State.terminalInputRafId) {
+          window.cancelAnimationFrame(State.terminalInputRafId);
+          State.terminalInputRafId = 0;
+        }
+        this.flushQueuedInput(socket);
+        socket.send(data);
+        return true;
+      }
+
       State.terminalInputQueue += data;
       if (State.terminalInputQueue.length >= TERMINAL_INPUT_BATCH_CHARS) {
         if (State.terminalInputRafId) {
           window.cancelAnimationFrame(State.terminalInputRafId);
           State.terminalInputRafId = 0;
         }
-        const socket = State.terminalSocket;
-        if (socket && socket.readyState === WebSocket.OPEN && State.terminalInputQueue) {
-          socket.send(State.terminalInputQueue);
-          State.terminalInputQueue = '';
-        }
+        this.flushQueuedInput(socket);
         return true;
       }
+
       if (!State.terminalInputRafId) {
         State.terminalInputRafId = window.requestAnimationFrame(() => {
           State.terminalInputRafId = 0;
-          const socket = State.terminalSocket;
-          if (!socket || socket.readyState !== WebSocket.OPEN || !State.terminalInputQueue) {
+          const activeSocket = State.terminalSocket;
+          if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || !State.terminalInputQueue) {
             return;
           }
-          socket.send(State.terminalInputQueue);
-          State.terminalInputQueue = '';
+          this.flushQueuedInput(activeSocket);
         });
       }
       return true;
@@ -673,9 +664,19 @@
         Actions.resetKillConfirm();
         Term.connect(payload.sessionId);
         Term.scheduleResize();
-        const cli = payload.cli || CliSelector.getValue();
+        const cli = payload.cli || 'shell';
         StatusBar.setText(`已启动 ${cli}`);
         Toast.show(`已启动 ${cli}，会话已附加`, 'success');
+        if (!State.pushAutoRequested && !State.pushRegistered && 'Notification' in window) {
+          State.pushAutoRequested = true;
+          void Actions
+            .requestPush({
+              silentPermissionDenied: true,
+              silentFailure: true,
+              showSuccessToast: false
+            })
+            .catch(() => {});
+        }
         return;
       }
 
@@ -697,6 +698,8 @@
       }
 
       if (payload.type === 'sessions' && Array.isArray(payload.list)) {
+        const isFirstSessionsMessage = !State.initialSessionsReceived;
+        State.initialSessionsReceived = true;
         const sessions = SessionTabs.update(payload.list);
 
         if (State.currentSessionId) {
@@ -729,6 +732,8 @@
           Actions.resetKillConfirm();
           Term.connect(latest.id);
           Term.scheduleResize();
+        } else if (isFirstSessionsMessage) {
+          Actions.spawn();
         }
 
         SessionTabs.renderActiveState();
@@ -803,25 +808,8 @@
 
   const Actions = {
     bind() {
-      if (DOM.startBtn) {
-        DOM.startBtn.addEventListener('click', () => this.spawn());
-      }
       if (DOM.killBtn) {
         DOM.killBtn.addEventListener('click', () => this.kill());
-      }
-      if (DOM.notifyBtn) {
-        DOM.notifyBtn.addEventListener('click', () => {
-          this.requestPush().catch(() => {
-            Toast.show('通知订阅失败', 'danger');
-          });
-        });
-      }
-      if (DOM.promptInput) {
-        DOM.promptInput.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter' && event.ctrlKey) {
-            this.spawn();
-          }
-        });
       }
     },
     spawn() {
@@ -829,15 +817,12 @@
         Toast.show('终端尚未就绪', 'warn');
         return;
       }
-      const cli = CliSelector.getValue();
-      const prompt = cli === 'shell' ? '' : DOM.promptInput ? DOM.promptInput.value.trim() : '';
       const ok = Control.send({
         type: 'spawn',
-        cli,
+        cli: 'shell',
         cwd: State.cwd || undefined,
         cols: State.terminal.cols,
-        rows: State.terminal.rows,
-        prompt: prompt || undefined
+        rows: State.terminal.rows
       });
       if (!ok) {
         StatusBar.setText('控制通道未就绪');
@@ -897,27 +882,44 @@
         StatusBar.setText('Service Worker 注册失败');
       }
     },
-    async requestPush() {
+    async requestPush(options = {}) {
+      const {
+        silentPermissionDenied = false,
+        silentFailure = false,
+        showSuccessToast = true
+      } = options;
       if (State.pushRegistered) {
-        Toast.show('通知已启用', 'info');
+        if (!silentFailure && showSuccessToast) {
+          Toast.show('通知已启用', 'info');
+        }
         return;
       }
       if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
-        Toast.show('当前浏览器不支持推送通知', 'warn');
+        if (!silentFailure) {
+          Toast.show('当前浏览器不支持推送通知', 'warn');
+        }
         return;
       }
       const keyResp = await fetch(apiUrl('/api/vapid-public-key'));
       if (!keyResp.ok) {
+        if (!silentFailure) {
+          Toast.show('通知订阅失败', 'danger');
+        }
         throw new Error('vapid key fetch failed');
       }
       const keyData = await keyResp.json();
       if (!keyData.publicKey) {
+        if (!silentFailure) {
+          Toast.show('通知订阅失败', 'danger');
+        }
         throw new Error('missing public key');
       }
 
       const permission = await Notification.requestPermission();
       if (permission !== 'granted') {
-        Toast.show('通知权限未授予', 'warn');
+        if (!silentPermissionDenied && !silentFailure) {
+          Toast.show('通知权限未授予', 'warn');
+        }
         return;
       }
 
@@ -944,14 +946,15 @@
       });
 
       if (!saveResp.ok) {
+        if (!silentFailure) {
+          Toast.show('通知订阅失败', 'danger');
+        }
         throw new Error('subscribe save failed');
       }
       State.pushRegistered = true;
-      if (DOM.notifyBtn) {
-        DOM.notifyBtn.textContent = '通知已启用';
-        DOM.notifyBtn.disabled = true;
+      if (showSuccessToast && !silentFailure) {
+        Toast.show('通知订阅完成', 'success');
       }
-      Toast.show('通知订阅完成', 'success');
     }
   };
 
@@ -1098,9 +1101,9 @@
     StatusBar.setText('初始化中...');
     StatusBar.setCwd('读取中...');
 
-    CliSelector.bind();
     SessionTabs.bind();
     Dock.bind();
+    Dock.updateHeight();
     QuickKeys.bind();
     bindSessionCopy();
     Actions.bind();
@@ -1111,6 +1114,10 @@
     Runtime.load().finally(() => {
       Control.connect();
     });
+    window.setTimeout(() => {
+      Dock.updateHeight();
+      Term.scheduleResize(true);
+    }, 300);
   }
 
   bootstrap();

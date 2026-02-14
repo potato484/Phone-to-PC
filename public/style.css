@@ -199,9 +199,17 @@ button:active {
   color: var(--text);
 }
 
+.session-tab-add {
+  min-width: 34px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+  border-style: dashed;
+}
+
 .quick-keys {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -262,44 +270,15 @@ button:active {
   transform: translateY(0);
 }
 
-.cli-segment {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.cli-btn {
-  min-height: 44px;
-  background: #151a31;
-  border-color: #3a3f5c;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.cli-btn.is-active {
-  background: rgba(54, 199, 164, 0.22);
-  color: #d8fff4;
-  border-color: rgba(54, 199, 164, 0.8);
-}
-
-.prompt-label {
-  display: block;
-  margin-top: 10px;
-  margin-bottom: 6px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-#prompt-input {
-  width: 100%;
-  padding: 0 12px;
-}
-
 .action-row {
-  margin-top: 10px;
+  margin-top: 8px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+#kill-btn {
+  grid-column: 1 / -1;
 }
 
 .btn {
@@ -312,11 +291,6 @@ button:active {
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-.btn-accent {
-  border-color: rgba(54, 199, 164, 0.8);
-  background: rgba(54, 199, 164, 0.15);
 }
 
 .btn-danger {
