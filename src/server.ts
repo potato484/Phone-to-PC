@@ -25,7 +25,6 @@ interface ControlSpawnMessage {
   cwd?: string;
   cols?: number;
   rows?: number;
-  prompt?: string;
 }
 
 interface ControlResizeMessage {
@@ -57,7 +56,14 @@ const TERMINAL_SEND_HIGH_WATER_BYTES = 64 * 1024;
 const TERMINAL_SEND_LOW_WATER_BYTES = 32 * 1024;
 
 function isCliKind(value: unknown): value is CliKind {
-  return value === 'claude' || value === 'codex' || value === 'gemini' || value === 'shell';
+  return value === 'shell';
+}
+
+function shortenSessionId(sessionId: string): string {
+  if (sessionId.length <= 12) {
+    return sessionId;
+  }
+  return `${sessionId.slice(0, 6)}...${sessionId.slice(-4)}`;
 }
 
 function normalizeDimension(value: unknown, fallback: number): number {
@@ -136,8 +142,7 @@ function parseControlMessage(raw: RawData): ControlMessage | undefined {
       cli: candidate.cli,
       cwd: typeof candidate.cwd === 'string' ? candidate.cwd : undefined,
       cols: typeof candidate.cols === 'number' ? candidate.cols : undefined,
-      rows: typeof candidate.rows === 'number' ? candidate.rows : undefined,
-      prompt: typeof candidate.prompt === 'string' ? candidate.prompt : undefined
+      rows: typeof candidate.rows === 'number' ? candidate.rows : undefined
     };
   }
 
@@ -499,8 +504,14 @@ ptyManager.onExit((sessionId, exitCode) => {
   broadcastSessions();
 
   if (task) {
-    const title = status === 'done' ? 'Task finished' : 'Task exited';
-    const body = `${task.cli} session ${sessionId} exited with code ${exitCode}`;
+    const shortId = shortenSessionId(sessionId);
+    const title = status === 'done' ? '任务已完成' : status === 'error' ? '任务异常退出' : '会话已终止';
+    const body =
+      status === 'done'
+        ? `会话 ${shortId} 已结束`
+        : status === 'error'
+          ? `会话 ${shortId} 退出码 ${exitCode}`
+          : `会话 ${shortId} 已被终止`;
     void pushService.notify(title, body, {
       sessionId,
       cli: task.cli,
@@ -537,14 +548,13 @@ controlWss.on('connection', (ws) => {
           cli: message.cli,
           cwd: message.cwd,
           cols,
-          rows,
-          prompt: message.prompt
+          rows
         });
 
         const task: TaskRecord = {
           id: sessionId,
           cli: message.cli,
-          prompt: message.prompt?.trim() ?? '',
+          prompt: '',
           cwd: info.cwd,
           status: 'running',
           createdAt: info.startedAt,

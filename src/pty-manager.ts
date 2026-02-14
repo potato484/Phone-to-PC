@@ -3,7 +3,7 @@ import { spawn, type IPty } from 'node-pty';
 import type { CliKind } from './store.js';
 
 const BUFFER_LIMIT_BYTES = 50 * 1024;
-const BUFFER_FLUSH_INTERVAL_MS = 16;
+const BUFFER_FLUSH_INTERVAL_MS = 4;
 const RING_INITIAL_CAPACITY = 16;
 
 export interface SpawnOptions {
@@ -12,7 +12,6 @@ export interface SpawnOptions {
   cwd?: string;
   cols: number;
   rows: number;
-  prompt?: string;
 }
 
 export interface SessionInfo {
@@ -40,10 +39,6 @@ interface BufferRing {
   head: number;
   length: number;
   totalBytes: number;
-}
-
-function quoteForShell(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function resolveDirectory(rawPath: string | undefined): string | undefined {
@@ -123,24 +118,8 @@ function ringToBufferArray(ring: BufferRing): Buffer[] {
   return result;
 }
 
-function buildCliCommand(cli: CliKind, prompt?: string): string | null {
-  if (cli === 'shell') {
-    return null;
-  }
-
-  let base = '';
-  if (cli === 'claude') {
-    base = 'claude --dangerously-skip-permissions';
-  } else if (cli === 'codex') {
-    base = 'codex --full-auto';
-  } else {
-    base = 'gemini';
-  }
-
-  if (prompt && prompt.trim().length > 0 && cli === 'claude') {
-    base += ` -p ${quoteForShell(prompt.trim())}`;
-  }
-  return base;
+function buildCliCommand(_cli: CliKind): string | null {
+  return null;
 }
 
 export class PtyManager {
@@ -190,7 +169,7 @@ export class PtyManager {
     }
 
     const cwd = normalizeCwd(options.cwd, this.defaultCwd);
-    const command = buildCliCommand(options.cli, options.prompt);
+    const command = buildCliCommand(options.cli);
 
     const pty = command
       ? spawn('/bin/bash', ['-lc', command], {

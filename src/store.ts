@@ -3,7 +3,7 @@ import path from 'node:path';
 
 const PERSIST_DEBOUNCE_MS = 500;
 
-export type CliKind = 'claude' | 'codex' | 'gemini' | 'shell';
+export type CliKind = 'shell';
 export type TaskStatus = 'running' | 'done' | 'error' | 'killed';
 
 export interface TaskRecord {
