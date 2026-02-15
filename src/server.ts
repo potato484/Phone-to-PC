@@ -1,7 +1,9 @@
 import 'dotenv/config';
 import fs from 'node:fs';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import qrcode from 'qrcode-terminal';
 import { createAuthMiddleware, ensureAuthToken, validateUpgradeToken } from './auth.js';
@@ -74,8 +76,23 @@ pushService.init({
 });
 
 const app = express();
-const publicDir = path.resolve(process.cwd(), 'public');
-const noVncDir = path.resolve(process.cwd(), 'node_modules', '@novnc', 'novnc');
+const runtimeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const publicDir = path.resolve(runtimeRoot, 'public');
+let noVncDir = path.resolve(runtimeRoot, 'node_modules', '@novnc', 'novnc');
+try {
+  const noVncPackageJson = require.resolve('@novnc/novnc/package.json');
+  noVncDir = path.dirname(noVncPackageJson);
+} catch {
+  // fallback to runtimeRoot-relative path
+}
+
+if (!fs.existsSync(publicDir)) {
+  console.log(`[c2p] warn: public assets directory missing: ${publicDir}`);
+}
+if (!fs.existsSync(noVncDir)) {
+  console.log(`[c2p] warn: noVNC assets directory missing: ${noVncDir}`);
+}
 
 app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.use(express.json({ limit: '1mb' }));
