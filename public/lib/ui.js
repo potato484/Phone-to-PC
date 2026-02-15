@@ -35,7 +35,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=11';
+const SERVICE_WORKER_URL = '/sw.js?v=12';
 
 function decodeEscapedSequence(input) {
   let output = '';
@@ -1174,6 +1174,9 @@ export function createUi({ getControl, getTerm }) {
     Actions.bind();
     Auth.init();
     term.init();
+    window.requestAnimationFrame(() => {
+      term.focusActivePane();
+    });
     Network.bind();
     Viewport.bind();
     Actions.initServiceWorker().catch(() => {});

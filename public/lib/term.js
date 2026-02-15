@@ -797,7 +797,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
           statusBar.setText('终端初始化失败');
           return;
         }
-        setActivePane(firstPane.id, { focus: false });
+        setActivePane(firstPane.id);
       }
 
       if (window.ResizeObserver && DOM.terminalWrap) {
@@ -874,7 +874,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         if (!pane) {
           return;
         }
-        setActivePane(pane.id, { focus: false });
+        setActivePane(pane.id);
       }
       await connectPane(pane, sessionId, options);
       if (pane.id === activePaneId) {
@@ -1015,6 +1015,15 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         return;
       }
       pane.terminal.clearSelection();
+    },
+
+    focusActivePane() {
+      const pane = getActivePane();
+      if (!pane || !pane.terminal || typeof pane.terminal.focus !== 'function') {
+        return false;
+      }
+      pane.terminal.focus();
+      return true;
     }
   };
 }
