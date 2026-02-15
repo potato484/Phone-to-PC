@@ -46,7 +46,6 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         statusBar.setSession(payload.sessionId);
         statusBar.setTerminal('warn');
         setActionButtonsEnabled(true);
-        actions.resetKillConfirm();
         void term.connect(payload.sessionId, { replayFrom: 0, cwd: payload.cwd });
         term.scheduleResize();
         const cli = payload.cli || 'shell';
@@ -83,13 +82,13 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
           toast.show(`会话已退出 (code=${code})`, code === 0 ? 'info' : 'danger');
         }
         delete State.sessionOffsets[exitedSessionId];
-        State.currentSessionId = '';
         State.killRequested = false;
         actions.resetKillRequest();
-        statusBar.setSession('');
-        setActionButtonsEnabled(false);
-        actions.resetKillConfirm();
-        term.disconnect();
+        if (!State.currentSessionId || State.currentSessionId === exitedSessionId) {
+          State.currentSessionId = '';
+          statusBar.setSession('');
+        }
+        setActionButtonsEnabled(!!State.currentSessionId && !State.killInFlight);
         return;
       }
 
@@ -101,13 +100,17 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         if (State.currentSessionId) {
           const activeSession = sessions.find((item) => item.id === State.currentSessionId);
           if (!activeSession) {
+            const missingSessionId = State.currentSessionId;
             State.currentSessionId = '';
             State.killRequested = false;
             actions.resetKillRequest();
             statusBar.setSession('');
             setActionButtonsEnabled(false);
-            actions.resetKillConfirm();
-            term.disconnect();
+            if (typeof term.handleSessionExit === 'function') {
+              term.handleSessionExit(missingSessionId);
+            } else {
+              term.disconnect();
+            }
           } else {
             if (activeSession.cwd) {
               State.cwd = activeSession.cwd;
@@ -133,7 +136,6 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
             statusBar.setCwd(latest.cwd);
           }
           setActionButtonsEnabled(true);
-          actions.resetKillConfirm();
           void term.reconnect(latest.id);
           term.scheduleResize();
         } else if (sessions.length > 0) {

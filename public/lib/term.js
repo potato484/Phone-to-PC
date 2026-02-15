@@ -743,9 +743,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     return pane;
   }
 
-  function removePane(paneId) {
+  function removePane(paneId, options = {}) {
+    const { allowEmpty = false } = options;
     const pane = getPane(paneId);
-    if (!pane || panes.size <= 1) {
+    if (!pane || (!allowEmpty && panes.size <= 1)) {
       return false;
     }
     const removeIndex = paneOrder.indexOf(paneId);
@@ -780,6 +781,35 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
     updatePaneOrderingAndLayout();
     return true;
+  }
+
+  function closePanesBySession(sessionId) {
+    if (!sessionId) {
+      return 0;
+    }
+    const targetPaneIds = paneOrder.filter((paneId) => {
+      const pane = getPane(paneId);
+      return !!(pane && pane.sessionId === sessionId);
+    });
+    if (targetPaneIds.length === 0) {
+      return 0;
+    }
+
+    let removedCount = 0;
+    targetPaneIds.forEach((paneId) => {
+      if (removePane(paneId, { allowEmpty: true })) {
+        removedCount += 1;
+      }
+    });
+
+    if (panes.size === 0) {
+      const fallbackPane = createPane();
+      if (fallbackPane) {
+        setActivePane(fallbackPane.id, { focus: false });
+      }
+    }
+    syncLegacyStateFromActivePane();
+    return removedCount;
   }
 
   return {
@@ -921,6 +951,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       if (!sessionId) {
         return;
       }
+      if (closePanesBySession(sessionId) > 0) {
+        return;
+      }
       panes.forEach((pane) => {
         if (pane.sessionId !== sessionId) {
           return;
@@ -928,6 +961,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         disconnectPane(pane, { clearSession: true });
       });
       syncLegacyStateFromActivePane();
+    },
+
+    closePanesBySession(sessionId) {
+      return closePanesBySession(sessionId);
     },
 
     openSessionInNewPane(sessionId, options = {}) {

@@ -11,6 +11,7 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --dock-bottom-offset: 0px;
   --dock-height: 180px;
+  --session-tab-delete-width: 84px;
 }
 
 * {
@@ -33,9 +34,9 @@ body {
 
 button,
 input {
-  min-height: 44px;
+  min-height: 40px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 10px;
   background: #141833;
   color: var(--text);
   font: inherit;
@@ -151,6 +152,10 @@ button:active {
   flex-direction: column;
   gap: 8px;
   padding: 10px 10px calc(14px + var(--dock-height));
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
 }
 
 .terminal-reconnect {
@@ -190,8 +195,8 @@ button:active {
 }
 
 .terminal-grid {
-  min-height: 0;
-  flex: 1;
+  min-height: clamp(280px, 62vh, 760px);
+  flex: 1 0 auto;
   display: grid;
   gap: 8px;
 }
@@ -218,7 +223,7 @@ button:active {
 }
 
 .terminal-pane {
-  min-height: 0;
+  min-height: 176px;
   display: grid;
   grid-template-rows: auto 1fr;
   border: 1px solid var(--border);
@@ -313,7 +318,7 @@ button:active {
 
 .session-tabs {
   display: grid;
-  grid-auto-rows: minmax(42px, auto);
+  grid-auto-rows: minmax(40px, auto);
   gap: 8px;
   height: 33vh;
   height: 33dvh;
@@ -339,26 +344,72 @@ button:active {
 
 .session-tab {
   width: 100%;
-  min-height: 44px;
+  min-height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
-  padding: 0 12px;
-  border-radius: 10px;
+  padding: 0 10px;
+  border-radius: 9px;
   border: 1px solid var(--border);
   background: #14192f;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: left;
+  position: relative;
+  z-index: 1;
+  transform: translateX(var(--swipe-offset, 0px));
+  transition: transform 180ms ease;
 }
 
 .session-tab.is-active {
   border-color: rgba(54, 199, 164, 0.8);
   background: rgba(54, 199, 164, 0.15);
   color: var(--text);
+}
+
+.session-tab-item {
+  position: relative;
+  border-radius: 9px;
+  overflow: hidden;
+  --swipe-offset: 0px;
+}
+
+.session-tab-item.is-swiping .session-tab,
+.session-tab-item.is-swiping .session-tab-delete {
+  transition: none;
+}
+
+.session-tab-item.is-swipe-open {
+  --swipe-offset: calc(var(--session-tab-delete-width) * -1);
+}
+
+.session-tab-delete {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--session-tab-delete-width);
+  min-height: 40px;
+  border: 1px solid rgba(231, 76, 94, 0.9);
+  border-left: 0;
+  border-radius: 0;
+  background: rgba(231, 76, 94, 0.26);
+  color: #ffdce0;
+  font-size: 12px;
+  font-weight: 600;
+  transform: translateX(calc(100% + var(--swipe-offset, 0px)));
+  transition:
+    transform 180ms ease,
+    opacity 160ms ease;
+}
+
+.session-tab-item.is-delete-pending .session-tab-delete,
+.session-tab-delete:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
 }
 
 .session-tab-add {
@@ -376,7 +427,7 @@ button:active {
 .quick-actions {
   margin-top: 8px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
 }
 
@@ -395,13 +446,13 @@ button:active {
 }
 
 .quick-key-btn {
-  min-height: 44px;
-  border-radius: 10px;
+  min-height: 40px;
+  border-radius: 9px;
   border-color: #363c55;
   background: #1a1f3a;
   color: var(--text);
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 13px;
+  font-size: 12px;
   user-select: none;
 }
 
@@ -474,12 +525,6 @@ button:active {
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-#detach-btn.is-confirm {
-  background: rgba(231, 76, 94, 0.26);
-  border-color: rgba(231, 76, 94, 0.95);
-  color: #ffdce0;
 }
 
 .dock-card {

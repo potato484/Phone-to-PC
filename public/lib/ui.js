@@ -303,7 +303,6 @@ export function createUi({ getControl, getTerm }) {
       State.currentSessionId = sessionId;
       State.killRequested = false;
       Actions.resetKillRequest();
-      Actions.resetKillConfirm();
       setActionButtonsEnabled(true);
       if (session && session.cwd) {
         State.cwd = session.cwd;
@@ -354,7 +353,6 @@ export function createUi({ getControl, getTerm }) {
       State.currentSessionId = sessionId;
       State.killRequested = false;
       Actions.resetKillRequest();
-      Actions.resetKillConfirm();
       setActionButtonsEnabled(true);
       StatusBar.setSession(sessionId);
       if (session && session.cwd) {
@@ -371,16 +369,85 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
 
+      const SWIPE_DELETE_WIDTH_PX = 84;
+      const SWIPE_LOCK_THRESHOLD_PX = 8;
+      const SWIPE_OPEN_THRESHOLD_PX = 34;
+      const SWIPE_VERTICAL_TOLERANCE_PX = 24;
+
       let longPressTimer = 0;
       let longPressSessionId = '';
       let suppressClick = false;
       let pointerStartX = 0;
       let pointerStartY = 0;
+      let swipePointerId = null;
+      let swipeTarget = null;
+      let swipeStartX = 0;
+      let swipeStartY = 0;
+      let swipeStartOffset = 0;
+      let swipeOffset = 0;
+      let swipeGesture = '';
+
       const clearLongPress = () => {
         if (longPressTimer) {
           window.clearTimeout(longPressTimer);
           longPressTimer = 0;
         }
+      };
+      const closeSwipeActions = (exceptSessionId = '') => {
+        DOM.sessionTabs.querySelectorAll('.session-tab-item.is-swipe-open').forEach((item) => {
+          const sessionId = item.dataset.sessionId || '';
+          if (exceptSessionId && sessionId === exceptSessionId) {
+            return;
+          }
+          item.classList.remove('is-swipe-open', 'is-delete-pending', 'is-swiping');
+          item.style.removeProperty('--swipe-offset');
+        });
+      };
+      const beginSwipeTracking = (item, event) => {
+        swipePointerId = event.pointerId;
+        swipeTarget = item;
+        swipeStartX = event.clientX;
+        swipeStartY = event.clientY;
+        swipeStartOffset = item.classList.contains('is-swipe-open') ? -SWIPE_DELETE_WIDTH_PX : 0;
+        swipeOffset = swipeStartOffset;
+        swipeGesture = 'pending';
+        if (!item.classList.contains('is-swipe-open')) {
+          closeSwipeActions(item.dataset.sessionId || '');
+        }
+      };
+      const endSwipeTracking = ({ suppress = false } = {}) => {
+        if (!swipeTarget) {
+          swipePointerId = null;
+          swipeGesture = '';
+          swipeOffset = 0;
+          swipeStartOffset = 0;
+          return;
+        }
+        const target = swipeTarget;
+        const pointerId = swipePointerId;
+        target.classList.remove('is-swiping');
+        target.style.removeProperty('--swipe-offset');
+        if (swipeGesture === 'horizontal') {
+          target.classList.toggle('is-swipe-open', swipeOffset <= -SWIPE_OPEN_THRESHOLD_PX);
+          if (!target.classList.contains('is-swipe-open')) {
+            target.classList.remove('is-delete-pending');
+          }
+          if (suppress) {
+            suppressClick = true;
+          }
+        }
+        if (Number.isInteger(pointerId) && target.hasPointerCapture && target.hasPointerCapture(pointerId)) {
+          try {
+            target.releasePointerCapture(pointerId);
+          } catch {
+            // ignore release failure
+          }
+        }
+        swipePointerId = null;
+        swipeTarget = null;
+        swipeGesture = '';
+        swipeOffset = 0;
+        swipeStartOffset = 0;
       };
 
       DOM.sessionTabs.addEventListener('click', (event) => {
@@ -388,13 +455,37 @@ export function createUi({ getControl, getTerm }) {
           suppressClick = false;
           return;
         }
+        const deleteButton = event.target.closest('.session-tab-delete[data-session-id]');
+        if (deleteButton) {
+          const sessionId = deleteButton.dataset.sessionId || '';
+          if (!sessionId || sessionId !== State.currentSessionId || State.killInFlight) {
+            return;
+          }
+          const sent = Actions.requestKill(sessionId);
+          if (sent) {
+            const item = deleteButton.closest('.session-tab-item[data-session-id]');
+            if (item) {
+              item.classList.add('is-swipe-open', 'is-delete-pending');
+              item.style.removeProperty('--swipe-offset');
+            }
+          }
+          return;
+        }
         const addButton = event.target.closest('.session-tab-add');
         if (addButton) {
+          closeSwipeActions();
           Actions.spawn();
           return;
         }
         const tab = event.target.closest('.session-tab[data-session-id]');
         if (!tab) {
+          closeSwipeActions();
+          return;
+        }
+        const tabItem = tab.closest('.session-tab-item[data-session-id]');
+        if (tabItem && tabItem.classList.contains('is-swipe-open')) {
+          tabItem.classList.remove('is-swipe-open', 'is-delete-pending');
+          tabItem.style.removeProperty('--swipe-offset');
           return;
         }
         const sessionId = tab.dataset.sessionId;
@@ -405,7 +496,82 @@ export function createUi({ getControl, getTerm }) {
           setActionButtonsEnabled(true);
           return;
         }
+        closeSwipeActions();
         this.activateSession(sessionId);
+      });
+
+      DOM.sessionTabs.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse') {
+          return;
+        }
+        const tabItem = event.target.closest('.session-tab-item[data-session-id]');
+        if (!tabItem) {
+          closeSwipeActions();
+          return;
+        }
+        beginSwipeTracking(tabItem, event);
+        if (tabItem.setPointerCapture) {
+          try {
+            tabItem.setPointerCapture(event.pointerId);
+          } catch {
+            // ignore capture failure
+          }
+        }
+      });
+
+      DOM.sessionTabs.addEventListener('pointermove', (event) => {
+        if (!swipeTarget || swipePointerId !== event.pointerId || event.pointerType === 'mouse') {
+          return;
+        }
+        const deltaX = event.clientX - swipeStartX;
+        const deltaY = event.clientY - swipeStartY;
+
+        if (swipeGesture === 'pending') {
+          if (Math.abs(deltaX) < SWIPE_LOCK_THRESHOLD_PX && Math.abs(deltaY) < SWIPE_LOCK_THRESHOLD_PX) {
+            return;
+          }
+          const sessionId = swipeTarget.dataset.sessionId || '';
+          const canSwipeDelete =
+            sessionId &&
+            sessionId === State.currentSessionId &&
+            swipeTarget.classList.contains('is-active') &&
+            !State.killInFlight;
+          if (Math.abs(deltaY) > Math.abs(deltaX) || Math.abs(deltaY) > SWIPE_VERTICAL_TOLERANCE_PX) {
+            swipeGesture = 'vertical';
+            return;
+          }
+          if (!canSwipeDelete || (deltaX >= 0 && swipeStartOffset === 0)) {
+            swipeGesture = 'blocked';
+            return;
+          }
+          swipeGesture = 'horizontal';
+          swipeTarget.classList.add('is-swiping');
+        }
+        if (swipeGesture !== 'horizontal') {
+          return;
+        }
+
+        event.preventDefault();
+        const nextOffset = Math.max(-SWIPE_DELETE_WIDTH_PX, Math.min(0, swipeStartOffset + deltaX));
+        swipeOffset = nextOffset;
+        swipeTarget.style.setProperty('--swipe-offset', `${nextOffset}px`);
+      });
+
+      const completeSwipeFromPointerEvent = (event, options = {}) => {
+        if (!swipeTarget || swipePointerId !== event.pointerId) {
+          return;
+        }
+        endSwipeTracking(options);
+      };
+
+      DOM.sessionTabs.addEventListener('pointerup', (event) => {
+        completeSwipeFromPointerEvent(event, { suppress: swipeGesture === 'horizontal' });
+      });
+      DOM.sessionTabs.addEventListener('pointercancel', (event) => {
+        completeSwipeFromPointerEvent(event, { suppress: swipeGesture === 'horizontal' });
+      });
+      DOM.sessionTabs.addEventListener('lostpointercapture', (event) => {
+        completeSwipeFromPointerEvent(event, { suppress: swipeGesture === 'horizontal' });
       });
 
       const allowLongPressOpen =
@@ -417,8 +583,14 @@ export function createUi({ getControl, getTerm }) {
       }
 
       DOM.sessionTabs.addEventListener('pointerdown', (event) => {
+        if (event.pointerType !== 'mouse') {
+          return;
+        }
         const tab = event.target.closest('.session-tab[data-session-id]');
         if (!tab || tab.classList.contains('session-tab-add')) {
+          return;
+        }
+        if (tab.closest('.session-tab-item.is-swipe-open')) {
           return;
         }
         const sessionId = tab.dataset.sessionId;
@@ -469,10 +641,29 @@ export function createUi({ getControl, getTerm }) {
       if (!DOM.sessionTabs) {
         return;
       }
-      DOM.sessionTabs.querySelectorAll('.session-tab[data-session-id]').forEach((button) => {
-        const active = button.dataset.sessionId === State.currentSessionId;
-        button.classList.toggle('is-active', active);
-        button.setAttribute('aria-selected', active ? 'true' : 'false');
+      const pendingSessionId = State.killInFlight ? State.currentSessionId : '';
+      DOM.sessionTabs.querySelectorAll('.session-tab-item[data-session-id]').forEach((item) => {
+        const sessionId = item.dataset.sessionId || '';
+        const tab = item.querySelector('.session-tab[data-session-id]');
+        const deleteButton = item.querySelector('.session-tab-delete[data-session-id]');
+        const active = sessionId === State.currentSessionId;
+        const pending = !!pendingSessionId && sessionId === pendingSessionId;
+
+        item.classList.toggle('is-active', active);
+        item.classList.toggle('is-delete-pending', pending);
+        if (!active) {
+          item.classList.remove('is-swipe-open');
+          item.style.removeProperty('--swipe-offset');
+        }
+
+        if (tab) {
+          tab.classList.toggle('is-active', active);
+          tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        }
+        if (deleteButton) {
+          deleteButton.disabled = pending || !active;
+          deleteButton.setAttribute('aria-hidden', active ? 'false' : 'true');
+        }
       });
     },
 
@@ -487,8 +678,14 @@ export function createUi({ getControl, getTerm }) {
 
       const fragment = document.createDocumentFragment();
       sessions.forEach((session) => {
-        const button = document.createElement('button');
         const active = session.id === State.currentSessionId;
+        const pending = active && State.killInFlight;
+
+        const item = document.createElement('div');
+        item.className = active ? 'session-tab-item is-active' : 'session-tab-item';
+        item.dataset.sessionId = session.id;
+
+        const button = document.createElement('button');
         button.type = 'button';
         button.className = active ? 'session-tab is-active' : 'session-tab';
         button.dataset.sessionId = session.id;
@@ -500,7 +697,21 @@ export function createUi({ getControl, getTerm }) {
         button.setAttribute('aria-selected', active ? 'true' : 'false');
         const cliLabel = session.cli || 'session';
         button.textContent = `${cliLabel} ${shortenSessionId(session.id)}`;
-        fragment.appendChild(button);
+
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'session-tab-delete';
+        deleteButton.dataset.sessionId = session.id;
+        deleteButton.textContent = '删除';
+        deleteButton.title = '删除会话';
+        deleteButton.disabled = pending || !active;
+
+        item.appendChild(button);
+        item.appendChild(deleteButton);
+        if (pending) {
+          item.classList.add('is-delete-pending');
+        }
+        fragment.appendChild(item);
       });
 
       const add = document.createElement('button');
@@ -513,15 +724,13 @@ export function createUi({ getControl, getTerm }) {
 
       DOM.sessionTabs.appendChild(fragment);
       DOM.sessionTabs.hidden = false;
+      this.renderActiveState();
       return sessions;
     }
   };
 
   const Actions = {
     bind() {
-      if (DOM.detachBtn) {
-        DOM.detachBtn.addEventListener('click', () => this.detach());
-      }
       if (DOM.splitToggleBtn) {
         DOM.splitToggleBtn.addEventListener('click', () => {
           const term = getTerm();
@@ -538,7 +747,11 @@ export function createUi({ getControl, getTerm }) {
         window.clearTimeout(State.killRequestTimer);
         State.killRequestTimer = 0;
       }
+      const wasKillInFlight = State.killInFlight;
       State.killInFlight = false;
+      if (wasKillInFlight) {
+        SessionTabs.renderActiveState();
+      }
     },
 
     spawn() {
@@ -550,7 +763,6 @@ export function createUi({ getControl, getTerm }) {
       }
       this.resetKillRequest();
       State.killRequested = false;
-      this.resetKillConfirm();
       const ok = control
         ? control.send({
             type: 'spawn',
@@ -569,65 +781,43 @@ export function createUi({ getControl, getTerm }) {
       Dock.collapse();
     },
 
-    detach() {
+    requestKill(sessionId) {
       const control = getControl();
-      if (!State.currentSessionId || !control) {
-        return;
+      const targetSessionId = sessionId || State.currentSessionId;
+      if (!targetSessionId || !control || State.killInFlight) {
+        return false;
       }
-      if (State.killInFlight) {
-        return;
-      }
-      if (!State.killConfirmArmed) {
-        State.killConfirmArmed = true;
-        if (DOM.detachBtn) {
-          DOM.detachBtn.textContent = '确认关闭';
-          DOM.detachBtn.classList.add('is-confirm');
-        }
-        StatusBar.setText('再次点击以确认关闭当前会话');
-        State.killConfirmTimer = window.setTimeout(() => {
-          this.resetKillConfirm();
-        }, 3000);
-        return;
-      }
-
       const ok = control.send({
         type: 'kill',
-        sessionId: State.currentSessionId
+        sessionId: targetSessionId
       });
-      this.resetKillConfirm();
       if (!ok) {
         StatusBar.setText('关闭请求发送失败');
         Toast.show('关闭请求发送失败', 'danger');
-        return;
+        return false;
       }
-      State.killRequested = true;
+      State.killRequested = targetSessionId === State.currentSessionId;
       State.killInFlight = true;
       setActionButtonsEnabled(false);
+      SessionTabs.renderActiveState();
       StatusBar.setText('关闭请求已发送，等待会话退出...');
       Toast.show('关闭请求已发送', 'warn');
+      if (State.killRequestTimer) {
+        window.clearTimeout(State.killRequestTimer);
+      }
       State.killRequestTimer = window.setTimeout(() => {
         State.killRequestTimer = 0;
-        if (!State.killInFlight || !State.currentSessionId) {
+        if (!State.killInFlight) {
           return;
         }
         State.killInFlight = false;
         State.killRequested = false;
-        setActionButtonsEnabled(true);
+        setActionButtonsEnabled(!!State.currentSessionId);
+        SessionTabs.renderActiveState();
         StatusBar.setText('关闭超时，可重试');
         Toast.show('关闭超时，可再次尝试', 'warn');
       }, KILL_REQUEST_TIMEOUT_MS);
-    },
-
-    resetKillConfirm() {
-      if (State.killConfirmTimer) {
-        window.clearTimeout(State.killConfirmTimer);
-        State.killConfirmTimer = 0;
-      }
-      State.killConfirmArmed = false;
-      if (DOM.detachBtn) {
-        DOM.detachBtn.textContent = '关闭终端';
-        DOM.detachBtn.classList.remove('is-confirm');
-      }
+      return true;
     },
 
     async initServiceWorker() {

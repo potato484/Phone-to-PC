@@ -15,7 +15,6 @@ export const DOM = {
   sessionTabs: document.getElementById('session-tabs'),
   quickKeys: document.getElementById('quick-keys'),
   splitToggleBtn: document.getElementById('split-toggle-btn'),
-  detachBtn: document.getElementById('detach-btn'),
   filesPath: document.getElementById('files-path'),
   filesList: document.getElementById('files-list'),
   filesRefreshBtn: document.getElementById('files-refresh-btn'),
@@ -134,9 +133,7 @@ export const State = {
   pushAutoRequested: false,
   serviceWorkerRegistration: null,
   sessionOffsets: {},
-  killConfirmTimer: 0,
   killRequestTimer: 0,
-  killConfirmArmed: false,
   killInFlight: false,
   killRequested: false
 };
@@ -309,10 +306,7 @@ export async function fetchSessionLogBytes(sessionId) {
 }
 
 export function setActionButtonsEnabled(enabled) {
-  const nextEnabled = !!enabled;
-  if (DOM.detachBtn) {
-    DOM.detachBtn.disabled = !nextEnabled || State.killInFlight;
-  }
+  void enabled;
 }
 
 export function urlBase64ToUint8Array(base64String) {
