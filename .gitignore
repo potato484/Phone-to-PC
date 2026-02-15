@@ -23,5 +23,6 @@ dist/
 .auth-token
 .c2p-store.json
 .c2p-sessions/
-方案
+方案初级版本
+方案进阶版本
 .pnpm-store

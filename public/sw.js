@@ -1,9 +1,13 @@
-const CACHE_NAME = 'c2p-v1';
+const CACHE_NAME = 'c2p-v2';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
   '/style.css',
   '/app.js',
+  '/lib/state.js',
+  '/lib/term.js',
+  '/lib/control.js',
+  '/lib/ui.js',
   '/manifest.json',
   '/vendor/xterm.css',
   '/vendor/xterm.js',
