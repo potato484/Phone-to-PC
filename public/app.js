@@ -62,6 +62,8 @@
     dockMeasureRafId: 0,
     controlConnected: false,
     terminalConnected: false,
+    terminalReconnectDelayMs: 1000,
+    terminalReconnectTimer: 0,
     reconnectDelayMs: 1000,
     reconnectTimer: 0,
     initialSessionsReceived: false,
@@ -567,7 +569,25 @@
       State.terminalWriteInProgress = false;
       State.terminalBackpressured = false;
     },
+    cancelTerminalReconnect() {
+      if (State.terminalReconnectTimer) {
+        window.clearTimeout(State.terminalReconnectTimer);
+        State.terminalReconnectTimer = 0;
+      }
+    },
+    bindTerminalInput() {
+      if (!State.terminal) {
+        return;
+      }
+      if (State.terminalInputDisposable) {
+        State.terminalInputDisposable.dispose();
+      }
+      State.terminalInputDisposable = State.terminal.onData((data) => {
+        this.sendData(data);
+      });
+    },
     disconnect() {
+      this.cancelTerminalReconnect();
       if (State.terminalInputDisposable) {
         State.terminalInputDisposable.dispose();
         State.terminalInputDisposable = null;
@@ -581,15 +601,109 @@
       State.terminalConnected = false;
       StatusBar.setTerminal('offline');
     },
-    connect(sessionId) {
-      if (!State.terminal) {
+    scheduleTerminalReconnect(sessionId) {
+      if (!sessionId || sessionId !== State.currentSessionId) {
+        return;
+      }
+      this.cancelTerminalReconnect();
+      const delay = State.terminalReconnectDelayMs;
+      StatusBar.setTerminal('warn');
+      StatusBar.setText(`终端连接断开，${Math.ceil(delay / 1000)}s 后重连...`);
+      State.terminalReconnectTimer = window.setTimeout(() => {
+        State.terminalReconnectTimer = 0;
+        if (sessionId !== State.currentSessionId) {
+          return;
+        }
+        State.terminalReconnectDelayMs = Math.min(State.terminalReconnectDelayMs * 2, 20000);
+        void this.reconnect(sessionId);
+      }, delay);
+    },
+    async reconnect(sessionId) {
+      if (!State.terminal || !sessionId || sessionId !== State.currentSessionId) {
         return;
       }
 
       this.disconnect();
       State.terminal.write('\x1bc');
+      this.queueServerOutput('正在加载历史输出...\r\n');
 
-      const socket = new WebSocket(wsUrl('/ws/terminal', { session: sessionId }));
+      let replayFrom = 0;
+      try {
+        const response = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/log`));
+        if (!response.ok) {
+          throw new Error(`history fetch failed: ${response.status}`);
+        }
+
+        const expectedBytes = Number.parseInt(response.headers.get('X-Log-Bytes') || '0', 10);
+        let streamedBytes = 0;
+        const replayDecoder = new TextDecoder();
+
+        if (response.body && typeof response.body.getReader === 'function') {
+          const reader = response.body.getReader();
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+              break;
+            }
+            if (!value || value.byteLength === 0) {
+              continue;
+            }
+            streamedBytes += value.byteLength;
+            const text = replayDecoder.decode(value, { stream: true });
+            if (text) {
+              this.queueServerOutput(text);
+            }
+          }
+          const tail = replayDecoder.decode();
+          if (tail) {
+            this.queueServerOutput(tail);
+          }
+        } else {
+          const text = await response.text();
+          if (text) {
+            this.queueServerOutput(text);
+            streamedBytes = new Blob([text]).size;
+          }
+        }
+
+        replayFrom = Number.isFinite(expectedBytes) && expectedBytes > 0 ? expectedBytes : streamedBytes;
+      } catch {
+        this.queueServerOutput('\r\n[c2p] 历史输出加载失败，切换到实时流。\r\n');
+      }
+
+      if (sessionId !== State.currentSessionId) {
+        return;
+      }
+
+      this.connect(sessionId, {
+        clearTerminal: false,
+        replayFrom,
+        keepReconnectDelay: true
+      });
+    },
+    connect(sessionId, options = {}) {
+      if (!State.terminal) {
+        return;
+      }
+      const {
+        clearTerminal = true,
+        replayFrom = 0,
+        keepReconnectDelay = false
+      } = options;
+
+      this.disconnect();
+      if (clearTerminal) {
+        State.terminal.write('\x1bc');
+      }
+      if (!keepReconnectDelay) {
+        State.terminalReconnectDelayMs = 1000;
+      }
+
+      const extraParams = { session: sessionId };
+      if (replayFrom > 0) {
+        extraParams.replayFrom = replayFrom;
+      }
+      const socket = new WebSocket(wsUrl('/ws/terminal', extraParams));
       socket.binaryType = 'arraybuffer';
       State.terminalSocket = socket;
       StatusBar.setTerminal('warn');
@@ -599,11 +713,10 @@
           return;
         }
         State.terminalConnected = true;
+        State.terminalReconnectDelayMs = 1000;
         StatusBar.setTerminal('online');
         StatusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
-        State.terminalInputDisposable = State.terminal.onData((data) => {
-          this.sendData(data);
-        });
+        this.bindTerminalInput();
       };
 
       socket.onmessage = (event) => {
@@ -626,8 +739,7 @@
         State.terminalConnected = false;
         this.resetIoBuffers();
         if (State.currentSessionId === sessionId) {
-          StatusBar.setTerminal('warn');
-          StatusBar.setText('终端连接断开');
+          this.scheduleTerminalReconnect(sessionId);
         }
       };
     }
@@ -713,9 +825,19 @@
             }
             Actions.resetKillConfirm();
             Term.disconnect();
-          } else if (activeSession.cwd) {
-            State.cwd = activeSession.cwd;
-            StatusBar.setCwd(activeSession.cwd);
+          } else {
+            if (activeSession.cwd) {
+              State.cwd = activeSession.cwd;
+              StatusBar.setCwd(activeSession.cwd);
+            }
+            const canReconnect =
+              !State.terminalConnected &&
+              (!State.terminalSocket || State.terminalSocket.readyState === WebSocket.CLOSED) &&
+              !State.terminalReconnectTimer;
+            if (canReconnect) {
+              void Term.reconnect(activeSession.id);
+              Term.scheduleResize();
+            }
           }
         } else if (sessions.length > 0) {
           const latest = sessions[sessions.length - 1];
@@ -730,7 +852,7 @@
             DOM.killBtn.disabled = false;
           }
           Actions.resetKillConfirm();
-          Term.connect(latest.id);
+          void Term.reconnect(latest.id);
           Term.scheduleResize();
         } else if (isFirstSessionsMessage) {
           Actions.spawn();

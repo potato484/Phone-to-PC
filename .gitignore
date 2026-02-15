@@ -22,5 +22,6 @@ dist/
 .env
 .auth-token
 .c2p-store.json
+.c2p-sessions/
 方案
 .pnpm-store

@@ -1,10 +1,13 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { spawn, type IPty } from 'node-pty';
 import type { CliKind } from './store.js';
 
 const BUFFER_LIMIT_BYTES = 50 * 1024;
 const BUFFER_FLUSH_INTERVAL_MS = 4;
 const RING_INITIAL_CAPACITY = 16;
+const SESSION_LOG_DIR = path.join(process.cwd(), '.c2p-sessions');
+const SESSION_LOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface SpawnOptions {
   id: string;
@@ -29,6 +32,9 @@ interface SessionRecord {
   buffer: BufferRing;
   pendingData: string[];
   flushTimer: NodeJS.Timeout | null;
+  logStream: fs.WriteStream | null;
+  logPath: string;
+  logBytes: number;
 }
 
 type DataListener = (sessionId: string, data: string) => void;
@@ -130,6 +136,41 @@ export class PtyManager {
 
   constructor(defaultCwd = process.cwd()) {
     this.defaultCwd = normalizeCwd(defaultCwd, process.cwd());
+    fs.mkdirSync(SESSION_LOG_DIR, { recursive: true });
+    this.cleanStaleLogFiles();
+  }
+
+  private resolveSessionLogPath(sessionId: string): string | null {
+    const normalized = sessionId.trim();
+    if (!normalized || !/^[a-zA-Z0-9-]+$/.test(normalized)) {
+      return null;
+    }
+    return path.join(SESSION_LOG_DIR, `${normalized}.log`);
+  }
+
+  private cleanStaleLogFiles(): void {
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(SESSION_LOG_DIR, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    const now = Date.now();
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.log')) {
+        continue;
+      }
+      const target = path.join(SESSION_LOG_DIR, entry.name);
+      try {
+        const stat = fs.statSync(target);
+        if (now - stat.mtimeMs > SESSION_LOG_MAX_AGE_MS) {
+          fs.unlinkSync(target);
+        }
+      } catch {
+        // ignore cleanup failures for stale files
+      }
+    }
   }
 
   private flushData(sessionId: string, record: SessionRecord): void {
@@ -167,6 +208,10 @@ export class PtyManager {
     if (this.sessions.has(options.id)) {
       throw new Error(`Session already exists: ${options.id}`);
     }
+    const logPath = this.resolveSessionLogPath(options.id);
+    if (!logPath) {
+      throw new Error(`Invalid session id: ${options.id}`);
+    }
 
     const cwd = normalizeCwd(options.cwd, this.defaultCwd);
     const command = buildCliCommand(options.cli);
@@ -202,12 +247,27 @@ export class PtyManager {
       startedAt: new Date().toISOString()
     };
 
+    let existingLogBytes = 0;
+    try {
+      existingLogBytes = fs.statSync(logPath).size;
+    } catch {
+      existingLogBytes = 0;
+    }
+
+    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+    logStream.on('error', (error) => {
+      console.warn(`[c2p] session log write failed (${options.id}): ${error.message}`);
+    });
+
     const record: SessionRecord = {
       info,
       pty,
       buffer: createBufferRing(),
       pendingData: [],
-      flushTimer: null
+      flushTimer: null,
+      logStream,
+      logPath,
+      logBytes: existingLogBytes
     };
 
     pty.onData((data) => {
@@ -216,6 +276,10 @@ export class PtyManager {
 
       while (record.buffer.totalBytes > BUFFER_LIMIT_BYTES && record.buffer.length > 0) {
         shiftRingChunk(record.buffer);
+      }
+      if (record.logStream && !record.logStream.destroyed) {
+        record.logStream.write(chunk);
+        record.logBytes += chunk.byteLength;
       }
       record.pendingData.push(data);
       this.scheduleDataFlush(options.id, record);
@@ -227,6 +291,10 @@ export class PtyManager {
         record.flushTimer = null;
       }
       this.flushData(options.id, record);
+      if (record.logStream) {
+        record.logStream.end();
+        record.logStream = null;
+      }
       this.sessions.delete(options.id);
       for (const listener of this.exitListeners) {
         listener(options.id, exitCode);
@@ -269,6 +337,38 @@ export class PtyManager {
       return '';
     }
     return Buffer.concat(ringToBufferArray(session.buffer)).toString('utf8');
+  }
+
+  getLogPath(sessionId: string): string | null {
+    const active = this.sessions.get(sessionId);
+    if (active) {
+      return active.logPath;
+    }
+    const logPath = this.resolveSessionLogPath(sessionId);
+    if (!logPath) {
+      return null;
+    }
+    try {
+      if (fs.statSync(logPath).isFile()) {
+        return logPath;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  getLogBytes(sessionId: string): number {
+    const active = this.sessions.get(sessionId);
+    const logPath = active ? active.logPath : this.getLogPath(sessionId);
+    if (!logPath) {
+      return 0;
+    }
+    try {
+      return fs.statSync(logPath).size;
+    } catch {
+      return active ? active.logBytes : 0;
+    }
   }
 
   hasSession(sessionId: string): boolean {

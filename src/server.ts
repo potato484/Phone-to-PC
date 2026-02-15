@@ -79,6 +79,17 @@ function normalizeDimension(value: unknown, fallback: number): number {
   return rounded;
 }
 
+function parseReplayOffset(value: string | null): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
 function parseServerCliOptions(args: string[]): ServerCliOptions {
   const options: ServerCliOptions = {};
   for (let i = 0; i < args.length; i += 1) {
@@ -542,6 +553,42 @@ app.get('/api/sessions', (_req: Request, res: Response) => {
   res.json({ sessions: ptyManager.listSessions() });
 });
 
+app.get('/api/sessions/:id/log', (req: Request, res: Response) => {
+  const sessionId = typeof req.params.id === 'string' ? req.params.id : '';
+  const logPath = ptyManager.getLogPath(sessionId);
+  if (!logPath) {
+    res.status(404).json({ error: 'session log not found' });
+    return;
+  }
+
+  const logBytes = ptyManager.getLogBytes(sessionId);
+  const contentLength = Math.max(0, logBytes);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Length', String(contentLength));
+  res.setHeader('X-Log-Bytes', String(contentLength));
+  res.setHeader('Cache-Control', 'no-store');
+
+  if (contentLength === 0) {
+    res.status(200).end();
+    return;
+  }
+
+  const stream = fs.createReadStream(logPath, {
+    highWaterMark: 64 * 1024,
+    end: contentLength - 1
+  });
+
+  stream.on('error', () => {
+    if (!res.headersSent) {
+      res.status(404).json({ error: 'session log not found' });
+      return;
+    }
+    res.destroy();
+  });
+
+  stream.pipe(res);
+});
+
 app.get('/api/runtime', (_req: Request, res: Response) => {
   res.json({ cwd: defaultWorkingDirectory });
 });
@@ -683,6 +730,7 @@ terminalWss.on('connection', (ws, request) => {
   const host = request.headers.host ?? 'localhost';
   const parsed = new URL(request.url ?? '/', `http://${host}`);
   const sessionId = parsed.searchParams.get('session');
+  const replayFrom = parseReplayOffset(parsed.searchParams.get('replayFrom'));
 
   if (!sessionId || !ptyManager.hasSession(sessionId)) {
     ws.close(1008, 'invalid session');
@@ -776,9 +824,11 @@ terminalWss.on('connection', (ws, request) => {
     scheduleFlush();
   };
 
-  const replay = ptyManager.getBuffer(sessionId);
-  if (replay.length > 0) {
-    enqueueOutput(replay);
+  if (replayFrom === 0) {
+    const replay = ptyManager.getBuffer(sessionId);
+    if (replay.length > 0) {
+      enqueueOutput(replay);
+    }
   }
 
   const offData = ptyManager.onData((id, data) => {
