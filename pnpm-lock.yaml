@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@novnc/novnc':
+        specifier: ^1.6.0
+        version: 1.6.0
       '@xterm/addon-webgl':
         specifier: ^0.18.0
         version: 0.18.0(@xterm/xterm@5.5.0)
@@ -20,9 +23,6 @@ importers:
       node-pty:
         specifier: ^1.1.0
         version: 1.1.0
-      novnc:
-        specifier: ^1.2.0
-        version: 1.2.0
       qrcode-terminal:
         specifier: ^0.12.0
         version: 0.12.0
@@ -221,6 +221,9 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@novnc/novnc@1.6.0':
+    resolution: {integrity: sha512-CJrmdSe9Yt2ZbLsJpVFoVkEu0KICEvnr3njW25Nz0jodaiFJtg8AYLGZogRYy0/N5HUWkGUsCmegKXYBSqwygw==}
 
   '@types/body-parser@1.19.6':
     resolution: {integrity: sha512-HLFeCYgz89uk22N5Qg3dvGvsv46B8GLvKKo1zKG4NybA8U2DiEO3w9lqGg29t/tfLRJpJ6iQxnVw4OnB7MoM9g==}
@@ -519,9 +522,6 @@ packages:
   node-pty@1.1.0:
     resolution: {integrity: sha512-20JqtutY6JPXTUnL0ij1uad7Qe1baT46lyolh2sSENDd4sTzKZ4nmAFkeAARDKwmlLjPx6XKRlwRUxwjOy+lUg==}
 
-  novnc@1.2.0:
-    resolution: {integrity: sha512-bItTHPXsrKEs79nZoOKGp+qnj5I986suOFva+fgvkO8AO0Uhedn6+FYZTN7QCGS88F33gshzcy55302ke2PPjw==}
-
   object-inspect@1.13.4:
     resolution: {integrity: sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew==}
     engines: {node: '>= 0.4'}
@@ -742,6 +742,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.27.3':
     optional: true
+
+  '@novnc/novnc@1.6.0': {}
 
   '@types/body-parser@1.19.6':
     dependencies:
@@ -1091,8 +1093,6 @@ snapshots:
   node-pty@1.1.0:
     dependencies:
       node-addon-api: 7.1.1
-
-  novnc@1.2.0: {}
 
   object-inspect@1.13.4: {}
 

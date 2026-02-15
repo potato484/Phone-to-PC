@@ -303,6 +303,10 @@ button:active {
   backdrop-filter: blur(3px);
 }
 
+.desktop-credentials-modal[hidden] {
+  display: none !important;
+}
+
 .desktop-credentials-dialog {
   width: min(100%, 380px);
   border: 1px solid rgba(255, 255, 255, 0.16);
@@ -350,6 +354,10 @@ button:active {
 .desktop-credentials-submit {
   border-color: rgba(54, 199, 164, 0.7);
   background: rgba(54, 199, 164, 0.18);
+}
+
+.desktop-credentials-submit:disabled {
+  opacity: 0.72;
 }
 
 .terminal-reconnect {

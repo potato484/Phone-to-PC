@@ -75,7 +75,7 @@ pushService.init({
 
 const app = express();
 const publicDir = path.resolve(process.cwd(), 'public');
-const noVncDir = path.resolve(process.cwd(), 'node_modules', 'novnc');
+const noVncDir = path.resolve(process.cwd(), 'node_modules', '@novnc', 'novnc');
 
 app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.use(express.json({ limit: '1mb' }));

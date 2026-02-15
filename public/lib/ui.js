@@ -35,6 +35,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
+const SERVICE_WORKER_URL = '/sw.js?v=10';
 
 function decodeEscapedSequence(input) {
   let output = '';
@@ -643,7 +644,7 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
       try {
-        State.serviceWorkerRegistration = await navigator.serviceWorker.register('/sw.js');
+        State.serviceWorkerRegistration = await navigator.serviceWorker.register(SERVICE_WORKER_URL);
       } catch {
         StatusBar.setText('Service Worker 注册失败');
       }
@@ -692,7 +693,7 @@ export function createUi({ getControl, getTerm }) {
 
       let registration = State.serviceWorkerRegistration;
       if (!registration) {
-        registration = await navigator.serviceWorker.register('/sw.js');
+        registration = await navigator.serviceWorker.register(SERVICE_WORKER_URL);
         State.serviceWorkerRegistration = registration;
       }
 

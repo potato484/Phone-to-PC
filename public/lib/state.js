@@ -23,6 +23,7 @@ export const DOM = {
   desktopCredentialsPassword: document.getElementById('desktop-credentials-password'),
   desktopCredentialsTarget: document.getElementById('desktop-credentials-target'),
   desktopCredentialsCancelBtn: document.getElementById('desktop-credentials-cancel'),
+  desktopCredentialsSubmitBtn: document.getElementById('desktop-credentials-submit'),
   desktopInputTrackpadBtn: document.getElementById('desktop-input-trackpad-btn'),
   desktopInputDirectBtn: document.getElementById('desktop-input-direct-btn'),
   desktopFpsSelect: document.getElementById('desktop-fps-select'),

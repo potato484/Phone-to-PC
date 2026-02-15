@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v4';
+const CACHE_NAME = 'c2p-v10';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -18,8 +18,8 @@ const APP_SHELL_ASSETS = [
   '/vendor/xterm-addon-fit.js',
   '/vendor/xterm-addon-attach.js',
   '/vendor/xterm-addon-webgl.js',
-  '/vendor/novnc/core/rfb.js',
-  '/vendor/novnc/core/input/keysym.js'
+  '/vendor/novnc/lib/rfb.js',
+  '/vendor/novnc/lib/input/keysym.js'
 ];
 
 function shouldBypassRequest(url, request) {
@@ -27,6 +27,9 @@ function shouldBypassRequest(url, request) {
     return true;
   }
   if (url.origin !== self.location.origin) {
+    return true;
+  }
+  if (url.pathname === '/sw.js' || url.pathname === '/reset-cache.html') {
     return true;
   }
   return url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws/');

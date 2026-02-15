@@ -1,5 +1,5 @@
-import RFB from '/vendor/novnc/core/rfb.js';
-import KeyTable from '/vendor/novnc/core/input/keysym.js';
+import RFB from '/vendor/novnc/lib/rfb.js';
+import KeyTable from '/vendor/novnc/lib/input/keysym.js';
 import { DOM, State, wsUrl } from './state.js';
 
 const VIEW_MODE_STORAGE_KEY = 'c2p_view_mode_v1';
@@ -493,8 +493,7 @@ export function createDesktop({ getTerm, statusBar, toast }) {
 
     let nextRfb = null;
     try {
-      // novnc@1.2.0 core API uses constructor(target, touchInput, urlOrChannel, options)
-      nextRfb = new RFB(DOM.desktopCanvas, DOM.desktopCanvas, url, {
+      nextRfb = new RFB(DOM.desktopCanvas, url, {
         shared: true
       });
     } catch (error) {
@@ -555,13 +554,15 @@ export function createDesktop({ getTerm, statusBar, toast }) {
       }
     });
 
-    nextRfb.addEventListener('securityfailure', () => {
+    nextRfb.addEventListener('securityfailure', (event) => {
       if (rfb !== nextRfb) {
         return;
       }
+      const reason =
+        event && event.detail && typeof event.detail.reason === 'string' ? event.detail.reason.trim() : '';
       statusBar.setText('桌面安全协商失败');
       updateDesktopStatus('安全协商失败');
-      toast.show('桌面安全协商失败', 'danger');
+      toast.show(reason ? `桌面安全协商失败：${reason}` : '桌面安全协商失败', 'danger');
     });
 
     nextRfb.addEventListener('credentialsrequired', async (event) => {
