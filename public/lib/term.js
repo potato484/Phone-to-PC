@@ -1,16 +1,22 @@
 import {
+  CAPABILITY_TERMINAL_BINARY_V1,
   DOM,
   FitAddonCtor,
   RESIZE_DEBOUNCE_MS,
   State,
+  TERMINAL_BINARY_CODEC,
   TERMINAL_INPUT_BATCH_CHARS,
   TERMINAL_INPUT_DIRECT_CHARS,
+  TERMINAL_FRAME_TYPE_INPUT,
+  TERMINAL_FRAME_TYPE_OUTPUT,
   TERMINAL_REPLAY_TAIL_BYTES,
   TERMINAL_WRITE_HIGH_WATER_BYTES,
   TERMINAL_WRITE_LOW_WATER_BYTES,
   TerminalCtor,
   WebglAddonCtor,
   addSessionOffset,
+  decodeTerminalFrame,
+  encodeTerminalFrame,
   fetchSessionLogBytes,
   getSessionOffset,
   setSessionOffset,
@@ -163,17 +169,29 @@ export function createTerm({ getControl, statusBar, toast }) {
       State.lastResizeRows = rows;
     },
 
-    flushQueuedInput(socket) {
+    sendTerminalInput(socket, sessionId, data) {
+      if (!data) {
+        return;
+      }
+      if (State.terminalBinaryEnabled) {
+        socket.send(encodeTerminalFrame(TERMINAL_FRAME_TYPE_INPUT, sessionId, data));
+        return;
+      }
+      socket.send(data);
+    },
+
+    flushQueuedInput(socket, sessionId) {
       if (!State.terminalInputQueue) {
         return;
       }
-      socket.send(State.terminalInputQueue);
+      this.sendTerminalInput(socket, sessionId, State.terminalInputQueue);
       State.terminalInputQueue = '';
     },
 
     sendData(data) {
       const socket = State.terminalSocket;
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
+      const sessionId = State.currentSessionId;
+      if (!sessionId || !socket || socket.readyState !== WebSocket.OPEN) {
         return false;
       }
       if (!data) {
@@ -181,7 +199,7 @@ export function createTerm({ getControl, statusBar, toast }) {
       }
 
       if (data.length <= TERMINAL_INPUT_DIRECT_CHARS && !State.terminalInputQueue) {
-        socket.send(data);
+        this.sendTerminalInput(socket, sessionId, data);
         return true;
       }
 
@@ -190,8 +208,8 @@ export function createTerm({ getControl, statusBar, toast }) {
           window.cancelAnimationFrame(State.terminalInputRafId);
           State.terminalInputRafId = 0;
         }
-        this.flushQueuedInput(socket);
-        socket.send(data);
+        this.flushQueuedInput(socket, sessionId);
+        this.sendTerminalInput(socket, sessionId, data);
         return true;
       }
 
@@ -201,7 +219,7 @@ export function createTerm({ getControl, statusBar, toast }) {
           window.cancelAnimationFrame(State.terminalInputRafId);
           State.terminalInputRafId = 0;
         }
-        this.flushQueuedInput(socket);
+        this.flushQueuedInput(socket, sessionId);
         return true;
       }
 
@@ -212,7 +230,11 @@ export function createTerm({ getControl, statusBar, toast }) {
           if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || !State.terminalInputQueue) {
             return;
           }
-          this.flushQueuedInput(activeSocket);
+          const activeSessionId = State.currentSessionId;
+          if (!activeSessionId) {
+            return;
+          }
+          this.flushQueuedInput(activeSocket, activeSessionId);
         });
       }
       return true;
@@ -309,6 +331,7 @@ export function createTerm({ getControl, statusBar, toast }) {
         State.terminalSocket = null;
       }
       State.terminalConnected = false;
+      State.terminalBinaryEnabled = false;
       statusBar.setTerminal('offline');
     },
 
@@ -373,9 +396,17 @@ export function createTerm({ getControl, statusBar, toast }) {
         return;
       }
 
+      const supportsBinaryCodec =
+        Array.isArray(State.serverCapabilities) &&
+        State.serverCapabilities.includes(CAPABILITY_TERMINAL_BINARY_V1);
+      State.terminalBinaryEnabled = supportsBinaryCodec;
+
       const extraParams = { session: sessionId };
       if (effectiveReplayFrom > 0) {
         extraParams.replayFrom = effectiveReplayFrom;
+      }
+      if (supportsBinaryCodec) {
+        extraParams.codec = TERMINAL_BINARY_CODEC;
       }
       const socket = new WebSocket(wsUrl('/ws/terminal', extraParams));
       socket.binaryType = 'arraybuffer';
@@ -404,8 +435,17 @@ export function createTerm({ getControl, statusBar, toast }) {
           data = event.data;
           logBytes = textEncoder.encode(data).byteLength;
         } else if (event.data instanceof ArrayBuffer) {
-          logBytes = event.data.byteLength;
-          data = textDecoder.decode(event.data);
+          if (State.terminalBinaryEnabled) {
+            const frame = decodeTerminalFrame(event.data, sessionId);
+            if (!frame || frame.frameType !== TERMINAL_FRAME_TYPE_OUTPUT) {
+              return;
+            }
+            data = frame.payloadText;
+            logBytes = frame.payloadBytes;
+          } else {
+            logBytes = event.data.byteLength;
+            data = textDecoder.decode(event.data);
+          }
         }
         if (data) {
           this.queueServerOutput(data, {

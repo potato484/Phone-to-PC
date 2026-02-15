@@ -4,6 +4,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import type { PtyManager } from '../pty-manager.js';
 import type { WsChannel } from './channel.js';
+import { WS_PER_MESSAGE_DEFLATE } from './ws-config.js';
 
 interface TerminalChannelDeps {
   ptyManager: PtyManager;
@@ -13,6 +14,10 @@ const TERMINAL_SEND_BATCH_MS = 16;
 const TERMINAL_SEND_HIGH_WATER_BYTES = 64 * 1024;
 const TERMINAL_SEND_LOW_WATER_BYTES = 32 * 1024;
 const TERMINAL_REPLAY_CHUNK_BYTES = 64 * 1024;
+const TERMINAL_FRAME_HEADER_BYTES = 5;
+const TERMINAL_FRAME_TYPE_OUTPUT = 1;
+const TERMINAL_FRAME_TYPE_INPUT = 2;
+const TERMINAL_CODEC_BINARY_V1 = 'binary-v1';
 
 function parseReplayOffset(value: string | null): number {
   if (!value) {
@@ -25,17 +30,58 @@ function parseReplayOffset(value: string | null): number {
   return parsed;
 }
 
-function rawDataToString(raw: RawData): string {
-  if (typeof raw === 'string') {
+function useBinaryCodec(value: string | null): boolean {
+  return value === TERMINAL_CODEC_BINARY_V1;
+}
+
+function rawDataToBuffer(raw: RawData): Buffer {
+  if (Buffer.isBuffer(raw)) {
     return raw;
   }
-  if (Buffer.isBuffer(raw)) {
-    return raw.toString('utf8');
+  if (typeof raw === 'string') {
+    return Buffer.from(raw, 'utf8');
   }
   if (raw instanceof ArrayBuffer) {
-    return Buffer.from(raw).toString('utf8');
+    return Buffer.from(raw);
   }
-  return Buffer.concat(raw.map((part) => (Buffer.isBuffer(part) ? part : Buffer.from(part)))).toString('utf8');
+  return Buffer.concat(raw.map((part) => (Buffer.isBuffer(part) ? part : Buffer.from(part))));
+}
+
+function rawDataToString(raw: RawData): string {
+  return rawDataToBuffer(raw).toString('utf8');
+}
+
+function hashSessionId(sessionId: string): number {
+  const source = Buffer.from(sessionId, 'utf8');
+  let hash = 0x811c9dc5;
+  for (const byte of source) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function encodeTerminalFrame(frameType: number, sessionHash: number, payload: Buffer): Buffer {
+  const frame = Buffer.allocUnsafe(TERMINAL_FRAME_HEADER_BYTES + payload.byteLength);
+  frame[0] = frameType;
+  frame.writeUInt32BE(sessionHash >>> 0, 1);
+  payload.copy(frame, TERMINAL_FRAME_HEADER_BYTES);
+  return frame;
+}
+
+function decodeTerminalFrame(raw: RawData, expectedSessionHash: number): { frameType: number; payload: Buffer } | null {
+  const frame = rawDataToBuffer(raw);
+  if (frame.byteLength < TERMINAL_FRAME_HEADER_BYTES) {
+    return null;
+  }
+  const sessionHash = frame.readUInt32BE(1);
+  if (sessionHash !== expectedSessionHash) {
+    return null;
+  }
+  return {
+    frameType: frame[0],
+    payload: frame.subarray(TERMINAL_FRAME_HEADER_BYTES)
+  };
 }
 
 async function streamLogRange(
@@ -92,20 +138,22 @@ function trimChunkToOffset(
 
 export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
   const { ptyManager } = deps;
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: WS_PER_MESSAGE_DEFLATE });
 
   wss.on('connection', (ws, request) => {
     const host = request.headers.host ?? 'localhost';
     const parsed = new URL(request.url ?? '/', `http://${host}`);
     const sessionId = parsed.searchParams.get('session');
     const replayFrom = parseReplayOffset(parsed.searchParams.get('replayFrom'));
+    const binaryCodec = useBinaryCodec(parsed.searchParams.get('codec'));
 
     if (!sessionId || !ptyManager.hasSession(sessionId)) {
       ws.close(1008, 'invalid session');
       return;
     }
 
-    const sendQueue: string[] = [];
+    const sessionHash = hashSessionId(sessionId);
+    const sendQueue: Buffer[] = [];
     let queuedBytes = 0;
     let flushTimer: NodeJS.Timeout | null = null;
     let drainTimer: NodeJS.Timeout | null = null;
@@ -194,11 +242,14 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
         return;
       }
 
-      const payload = sendQueue.join('');
+      const payload = Buffer.concat(sendQueue, queuedBytes);
       sendQueue.length = 0;
       queuedBytes = 0;
+      const outbound = binaryCodec
+        ? encodeTerminalFrame(TERMINAL_FRAME_TYPE_OUTPUT, sessionHash, payload)
+        : payload.toString('utf8');
 
-      ws.send(payload, (error) => {
+      ws.send(outbound, (error) => {
         if (error && ws.readyState === WebSocket.OPEN) {
           ws.close(1011, 'terminal send failed');
           return;
@@ -221,8 +272,12 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
       if (!data || ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      sendQueue.push(data);
-      queuedBytes += Buffer.byteLength(data, 'utf8');
+      const chunk = Buffer.from(data, 'utf8');
+      if (chunk.byteLength === 0) {
+        return;
+      }
+      sendQueue.push(chunk);
+      queuedBytes += chunk.byteLength;
       if (queuedBytes >= TERMINAL_SEND_HIGH_WATER_BYTES) {
         applyFlowControl();
         flushQueue();
@@ -287,8 +342,19 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
       flushLiveQueue();
     })();
 
-    ws.on('message', (raw) => {
+    ws.on('message', (raw, isBinary) => {
       if (!ptyManager.hasSession(sessionId)) {
+        return;
+      }
+      if (isBinary) {
+        const frame = decodeTerminalFrame(raw, sessionHash);
+        if (!frame || frame.frameType !== TERMINAL_FRAME_TYPE_INPUT) {
+          ws.close(1003, 'invalid terminal frame');
+          return;
+        }
+        if (frame.payload.byteLength > 0) {
+          ptyManager.write(sessionId, frame.payload.toString('utf8'));
+        }
         return;
       }
       ptyManager.write(sessionId, rawDataToString(raw));

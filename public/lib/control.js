@@ -1,4 +1,11 @@
-import { State, setActionButtonsEnabled, setSessionOffset, wsUrl } from './state.js';
+import {
+  CONTROL_CLIENT_CAPABILITIES,
+  CONTROL_PROTOCOL_VERSION,
+  State,
+  setActionButtonsEnabled,
+  setSessionOffset,
+  wsUrl
+} from './state.js';
 
 export function createControl({ term, sessionTabs, statusBar, toast, actions }) {
   return {
@@ -21,6 +28,9 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
       }
 
       if (payload.type === 'hello') {
+        State.serverCapabilities = Array.isArray(payload.capabilities)
+          ? payload.capabilities.filter((entry) => typeof entry === 'string')
+          : [];
         return;
       }
 
@@ -176,8 +186,8 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         socket.send(
           JSON.stringify({
             type: 'hello',
-            version: 1,
-            capabilities: ['shell']
+            version: CONTROL_PROTOCOL_VERSION,
+            capabilities: CONTROL_CLIENT_CAPABILITIES
           })
         );
       };
@@ -192,6 +202,7 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         }
         State.controlSocket = null;
         State.controlConnected = false;
+        State.serverCapabilities = [];
         statusBar.setControl('warn');
         statusBar.setText('连接断开，正在重连...');
         toast.show('连接断开，正在重连...', 'warn');

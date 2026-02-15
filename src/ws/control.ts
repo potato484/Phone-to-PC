@@ -6,6 +6,7 @@ import type { PtyManager } from '../pty-manager.js';
 import type { PushService } from '../push.js';
 import type { C2PStore, CliKind, TaskRecord, TaskStatus } from '../store.js';
 import type { WsChannel } from './channel.js';
+import { WS_PER_MESSAGE_DEFLATE } from './ws-config.js';
 
 interface ControlHelloMessage {
   type: 'hello';
@@ -52,11 +53,9 @@ interface ControlChannelDeps {
   pushService: PushService;
 }
 
-const HELLO_PAYLOAD: ControlOutbound = {
-  type: 'hello',
-  version: 1,
-  capabilities: ['shell']
-};
+const CONTROL_PROTOCOL_VERSION = 1;
+const SERVER_CAPABILITIES = ['shell', 'terminal.binary.v1'] as const;
+const SERVER_CAPABILITY_SET = new Set<string>(SERVER_CAPABILITIES);
 
 function isCliKind(value: unknown): value is CliKind {
   return value === 'shell';
@@ -79,6 +78,45 @@ function shortenSessionId(sessionId: string): string {
     return sessionId;
   }
   return `${sessionId.slice(0, 6)}...${sessionId.slice(-4)}`;
+}
+
+function normalizeCapabilities(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== 'string') {
+      continue;
+    }
+    const capability = entry.trim();
+    if (!capability || seen.has(capability)) {
+      continue;
+    }
+    seen.add(capability);
+    output.push(capability);
+  }
+  return output;
+}
+
+function negotiateCapabilities(clientCapabilities: string[]): string[] {
+  if (clientCapabilities.length === 0) {
+    return [...SERVER_CAPABILITIES];
+  }
+  const negotiated = clientCapabilities.filter((capability) => SERVER_CAPABILITY_SET.has(capability));
+  if (negotiated.length === 0) {
+    return ['shell'];
+  }
+  return negotiated;
+}
+
+function createHelloPayload(capabilities: string[] = [...SERVER_CAPABILITIES]): ControlOutbound {
+  return {
+    type: 'hello',
+    version: CONTROL_PROTOCOL_VERSION,
+    capabilities
+  };
 }
 
 function parseControlMessage(raw: RawData): ControlMessage | undefined {
@@ -148,7 +186,7 @@ function sendControlMessage(ws: WebSocket, payload: ControlOutbound): void {
 
 export function createControlChannel(deps: ControlChannelDeps): WsChannel {
   const { ptyManager, store, pushService } = deps;
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: WS_PER_MESSAGE_DEFLATE });
   const controlClients = new Set<WebSocket>();
   const killRequested = new Set<string>();
 
@@ -200,7 +238,7 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
 
   wss.on('connection', (ws) => {
     controlClients.add(ws);
-    sendControlMessage(ws, HELLO_PAYLOAD);
+    sendControlMessage(ws, createHelloPayload());
     sendControlMessage(ws, { type: 'sessions', list: ptyManager.listSessions() });
 
     ws.on('message', (raw, isBinary) => {
@@ -216,7 +254,8 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
       }
 
       if (message.type === 'hello') {
-        sendControlMessage(ws, HELLO_PAYLOAD);
+        const clientCapabilities = normalizeCapabilities(message.capabilities);
+        sendControlMessage(ws, createHelloPayload(negotiateCapabilities(clientCapabilities)));
         return;
       }
 

@@ -37,6 +37,13 @@ export const TERMINAL_INPUT_BATCH_CHARS = 4096;
 export const RESIZE_DEBOUNCE_MS = 90;
 export const KILL_REQUEST_TIMEOUT_MS = 6000;
 export const TERMINAL_REPLAY_TAIL_BYTES = 64 * 1024;
+export const CONTROL_PROTOCOL_VERSION = 1;
+export const CAPABILITY_TERMINAL_BINARY_V1 = 'terminal.binary.v1';
+export const CONTROL_CLIENT_CAPABILITIES = ['shell', CAPABILITY_TERMINAL_BINARY_V1];
+export const TERMINAL_BINARY_CODEC = 'binary-v1';
+export const TERMINAL_FRAME_HEADER_BYTES = 5;
+export const TERMINAL_FRAME_TYPE_OUTPUT = 1;
+export const TERMINAL_FRAME_TYPE_INPUT = 2;
 
 export const textDecoder = new TextDecoder();
 export const textEncoder = new TextEncoder();
@@ -75,7 +82,9 @@ export const State = {
   lastResizeRows: 0,
   dockMeasureRafId: 0,
   controlConnected: false,
+  serverCapabilities: [],
   terminalConnected: false,
+  terminalBinaryEnabled: false,
   terminalReconnectDelayMs: 1000,
   terminalReconnectTimer: 0,
   terminalConnectSeq: 0,
@@ -190,6 +199,47 @@ export function addSessionOffset(sessionId, delta) {
   }
   const next = getSessionOffset(sessionId) + Math.floor(delta);
   State.sessionOffsets[sessionId] = next;
+}
+
+export function hashSessionId(sessionId) {
+  if (!sessionId) {
+    return 0;
+  }
+  const source = textEncoder.encode(sessionId);
+  let hash = 0x811c9dc5;
+  for (const byte of source) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+export function encodeTerminalFrame(frameType, sessionId, text) {
+  const payload = textEncoder.encode(text || '');
+  const frame = new Uint8Array(TERMINAL_FRAME_HEADER_BYTES + payload.byteLength);
+  frame[0] = frameType & 0xff;
+  const view = new DataView(frame.buffer);
+  view.setUint32(1, hashSessionId(sessionId));
+  frame.set(payload, TERMINAL_FRAME_HEADER_BYTES);
+  return frame;
+}
+
+export function decodeTerminalFrame(buffer, sessionId) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < TERMINAL_FRAME_HEADER_BYTES) {
+    return null;
+  }
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const sessionHash = view.getUint32(1);
+  if (sessionHash !== hashSessionId(sessionId)) {
+    return null;
+  }
+  const payload = bytes.subarray(TERMINAL_FRAME_HEADER_BYTES);
+  return {
+    frameType: bytes[0],
+    payloadText: textDecoder.decode(payload),
+    payloadBytes: payload.byteLength
+  };
 }
 
 export function pruneSessionOffsets(sessionIds) {
