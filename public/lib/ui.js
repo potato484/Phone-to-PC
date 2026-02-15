@@ -35,7 +35,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=10';
+const SERVICE_WORKER_URL = '/sw.js?v=11';
 
 function decodeEscapedSequence(input) {
   let output = '';

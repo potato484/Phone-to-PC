@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v10';
+const CACHE_NAME = 'c2p-v11';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -37,10 +37,16 @@ function shouldBypassRequest(url, request) {
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches
-      .open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL_ASSETS))
-      .then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then(async (cache) => {
+      for (const asset of APP_SHELL_ASSETS) {
+        try {
+          await cache.add(asset);
+        } catch {
+          // Keep service worker install resilient when optional assets are absent.
+        }
+      }
+      await self.skipWaiting();
+    })
   );
 });
 
