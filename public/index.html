@@ -31,15 +31,6 @@
       </header>
 
       <main class="workspace" aria-label="工作区">
-        <div class="workspace-tabs" role="tablist" aria-label="模式切换">
-          <button id="view-terminal-btn" class="workspace-tab is-active" type="button" role="tab" aria-selected="true">
-            终端
-          </button>
-          <button id="view-desktop-btn" class="workspace-tab" type="button" role="tab" aria-selected="false">
-            桌面
-          </button>
-        </div>
-
         <section id="terminal-wrap" aria-label="终端区域">
           <div id="terminal-reconnect" class="terminal-reconnect" hidden>
             <p id="terminal-reconnect-text" class="terminal-reconnect-text"></p>
@@ -49,69 +40,6 @@
           </div>
           <p class="terminal-input-hint">提示：新版直接在终端面板内输入，手机先点终端区域再调出键盘。</p>
           <div id="terminal-grid" class="terminal-grid" aria-live="polite"></div>
-        </section>
-
-        <section id="desktop-wrap" class="desktop-wrap" aria-label="桌面区域" hidden>
-          <div class="desktop-toolbar">
-            <button id="desktop-connect-btn" class="btn desktop-connect-btn" type="button">连接桌面</button>
-            <div class="desktop-toggle-group" role="group" aria-label="指针模式">
-              <button id="desktop-input-trackpad-btn" class="desktop-toggle is-active" type="button" aria-pressed="true">
-                触控板
-              </button>
-              <button id="desktop-input-direct-btn" class="desktop-toggle" type="button" aria-pressed="false">
-                直点
-              </button>
-            </div>
-            <label class="desktop-fps" for="desktop-fps-select">
-              帧率
-              <select id="desktop-fps-select">
-                <option value="10">10</option>
-                <option value="15" selected>15</option>
-                <option value="24">24</option>
-                <option value="30">30</option>
-              </select>
-            </label>
-            <span id="desktop-status-text" class="desktop-status-text">未连接</span>
-          </div>
-
-          <div class="desktop-toolbar desktop-toolbar-mods">
-            <button id="desktop-mod-ctrl" class="desktop-mod-btn" type="button" aria-pressed="false">Ctrl</button>
-            <button id="desktop-mod-alt" class="desktop-mod-btn" type="button" aria-pressed="false">Alt</button>
-            <button id="desktop-mod-meta" class="desktop-mod-btn" type="button" aria-pressed="false">Win</button>
-            <button id="desktop-cad-btn" class="desktop-mod-btn desktop-mod-danger" type="button">Ctrl+Alt+Del</button>
-          </div>
-
-          <div id="desktop-surface" class="desktop-surface" data-connection="offline">
-            <div id="desktop-canvas" class="desktop-canvas" aria-label="远程桌面画面"></div>
-            <p id="desktop-placeholder" class="desktop-placeholder">切换到桌面模式后自动连接</p>
-          </div>
-
-          <div id="desktop-credentials-modal" class="desktop-credentials-modal" hidden>
-            <form id="desktop-credentials-form" class="desktop-credentials-dialog" autocomplete="off">
-              <h3 class="desktop-credentials-title">桌面认证</h3>
-              <p id="desktop-credentials-hint" class="desktop-credentials-hint">请输入 VNC 认证信息</p>
-
-              <label id="desktop-credentials-username-row" class="desktop-credentials-row">
-                用户名
-                <input id="desktop-credentials-username" type="text" autocomplete="username" />
-              </label>
-
-              <label id="desktop-credentials-password-row" class="desktop-credentials-row">
-                密码
-                <input id="desktop-credentials-password" type="password" autocomplete="current-password" />
-              </label>
-
-              <label id="desktop-credentials-target-row" class="desktop-credentials-row">
-                Target
-                <input id="desktop-credentials-target" type="text" autocomplete="off" />
-              </label>
-
-              <div class="desktop-credentials-actions">
-                <button id="desktop-credentials-cancel" class="btn" type="button">取消</button>
-                <button id="desktop-credentials-submit" class="btn desktop-credentials-submit" type="submit">提交认证</button>
-              </div>
-            </form>
-          </div>
         </section>
       </main>
 
