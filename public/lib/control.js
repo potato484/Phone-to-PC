@@ -75,10 +75,11 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
           return;
         }
         const code = Number.isFinite(payload.exitCode) ? payload.exitCode : Number(payload.exitCode) || 0;
-        statusBar.setText(`会话已退出 (code=${code})`);
         if (State.killRequested) {
-          toast.show('会话已终止', 'warn');
+          statusBar.setText('会话已关闭');
+          toast.show('会话已关闭', 'warn');
         } else {
+          statusBar.setText(`会话已退出 (code=${code})`);
           toast.show(`会话已退出 (code=${code})`, code === 0 ? 'info' : 'danger');
         }
         delete State.sessionOffsets[exitedSessionId];

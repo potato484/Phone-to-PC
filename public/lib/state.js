@@ -16,7 +16,6 @@ export const DOM = {
   quickKeys: document.getElementById('quick-keys'),
   splitToggleBtn: document.getElementById('split-toggle-btn'),
   detachBtn: document.getElementById('detach-btn'),
-  killBtn: document.getElementById('kill-btn'),
   filesPath: document.getElementById('files-path'),
   filesList: document.getElementById('files-list'),
   filesRefreshBtn: document.getElementById('files-refresh-btn'),
@@ -312,10 +311,7 @@ export async function fetchSessionLogBytes(sessionId) {
 export function setActionButtonsEnabled(enabled) {
   const nextEnabled = !!enabled;
   if (DOM.detachBtn) {
-    DOM.detachBtn.disabled = !nextEnabled;
-  }
-  if (DOM.killBtn) {
-    DOM.killBtn.disabled = !nextEnabled || State.killInFlight;
+    DOM.detachBtn.disabled = !nextEnabled || State.killInFlight;
   }
 }
 

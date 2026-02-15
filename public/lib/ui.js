@@ -374,6 +374,8 @@ export function createUi({ getControl, getTerm }) {
       let longPressTimer = 0;
       let longPressSessionId = '';
       let suppressClick = false;
+      let pointerStartX = 0;
+      let pointerStartY = 0;
       const clearLongPress = () => {
         if (longPressTimer) {
           window.clearTimeout(longPressTimer);
@@ -406,6 +408,14 @@ export function createUi({ getControl, getTerm }) {
         this.activateSession(sessionId);
       });
 
+      const allowLongPressOpen =
+        typeof window.matchMedia === 'function'
+          ? window.matchMedia('(hover: hover) and (pointer: fine)').matches
+          : false;
+      if (!allowLongPressOpen) {
+        return;
+      }
+
       DOM.sessionTabs.addEventListener('pointerdown', (event) => {
         const tab = event.target.closest('.session-tab[data-session-id]');
         if (!tab || tab.classList.contains('session-tab-add')) {
@@ -416,6 +426,8 @@ export function createUi({ getControl, getTerm }) {
           return;
         }
         clearLongPress();
+        pointerStartX = event.clientX;
+        pointerStartY = event.clientY;
         longPressSessionId = sessionId;
         longPressTimer = window.setTimeout(() => {
           longPressTimer = 0;
@@ -442,7 +454,9 @@ export function createUi({ getControl, getTerm }) {
           if (!longPressTimer) {
             return;
           }
-          if (Math.abs(event.movementX) > 5 || Math.abs(event.movementY) > 5) {
+          const deltaX = Math.abs(event.clientX - pointerStartX);
+          const deltaY = Math.abs(event.clientY - pointerStartY);
+          if (deltaX > 6 || deltaY > 6) {
             clearLongPress();
             longPressSessionId = '';
           }
@@ -494,7 +508,7 @@ export function createUi({ getControl, getTerm }) {
       add.className = 'session-tab session-tab-add';
       add.setAttribute('aria-label', '添加新终端');
       add.title = '添加新终端';
-      add.textContent = '+';
+      add.textContent = '新建终端';
       fragment.appendChild(add);
 
       DOM.sessionTabs.appendChild(fragment);
@@ -507,9 +521,6 @@ export function createUi({ getControl, getTerm }) {
     bind() {
       if (DOM.detachBtn) {
         DOM.detachBtn.addEventListener('click', () => this.detach());
-      }
-      if (DOM.killBtn) {
-        DOM.killBtn.addEventListener('click', () => this.kill());
       }
       if (DOM.splitToggleBtn) {
         DOM.splitToggleBtn.addEventListener('click', () => {
@@ -559,39 +570,6 @@ export function createUi({ getControl, getTerm }) {
     },
 
     detach() {
-      const term = getTerm();
-      if (!State.currentSessionId || !term) {
-        return;
-      }
-      const detachedSession = State.currentSessionId;
-      State.currentSessionId = '';
-      State.killRequested = false;
-      this.resetKillRequest();
-      this.resetKillConfirm();
-      StatusBar.setSession('');
-      setActionButtonsEnabled(false);
-      SessionTabs.renderActiveState();
-      term.disconnect();
-      if (State.terminal) {
-        State.terminal.write('\x1bc');
-      }
-      StatusBar.setText(`已关闭会话 ${shortenSessionId(detachedSession)} 的终端连接`);
-      Toast.show('终端已关闭，可点击会话标签重新附加', 'info');
-    },
-
-    resetKillConfirm() {
-      if (State.killConfirmTimer) {
-        window.clearTimeout(State.killConfirmTimer);
-        State.killConfirmTimer = 0;
-      }
-      State.killConfirmArmed = false;
-      if (DOM.killBtn) {
-        DOM.killBtn.textContent = '终止会话';
-        DOM.killBtn.classList.remove('is-confirm');
-      }
-    },
-
-    kill() {
       const control = getControl();
       if (!State.currentSessionId || !control) {
         return;
@@ -601,11 +579,11 @@ export function createUi({ getControl, getTerm }) {
       }
       if (!State.killConfirmArmed) {
         State.killConfirmArmed = true;
-        if (DOM.killBtn) {
-          DOM.killBtn.textContent = '确认终止';
-          DOM.killBtn.classList.add('is-confirm');
+        if (DOM.detachBtn) {
+          DOM.detachBtn.textContent = '确认关闭';
+          DOM.detachBtn.classList.add('is-confirm');
         }
-        StatusBar.setText('再次点击以确认终止');
+        StatusBar.setText('再次点击以确认关闭当前会话');
         State.killConfirmTimer = window.setTimeout(() => {
           this.resetKillConfirm();
         }, 3000);
@@ -618,14 +596,15 @@ export function createUi({ getControl, getTerm }) {
       });
       this.resetKillConfirm();
       if (!ok) {
-        Toast.show('终止请求发送失败', 'danger');
+        StatusBar.setText('关闭请求发送失败');
+        Toast.show('关闭请求发送失败', 'danger');
         return;
       }
       State.killRequested = true;
       State.killInFlight = true;
       setActionButtonsEnabled(false);
-      StatusBar.setText('终止请求已发送，等待会话退出...');
-      Toast.show('终止请求已发送', 'warn');
+      StatusBar.setText('关闭请求已发送，等待会话退出...');
+      Toast.show('关闭请求已发送', 'warn');
       State.killRequestTimer = window.setTimeout(() => {
         State.killRequestTimer = 0;
         if (!State.killInFlight || !State.currentSessionId) {
@@ -634,9 +613,21 @@ export function createUi({ getControl, getTerm }) {
         State.killInFlight = false;
         State.killRequested = false;
         setActionButtonsEnabled(true);
-        StatusBar.setText('终止超时，可重试');
-        Toast.show('终止超时，可再次尝试', 'warn');
+        StatusBar.setText('关闭超时，可重试');
+        Toast.show('关闭超时，可再次尝试', 'warn');
       }, KILL_REQUEST_TIMEOUT_MS);
+    },
+
+    resetKillConfirm() {
+      if (State.killConfirmTimer) {
+        window.clearTimeout(State.killConfirmTimer);
+        State.killConfirmTimer = 0;
+      }
+      State.killConfirmArmed = false;
+      if (DOM.detachBtn) {
+        DOM.detachBtn.textContent = '关闭终端';
+        DOM.detachBtn.classList.remove('is-confirm');
+      }
     },
 
     async initServiceWorker() {
