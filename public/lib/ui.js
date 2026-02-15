@@ -35,7 +35,9 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=12';
+const SERVICE_WORKER_URL = '/sw.js?v=13';
+const MIN_TERMINAL_VISIBLE_PX = 220;
+const MIN_DOCK_VISIBLE_PX = 120;
 
 function decodeEscapedSequence(input) {
   let output = '';
@@ -198,6 +200,18 @@ export function createUi({ getControl, getTerm }) {
       if (!DOM.dock) {
         return;
       }
+      const statusBarEl = document.querySelector('.status-bar');
+      const statusHeight = statusBarEl ? Math.ceil(statusBarEl.getBoundingClientRect().height) : 0;
+      const viewportHeight = Math.ceil(
+        window.visualViewport && Number.isFinite(window.visualViewport.height)
+          ? window.visualViewport.height
+          : window.innerHeight
+      );
+      const maxDockHeight = Math.max(
+        MIN_DOCK_VISIBLE_PX,
+        viewportHeight - statusHeight - MIN_TERMINAL_VISIBLE_PX
+      );
+      DOM.dock.style.maxHeight = `${maxDockHeight}px`;
       const height = Math.ceil(DOM.dock.getBoundingClientRect().height);
       document.documentElement.style.setProperty('--dock-height', `${height}px`);
     },
@@ -1194,6 +1208,7 @@ export function createUi({ getControl, getTerm }) {
             }
           }
         }
+        Dock.scheduleMeasure();
         return;
       }
 
@@ -1237,6 +1252,7 @@ export function createUi({ getControl, getTerm }) {
           term.scheduleResize();
         }
       }
+      Dock.scheduleMeasure();
     },
 
     bind() {
