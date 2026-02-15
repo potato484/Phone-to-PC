@@ -2,7 +2,9 @@ import {
   DOM,
   KEYBOARD_VISIBLE_THRESHOLD_PX,
   KILL_REQUEST_TIMEOUT_MS,
+  QUICK_KEY_LONG_PRESS_MS,
   QUICK_KEY_SEQUENCES,
+  QUICK_KEY_STORAGE_KEY,
   State,
   TOKEN_STORAGE_KEY,
   ZOOM_SCALE_EPSILON,
@@ -17,7 +19,121 @@ import {
   urlBase64ToUint8Array
 } from './state.js';
 
+const QUICK_KEY_ROWS = [
+  [
+    { id: 'ctrl-c', label: '^C' },
+    { id: 'tab', label: 'Tab' },
+    { id: 'shift-tab', label: '⇤' },
+    { id: 'esc', label: 'Esc' }
+  ],
+  [
+    { id: 'up', label: '↑' },
+    { id: 'down', label: '↓' },
+    { id: 'left', label: '←' },
+    { id: 'right', label: '→' },
+    { id: '/', label: '/' },
+    { id: 'enter', label: '⏎' }
+  ]
+];
+
+function decodeEscapedSequence(input) {
+  let output = '';
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch !== '\\') {
+      output += ch;
+      continue;
+    }
+    const next = input[i + 1];
+    if (!next) {
+      output += '\\';
+      continue;
+    }
+    if (next === 'r') {
+      output += '\r';
+      i += 1;
+      continue;
+    }
+    if (next === 'n') {
+      output += '\n';
+      i += 1;
+      continue;
+    }
+    if (next === 't') {
+      output += '\t';
+      i += 1;
+      continue;
+    }
+    if (next === '\\') {
+      output += '\\';
+      i += 1;
+      continue;
+    }
+    if (next === 'x') {
+      const hex = input.slice(i + 2, i + 4);
+      if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+        output += String.fromCharCode(Number.parseInt(hex, 16));
+        i += 3;
+        continue;
+      }
+    }
+    output += next;
+    i += 1;
+  }
+  return output;
+}
+
+function encodeEscapedSequence(input) {
+  return input
+    .replaceAll('\\', '\\\\')
+    .replaceAll('\u001b', '\\x1b')
+    .replaceAll('\r', '\\r')
+    .replaceAll('\n', '\\n')
+    .replaceAll('\t', '\\t');
+}
+
+function loadQuickKeyConfig() {
+  try {
+    const raw = window.localStorage.getItem(QUICK_KEY_STORAGE_KEY);
+    if (!raw) {
+      return { custom: [] };
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.custom)) {
+      return { custom: [] };
+    }
+    const custom = parsed.custom
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return null;
+        }
+        const label = typeof entry.label === 'string' ? entry.label.trim() : '';
+        const sequence = typeof entry.sequence === 'string' ? entry.sequence : '';
+        if (!label || !sequence) {
+          return null;
+        }
+        return { label, sequence };
+      })
+      .filter(Boolean)
+      .slice(0, 16);
+    return { custom };
+  } catch {
+    return { custom: [] };
+  }
+}
+
+function saveQuickKeyConfig(config) {
+  try {
+    window.localStorage.setItem(QUICK_KEY_STORAGE_KEY, JSON.stringify(config));
+  } catch {
+    // ignore storage failures
+  }
+}
+
 export function createUi({ getControl, getTerm }) {
+  let quickKeyConfig = loadQuickKeyConfig();
+  let sessionCache = [];
+
   const Toast = {
     show(message, type = 'info') {
       if (!DOM.toastRoot || !message) {
@@ -169,11 +285,106 @@ export function createUi({ getControl, getTerm }) {
   };
 
   const SessionTabs = {
+    getById(sessionId) {
+      return sessionCache.find((entry) => entry.id === sessionId) || null;
+    },
+
+    activateSession(sessionId, options = {}) {
+      const { showStatusText = true } = options;
+      if (!sessionId) {
+        return;
+      }
+      const term = getTerm();
+      if (!term) {
+        return;
+      }
+      const session = this.getById(sessionId);
+      State.currentSessionId = sessionId;
+      State.killRequested = false;
+      Actions.resetKillRequest();
+      Actions.resetKillConfirm();
+      setActionButtonsEnabled(true);
+      if (session && session.cwd) {
+        State.cwd = session.cwd;
+        StatusBar.setCwd(session.cwd);
+      }
+      StatusBar.setSession(sessionId);
+      this.renderActiveState();
+      void term.connect(sessionId, {
+        cwd: session && session.cwd ? session.cwd : undefined
+      });
+      term.scheduleResize();
+      if (showStatusText) {
+        StatusBar.setText(`已切换到会话 ${shortenSessionId(sessionId)}`);
+      }
+    },
+
+    switchByOffset(offset) {
+      if (!Number.isFinite(offset) || offset === 0 || sessionCache.length === 0) {
+        return false;
+      }
+      const currentIndex = sessionCache.findIndex((session) => session.id === State.currentSessionId);
+      const startIndex = currentIndex >= 0 ? currentIndex : 0;
+      const step = offset > 0 ? 1 : -1;
+      const nextIndex = (startIndex + step + sessionCache.length) % sessionCache.length;
+      const target = sessionCache[nextIndex];
+      if (!target) {
+        return false;
+      }
+      this.activateSession(target.id);
+      return true;
+    },
+
+    openSessionInNewPane(sessionId) {
+      if (!sessionId) {
+        return false;
+      }
+      const term = getTerm();
+      if (!term || typeof term.openSessionInNewPane !== 'function') {
+        return false;
+      }
+      const session = this.getById(sessionId);
+      const opened = term.openSessionInNewPane(sessionId, {
+        cwd: session && session.cwd ? session.cwd : undefined
+      });
+      if (!opened) {
+        return false;
+      }
+      State.currentSessionId = sessionId;
+      State.killRequested = false;
+      Actions.resetKillRequest();
+      Actions.resetKillConfirm();
+      setActionButtonsEnabled(true);
+      StatusBar.setSession(sessionId);
+      if (session && session.cwd) {
+        State.cwd = session.cwd;
+        StatusBar.setCwd(session.cwd);
+      }
+      this.renderActiveState();
+      StatusBar.setText(`会话 ${shortenSessionId(sessionId)} 已在新面板打开`);
+      return true;
+    },
+
     bind() {
       if (!DOM.sessionTabs) {
         return;
       }
+
+      let longPressTimer = 0;
+      let longPressSessionId = '';
+      let suppressClick = false;
+      const clearLongPress = () => {
+        if (longPressTimer) {
+          window.clearTimeout(longPressTimer);
+          longPressTimer = 0;
+        }
+      };
+
       DOM.sessionTabs.addEventListener('click', (event) => {
+        if (suppressClick) {
+          suppressClick = false;
+          return;
+        }
         const addButton = event.target.closest('.session-tab-add');
         if (addButton) {
           Actions.spawn();
@@ -184,28 +395,59 @@ export function createUi({ getControl, getTerm }) {
           return;
         }
         const sessionId = tab.dataset.sessionId;
-        if (!sessionId || sessionId === State.currentSessionId) {
+        if (!sessionId) {
           return;
         }
-        const term = getTerm();
-        if (!term) {
+        if (sessionId === State.currentSessionId) {
+          setActionButtonsEnabled(true);
           return;
         }
-        State.currentSessionId = sessionId;
-        State.killRequested = false;
-        StatusBar.setSession(sessionId);
-        if (tab.dataset.cwd) {
-          State.cwd = tab.dataset.cwd;
-          StatusBar.setCwd(tab.dataset.cwd);
-        }
-        Actions.resetKillRequest();
-        setActionButtonsEnabled(true);
-        Actions.resetKillConfirm();
-        this.renderActiveState();
-        void term.connect(sessionId);
-        term.scheduleResize();
-        StatusBar.setText(`已切换到会话 ${shortenSessionId(sessionId)}`);
+        this.activateSession(sessionId);
       });
+
+      DOM.sessionTabs.addEventListener('pointerdown', (event) => {
+        const tab = event.target.closest('.session-tab[data-session-id]');
+        if (!tab || tab.classList.contains('session-tab-add')) {
+          return;
+        }
+        const sessionId = tab.dataset.sessionId;
+        if (!sessionId) {
+          return;
+        }
+        clearLongPress();
+        longPressSessionId = sessionId;
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = 0;
+          if (!longPressSessionId) {
+            return;
+          }
+          suppressClick = true;
+          this.openSessionInNewPane(longPressSessionId);
+          longPressSessionId = '';
+        }, QUICK_KEY_LONG_PRESS_MS);
+      });
+
+      DOM.sessionTabs.addEventListener('pointerup', () => {
+        clearLongPress();
+        longPressSessionId = '';
+      });
+      DOM.sessionTabs.addEventListener('pointercancel', () => {
+        clearLongPress();
+        longPressSessionId = '';
+      });
+      DOM.sessionTabs.addEventListener(
+        'pointermove',
+        (event) => {
+          if (!longPressTimer) {
+            return;
+          }
+          if (Math.abs(event.movementX) > 5 || Math.abs(event.movementY) > 5) {
+            clearLongPress();
+            longPressSessionId = '';
+          }
+        },
+        { passive: true }
+      );
     },
 
     renderActiveState() {
@@ -224,6 +466,7 @@ export function createUi({ getControl, getTerm }) {
         return [];
       }
       const sessions = Array.isArray(list) ? list.map((item) => normalizeSessionEntry(item)).filter(Boolean) : [];
+      sessionCache = sessions;
       pruneSessionOffsets(sessions.map((session) => session.id));
       DOM.sessionTabs.textContent = '';
 
@@ -266,6 +509,15 @@ export function createUi({ getControl, getTerm }) {
       }
       if (DOM.killBtn) {
         DOM.killBtn.addEventListener('click', () => this.kill());
+      }
+      if (DOM.splitToggleBtn) {
+        DOM.splitToggleBtn.addEventListener('click', () => {
+          const term = getTerm();
+          if (term && typeof term.toggleSplitMode === 'function') {
+            term.toggleSplitMode();
+            Dock.collapse();
+          }
+        });
       }
     },
 
@@ -474,29 +726,241 @@ export function createUi({ getControl, getTerm }) {
   };
 
   const QuickKeys = {
+    render() {
+      if (!DOM.quickKeys) {
+        return;
+      }
+      DOM.quickKeys.textContent = '';
+
+      QUICK_KEY_ROWS.forEach((row, rowIndex) => {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'quick-key-row';
+        rowEl.dataset.row = rowIndex === 0 ? 'control' : 'nav';
+        row.forEach((entry) => {
+          const sequence = QUICK_KEY_SEQUENCES[entry.id];
+          if (!sequence) {
+            return;
+          }
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'quick-key-btn';
+          button.dataset.sequence = sequence;
+          button.dataset.key = entry.id;
+          button.textContent = entry.label;
+          rowEl.appendChild(button);
+        });
+        DOM.quickKeys.appendChild(rowEl);
+      });
+
+      const customRow = document.createElement('div');
+      customRow.className = 'quick-key-row quick-key-row-custom';
+      customRow.dataset.row = 'custom';
+      customRow.dataset.editHint = 'long-press';
+
+      quickKeyConfig.custom.forEach((entry, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'quick-key-btn quick-key-btn-custom';
+        button.dataset.sequence = entry.sequence;
+        button.dataset.customIndex = String(index);
+        button.textContent = entry.label;
+        customRow.appendChild(button);
+      });
+
+      const addButton = document.createElement('button');
+      addButton.type = 'button';
+      addButton.className = 'quick-key-btn quick-key-btn-add';
+      addButton.dataset.action = 'add-custom';
+      addButton.textContent = '+ 命令';
+      customRow.appendChild(addButton);
+
+      DOM.quickKeys.appendChild(customRow);
+    },
+
+    runSequence(sequence) {
+      if (!sequence) {
+        return;
+      }
+      const term = getTerm();
+      const sent = term ? term.sendData(sequence) : false;
+      if (!sent) {
+        Toast.show('终端未连接', 'warn');
+        return;
+      }
+      if (navigator.vibrate) {
+        navigator.vibrate(10);
+      }
+    },
+
+    askForCustomCommand(initialLabel = '', initialSequence = '') {
+      const nextLabelRaw = window.prompt('快捷键名称', initialLabel || '命令');
+      if (nextLabelRaw === null) {
+        return null;
+      }
+      const nextLabel = nextLabelRaw.trim();
+      if (!nextLabel) {
+        return null;
+      }
+      const defaultSequence = encodeEscapedSequence(initialSequence || '');
+      const rawSequence = window.prompt('发送内容（支持 \\r \\n \\t \\x1b）', defaultSequence);
+      if (rawSequence === null) {
+        return null;
+      }
+      const decoded = decodeEscapedSequence(rawSequence);
+      if (!decoded) {
+        return null;
+      }
+      return {
+        label: nextLabel,
+        sequence: decoded
+      };
+    },
+
+    addCustom() {
+      const next = this.askForCustomCommand('', '');
+      if (!next) {
+        return;
+      }
+      quickKeyConfig.custom.push(next);
+      saveQuickKeyConfig(quickKeyConfig);
+      this.render();
+      Toast.show(`已添加快捷键 ${next.label}`, 'success');
+    },
+
+    editCustom(index) {
+      const current = quickKeyConfig.custom[index];
+      if (!current) {
+        return;
+      }
+      const next = this.askForCustomCommand(current.label, current.sequence);
+      if (!next) {
+        const shouldRemove = window.confirm(`删除快捷键 ${current.label}？`);
+        if (!shouldRemove) {
+          return;
+        }
+        quickKeyConfig.custom.splice(index, 1);
+        saveQuickKeyConfig(quickKeyConfig);
+        this.render();
+        Toast.show(`已删除快捷键 ${current.label}`, 'warn');
+        return;
+      }
+      quickKeyConfig.custom[index] = next;
+      saveQuickKeyConfig(quickKeyConfig);
+      this.render();
+      Toast.show(`已更新快捷键 ${next.label}`, 'success');
+    },
+
     bind() {
       if (!DOM.quickKeys) {
         return;
       }
+      this.render();
+
+      let suppressClick = false;
+      let longPressTimer = 0;
+      let longPressTarget = null;
+
+      const clearLongPress = () => {
+        if (longPressTimer) {
+          window.clearTimeout(longPressTimer);
+          longPressTimer = 0;
+        }
+        longPressTarget = null;
+      };
+
       DOM.quickKeys.addEventListener('click', (event) => {
-        const button = event.target.closest('[data-key]');
+        if (suppressClick) {
+          suppressClick = false;
+          return;
+        }
+        const button = event.target.closest('.quick-key-btn');
         if (!button) {
           return;
         }
-        const sequence = QUICK_KEY_SEQUENCES[button.dataset.key];
+        if (button.dataset.action === 'add-custom') {
+          this.addCustom();
+          return;
+        }
+        const sequence = button.dataset.sequence;
         if (!sequence) {
           return;
         }
-        const term = getTerm();
-        const sent = term ? term.sendData(sequence) : false;
-        if (!sent) {
-          Toast.show('终端未连接', 'warn');
+        this.runSequence(sequence);
+      });
+
+      DOM.quickKeys.addEventListener('pointerdown', (event) => {
+        const button = event.target.closest('.quick-key-btn');
+        if (!button) {
           return;
         }
-        if (navigator.vibrate) {
-          navigator.vibrate(10);
+        const isCustom = button.dataset.customIndex !== undefined;
+        const isAdd = button.dataset.action === 'add-custom';
+        if (!isCustom && !isAdd) {
+          return;
         }
+        clearLongPress();
+        longPressTarget = button;
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = 0;
+          if (!longPressTarget) {
+            return;
+          }
+          suppressClick = true;
+          if (longPressTarget.dataset.action === 'add-custom') {
+            this.addCustom();
+          } else {
+            const index = Number.parseInt(longPressTarget.dataset.customIndex || '-1', 10);
+            if (Number.isFinite(index) && index >= 0) {
+              this.editCustom(index);
+            }
+          }
+          longPressTarget = null;
+        }, QUICK_KEY_LONG_PRESS_MS);
       });
+
+      DOM.quickKeys.addEventListener('pointerup', clearLongPress);
+      DOM.quickKeys.addEventListener('pointercancel', clearLongPress);
+      DOM.quickKeys.addEventListener(
+        'pointermove',
+        (event) => {
+          if (!longPressTimer) {
+            return;
+          }
+          if (Math.abs(event.movementX) > 5 || Math.abs(event.movementY) > 5) {
+            clearLongPress();
+          }
+        },
+        { passive: true }
+      );
+    }
+  };
+
+  const Network = {
+    bind() {
+      window.addEventListener(
+        'online',
+        () => {
+          StatusBar.setText('网络已恢复，正在重连...');
+          Toast.show('网络已恢复，正在重连...', 'success');
+          const control = getControl();
+          if (control && typeof control.reconnectNow === 'function') {
+            control.reconnectNow();
+          }
+          const term = getTerm();
+          if (term && typeof term.forceReconnectNow === 'function') {
+            term.forceReconnectNow();
+          }
+        },
+        { passive: true }
+      );
+      window.addEventListener(
+        'offline',
+        () => {
+          StatusBar.setText('网络离线，等待恢复...');
+          Toast.show('网络离线，等待恢复...', 'warn');
+        },
+        { passive: true }
+      );
     }
   };
 
@@ -674,6 +1138,18 @@ export function createUi({ getControl, getTerm }) {
     });
   }
 
+  function onActiveSessionChanged(sessionId) {
+    State.currentSessionId = sessionId || '';
+    const session = sessionId ? SessionTabs.getById(sessionId) : null;
+    if (session && session.cwd) {
+      State.cwd = session.cwd;
+      StatusBar.setCwd(session.cwd);
+    }
+    StatusBar.setSession(sessionId || '');
+    SessionTabs.renderActiveState();
+    setActionButtonsEnabled(!!sessionId && !State.killInFlight);
+  }
+
   function bootstrap() {
     const control = getControl();
     const term = getTerm();
@@ -697,6 +1173,7 @@ export function createUi({ getControl, getTerm }) {
     Actions.bind();
     Auth.init();
     term.init();
+    Network.bind();
     Viewport.bind();
     Actions.initServiceWorker().catch(() => {});
     Runtime.load().finally(() => {
@@ -715,10 +1192,12 @@ export function createUi({ getControl, getTerm }) {
     SessionTabs,
     Actions,
     QuickKeys,
+    Network,
     Viewport,
     Auth,
     Runtime,
     bindSessionCopy,
+    onActiveSessionChanged,
     bootstrap
   };
 }

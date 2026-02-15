@@ -5,11 +5,15 @@ import {
   RESIZE_DEBOUNCE_MS,
   State,
   TERMINAL_BINARY_CODEC,
+  TERMINAL_FONT_SIZE_MAX,
+  TERMINAL_FONT_SIZE_MIN,
   TERMINAL_INPUT_BATCH_CHARS,
   TERMINAL_INPUT_DIRECT_CHARS,
   TERMINAL_FRAME_TYPE_INPUT,
   TERMINAL_FRAME_TYPE_OUTPUT,
+  TERMINAL_MAX_PANES,
   TERMINAL_REPLAY_TAIL_BYTES,
+  TERMINAL_SPLIT_MODE_STORAGE_KEY,
   TERMINAL_WRITE_HIGH_WATER_BYTES,
   TERMINAL_WRITE_LOW_WATER_BYTES,
   TerminalCtor,
@@ -26,54 +30,776 @@ import {
   wsUrl
 } from './state.js';
 
-export function createTerm({ getControl, statusBar, toast }) {
+const DEFAULT_FONT_SIZE = 14;
+const RECONNECT_PROGRESS_TICK_MS = 80;
+const SPLIT_MODE_VERTICAL = 'vertical';
+const SPLIT_MODE_HORIZONTAL = 'horizontal';
+
+function clampFontSize(size) {
+  if (!Number.isFinite(size)) {
+    return DEFAULT_FONT_SIZE;
+  }
+  return Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(size)));
+}
+
+function normalizeSplitMode(value) {
+  return value === SPLIT_MODE_HORIZONTAL ? SPLIT_MODE_HORIZONTAL : SPLIT_MODE_VERTICAL;
+}
+
+function readSplitMode() {
+  try {
+    return normalizeSplitMode(window.localStorage.getItem(TERMINAL_SPLIT_MODE_STORAGE_KEY));
+  } catch {
+    return SPLIT_MODE_VERTICAL;
+  }
+}
+
+function writeSplitMode(mode) {
+  try {
+    window.localStorage.setItem(TERMINAL_SPLIT_MODE_STORAGE_KEY, normalizeSplitMode(mode));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function createTerm({ getControl, statusBar, toast, onActiveSessionChange }) {
+  const panes = new Map();
+  const paneOrder = [];
+  let paneCounter = 0;
+  let activePaneId = '';
+  let splitMode = readSplitMode();
+  let reconnectProgressTimer = 0;
+
+  function getPane(paneId) {
+    if (!paneId) {
+      return null;
+    }
+    return panes.get(paneId) || null;
+  }
+
+  function getActivePane() {
+    return getPane(activePaneId);
+  }
+
+  function setPaneConnectionState(pane, state) {
+    if (!pane || !pane.rootEl) {
+      return;
+    }
+    pane.rootEl.dataset.connection = state;
+  }
+
+  function updatePaneTitle(pane) {
+    if (!pane || !pane.titleEl) {
+      return;
+    }
+    if (!pane.sessionId) {
+      pane.titleEl.textContent = `面板 ${pane.index}`;
+      pane.rootEl.dataset.sessionId = '';
+      return;
+    }
+    pane.rootEl.dataset.sessionId = pane.sessionId;
+    const cwdLabel = pane.cwd ? ` · ${pane.cwd}` : '';
+    pane.titleEl.textContent = `${shortenSessionId(pane.sessionId)}${cwdLabel}`;
+  }
+
+  function stopReconnectProgress() {
+    if (reconnectProgressTimer) {
+      window.clearInterval(reconnectProgressTimer);
+      reconnectProgressTimer = 0;
+    }
+    if (DOM.terminalReconnect) {
+      DOM.terminalReconnect.hidden = true;
+    }
+    if (DOM.terminalReconnectFill) {
+      DOM.terminalReconnectFill.style.width = '0%';
+    }
+    if (DOM.terminalReconnectText) {
+      DOM.terminalReconnectText.textContent = '';
+    }
+  }
+
+  function renderReconnectProgress() {
+    const pane = getActivePane();
+    if (!pane || !pane.reconnectTimer || pane.reconnectDelayActive <= 0) {
+      stopReconnectProgress();
+      return;
+    }
+    const elapsed = Date.now() - pane.reconnectStartedAt;
+    const progress = Math.max(0, Math.min(1, elapsed / pane.reconnectDelayActive));
+    const remaining = Math.max(0, Math.ceil((pane.reconnectDelayActive - elapsed) / 1000));
+    if (DOM.terminalReconnect) {
+      DOM.terminalReconnect.hidden = false;
+    }
+    if (DOM.terminalReconnectFill) {
+      DOM.terminalReconnectFill.style.width = `${Math.round(progress * 100)}%`;
+    }
+    if (DOM.terminalReconnectText) {
+      DOM.terminalReconnectText.textContent = `终端断开，${remaining}s 后重连`;
+    }
+  }
+
+  function syncReconnectProgressForActivePane() {
+    const pane = getActivePane();
+    if (!pane || !pane.reconnectTimer || pane.reconnectDelayActive <= 0) {
+      stopReconnectProgress();
+      return;
+    }
+    renderReconnectProgress();
+    if (!reconnectProgressTimer) {
+      reconnectProgressTimer = window.setInterval(renderReconnectProgress, RECONNECT_PROGRESS_TICK_MS);
+    }
+  }
+
+  function syncLegacyStateFromActivePane() {
+    const pane = getActivePane();
+    State.terminal = pane ? pane.terminal : null;
+    State.fitAddon = pane ? pane.fitAddon : null;
+    State.webglAddon = pane ? pane.webglAddon : null;
+    State.terminalSocket = pane ? pane.socket : null;
+    State.terminalConnected = !!(pane && pane.connected);
+    State.terminalBinaryEnabled = !!(pane && pane.binaryEnabled);
+    State.currentSessionId = pane && pane.sessionId ? pane.sessionId : '';
+
+    if (pane && pane.sessionId) {
+      statusBar.setSession(pane.sessionId);
+    } else {
+      statusBar.setSession('');
+    }
+
+    if (!pane) {
+      statusBar.setTerminal('offline');
+    } else if (pane.connected) {
+      statusBar.setTerminal('online');
+    } else if (pane.reconnectTimer) {
+      statusBar.setTerminal('warn');
+    } else if (pane.sessionId) {
+      statusBar.setTerminal('warn');
+    } else {
+      statusBar.setTerminal('offline');
+    }
+
+    if (typeof onActiveSessionChange === 'function') {
+      onActiveSessionChange(State.currentSessionId || '');
+    }
+    syncReconnectProgressForActivePane();
+  }
+
+  function setActivePane(paneId, options = {}) {
+    const pane = getPane(paneId);
+    if (!pane) {
+      return;
+    }
+    activePaneId = pane.id;
+    panes.forEach((entry) => {
+      entry.rootEl.classList.toggle('is-active', entry.id === pane.id);
+    });
+    if (options.focus !== false) {
+      pane.terminal.focus();
+    }
+    syncLegacyStateFromActivePane();
+  }
+
+  function updatePaneOrderingAndLayout() {
+    if (!DOM.terminalGrid) {
+      return;
+    }
+
+    paneOrder.forEach((paneId, index) => {
+      const pane = getPane(paneId);
+      if (!pane) {
+        return;
+      }
+      pane.index = index + 1;
+      updatePaneTitle(pane);
+      if (pane.closeBtnEl) {
+        pane.closeBtnEl.hidden = panes.size <= 1;
+      }
+    });
+
+    DOM.terminalGrid.dataset.paneCount = String(panes.size);
+    DOM.terminalGrid.classList.toggle('is-split-vertical', splitMode === SPLIT_MODE_VERTICAL);
+    DOM.terminalGrid.classList.toggle('is-split-horizontal', splitMode === SPLIT_MODE_HORIZONTAL);
+  }
+
+  function sendResizeForPane(pane) {
+    if (!pane || !pane.sessionId || !pane.terminal) {
+      return;
+    }
+    const cols = pane.terminal.cols;
+    const rows = pane.terminal.rows;
+    if (
+      pane.lastResizeSessionId === pane.sessionId &&
+      pane.lastResizeCols === cols &&
+      pane.lastResizeRows === rows
+    ) {
+      return;
+    }
+
+    const control = getControl();
+    const sent = control
+      ? control.send({
+          type: 'resize',
+          sessionId: pane.sessionId,
+          cols,
+          rows
+        })
+      : false;
+    if (!sent) {
+      return;
+    }
+    pane.lastResizeSessionId = pane.sessionId;
+    pane.lastResizeCols = cols;
+    pane.lastResizeRows = rows;
+  }
+
+  function fitAllPanes(force = false) {
+    if (!force && State.zoomActive) {
+      return;
+    }
+    if (!force && State.keyboardVisible) {
+      State.pendingResizeAfterKeyboard = true;
+      return;
+    }
+
+    panes.forEach((pane) => {
+      if (!pane.fitAddon || !pane.terminal) {
+        return;
+      }
+      pane.fitAddon.fit();
+      sendResizeForPane(pane);
+    });
+  }
+
+  function resetPaneIoBuffers(pane) {
+    if (pane.inputRafId) {
+      window.cancelAnimationFrame(pane.inputRafId);
+      pane.inputRafId = 0;
+    }
+    pane.inputQueue = '';
+    pane.writeQueue.length = 0;
+    pane.writeQueuedBytes = 0;
+    pane.writeInProgress = false;
+    pane.writeBackpressured = false;
+  }
+
+  function sendPaneTerminalInput(pane, socket, data) {
+    if (!data) {
+      return;
+    }
+    if (pane.binaryEnabled) {
+      socket.send(encodeTerminalFrame(TERMINAL_FRAME_TYPE_INPUT, pane.sessionId, data));
+      return;
+    }
+    socket.send(data);
+  }
+
+  function flushPaneQueuedInput(pane, socket) {
+    if (!pane.inputQueue) {
+      return;
+    }
+    sendPaneTerminalInput(pane, socket, pane.inputQueue);
+    pane.inputQueue = '';
+  }
+
+  function sendDataOnPane(pane, data) {
+    const socket = pane.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !pane.sessionId) {
+      return false;
+    }
+    if (!data) {
+      return true;
+    }
+
+    if (data.length <= TERMINAL_INPUT_DIRECT_CHARS && !pane.inputQueue) {
+      sendPaneTerminalInput(pane, socket, data);
+      return true;
+    }
+
+    if (data.length >= TERMINAL_INPUT_BATCH_CHARS) {
+      if (pane.inputRafId) {
+        window.cancelAnimationFrame(pane.inputRafId);
+        pane.inputRafId = 0;
+      }
+      flushPaneQueuedInput(pane, socket);
+      sendPaneTerminalInput(pane, socket, data);
+      return true;
+    }
+
+    pane.inputQueue += data;
+    if (pane.inputQueue.length >= TERMINAL_INPUT_BATCH_CHARS) {
+      if (pane.inputRafId) {
+        window.cancelAnimationFrame(pane.inputRafId);
+        pane.inputRafId = 0;
+      }
+      flushPaneQueuedInput(pane, socket);
+      return true;
+    }
+
+    if (!pane.inputRafId) {
+      pane.inputRafId = window.requestAnimationFrame(() => {
+        pane.inputRafId = 0;
+        const activeSocket = pane.socket;
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || !pane.inputQueue) {
+          return;
+        }
+        flushPaneQueuedInput(pane, activeSocket);
+      });
+    }
+    return true;
+  }
+
+  function drainPaneOutput(pane) {
+    if (!pane.terminal || pane.writeInProgress) {
+      return;
+    }
+    const chunk = pane.writeQueue.shift();
+    if (!chunk) {
+      if (pane.writeBackpressured && pane.writeQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
+        pane.writeBackpressured = false;
+      }
+      return;
+    }
+
+    pane.writeInProgress = true;
+    pane.writeQueuedBytes = Math.max(0, pane.writeQueuedBytes - chunk.queueBytes);
+    pane.terminal.write(chunk.data, () => {
+      pane.writeInProgress = false;
+      if (chunk.sessionId && chunk.logBytes > 0) {
+        addSessionOffset(chunk.sessionId, chunk.logBytes);
+      }
+      if (pane.writeBackpressured && pane.writeQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
+        pane.writeBackpressured = false;
+      }
+      drainPaneOutput(pane);
+    });
+  }
+
+  function queuePaneOutput(pane, data, options = {}) {
+    if (!pane.terminal || !data) {
+      return;
+    }
+    const queueEntry = {
+      data,
+      queueBytes: data.length,
+      sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
+      logBytes: Number.isFinite(options.logBytes) ? Math.max(0, Math.floor(options.logBytes)) : 0
+    };
+    pane.writeQueue.push(queueEntry);
+    pane.writeQueuedBytes += queueEntry.queueBytes;
+    if (!pane.writeBackpressured && pane.writeQueuedBytes >= TERMINAL_WRITE_HIGH_WATER_BYTES) {
+      pane.writeBackpressured = true;
+    }
+    drainPaneOutput(pane);
+  }
+
+  function clearPaneReconnectTimer(pane) {
+    if (!pane.reconnectTimer) {
+      return;
+    }
+    window.clearTimeout(pane.reconnectTimer);
+    pane.reconnectTimer = 0;
+    pane.reconnectDelayActive = 0;
+    pane.reconnectStartedAt = 0;
+    if (pane.id === activePaneId) {
+      syncReconnectProgressForActivePane();
+    }
+  }
+
+  async function connectPane(pane, sessionId, options = {}) {
+    if (!pane || !pane.terminal || !sessionId) {
+      return;
+    }
+    const { clearTerminal = true, replayFrom, keepReconnectDelay = false, cwd } = options;
+    pane.connectSeq += 1;
+    const connectSeq = pane.connectSeq;
+
+    clearPaneReconnectTimer(pane);
+    resetPaneIoBuffers(pane);
+    if (pane.socket) {
+      pane.socket.onclose = null;
+      pane.socket.close();
+      pane.socket = null;
+    }
+    pane.connected = false;
+    pane.binaryEnabled = false;
+
+    pane.sessionId = sessionId;
+    if (typeof cwd === 'string' && cwd) {
+      pane.cwd = cwd;
+    }
+    updatePaneTitle(pane);
+    setPaneConnectionState(pane, 'connecting');
+
+    if (clearTerminal) {
+      pane.terminal.write('\x1bc');
+    }
+    if (!keepReconnectDelay) {
+      pane.reconnectDelayMs = 1000;
+    }
+
+    let effectiveReplayFrom = 0;
+    if (Number.isFinite(replayFrom) && replayFrom >= 0) {
+      effectiveReplayFrom = Math.floor(replayFrom);
+    } else if (!clearTerminal) {
+      effectiveReplayFrom = getSessionOffset(sessionId);
+    } else {
+      const logBytes = await fetchSessionLogBytes(sessionId);
+      effectiveReplayFrom = Math.max(0, logBytes - TERMINAL_REPLAY_TAIL_BYTES);
+    }
+    setSessionOffset(sessionId, effectiveReplayFrom);
+
+    if (connectSeq !== pane.connectSeq || pane.sessionId !== sessionId || !panes.has(pane.id)) {
+      return;
+    }
+
+    const supportsBinaryCodec =
+      Array.isArray(State.serverCapabilities) &&
+      State.serverCapabilities.includes(CAPABILITY_TERMINAL_BINARY_V1);
+    pane.binaryEnabled = supportsBinaryCodec;
+
+    const extraParams = { session: sessionId };
+    if (effectiveReplayFrom > 0) {
+      extraParams.replayFrom = effectiveReplayFrom;
+    }
+    if (supportsBinaryCodec) {
+      extraParams.codec = TERMINAL_BINARY_CODEC;
+    }
+    const socket = new WebSocket(wsUrl('/ws/terminal', extraParams));
+    socket.binaryType = 'arraybuffer';
+    pane.socket = socket;
+
+    if (pane.id === activePaneId) {
+      statusBar.setTerminal('warn');
+      statusBar.setText(`正在附加会话 ${shortenSessionId(sessionId)}...`);
+      syncLegacyStateFromActivePane();
+    }
+
+    socket.onopen = () => {
+      if (pane.socket !== socket || connectSeq !== pane.connectSeq) {
+        return;
+      }
+      pane.connected = true;
+      pane.reconnectDelayMs = 1000;
+      pane.reconnectDelayActive = 0;
+      pane.reconnectStartedAt = 0;
+      setPaneConnectionState(pane, 'online');
+      if (pane.id === activePaneId) {
+        statusBar.setTerminal('online');
+        statusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
+        syncLegacyStateFromActivePane();
+      }
+      sendResizeForPane(pane);
+    };
+
+    socket.onmessage = (event) => {
+      if (pane.socket !== socket) {
+        return;
+      }
+      let data = '';
+      let logBytes = 0;
+      if (typeof event.data === 'string') {
+        data = event.data;
+        logBytes = textEncoder.encode(data).byteLength;
+      } else if (event.data instanceof ArrayBuffer) {
+        if (pane.binaryEnabled) {
+          const frame = decodeTerminalFrame(event.data, sessionId);
+          if (!frame || frame.frameType !== TERMINAL_FRAME_TYPE_OUTPUT) {
+            return;
+          }
+          data = frame.payloadText;
+          logBytes = frame.payloadBytes;
+        } else {
+          logBytes = event.data.byteLength;
+          data = textDecoder.decode(event.data);
+        }
+      }
+      if (data) {
+        queuePaneOutput(pane, data, { sessionId, logBytes });
+      }
+    };
+
+    socket.onclose = () => {
+      if (pane.socket !== socket) {
+        return;
+      }
+      pane.socket = null;
+      pane.connected = false;
+      pane.binaryEnabled = false;
+      resetPaneIoBuffers(pane);
+      if (!pane.sessionId) {
+        setPaneConnectionState(pane, 'idle');
+        if (pane.id === activePaneId) {
+          syncLegacyStateFromActivePane();
+        }
+        return;
+      }
+      setPaneConnectionState(pane, 'offline');
+      if (pane.id === activePaneId) {
+        statusBar.setTerminal('warn');
+      }
+      schedulePaneReconnect(pane);
+    };
+
+    socket.onerror = () => {
+      if (pane.socket === socket) {
+        socket.close();
+      }
+    };
+  }
+
+  async function reconnectPane(pane) {
+    if (!pane || !pane.sessionId || !panes.has(pane.id)) {
+      return;
+    }
+    const replayFrom = getSessionOffset(pane.sessionId);
+    await connectPane(pane, pane.sessionId, {
+      clearTerminal: false,
+      replayFrom: replayFrom >= 0 ? replayFrom : 0,
+      keepReconnectDelay: true,
+      cwd: pane.cwd
+    });
+  }
+
+  function schedulePaneReconnect(pane) {
+    if (!pane.sessionId) {
+      return;
+    }
+    clearPaneReconnectTimer(pane);
+    const delay = pane.reconnectDelayMs;
+    pane.reconnectDelayActive = delay;
+    pane.reconnectStartedAt = Date.now();
+    pane.reconnectTimer = window.setTimeout(() => {
+      pane.reconnectTimer = 0;
+      pane.reconnectDelayActive = 0;
+      pane.reconnectStartedAt = 0;
+      if (!pane.sessionId || !panes.has(pane.id)) {
+        return;
+      }
+      pane.reconnectDelayMs = Math.min(pane.reconnectDelayMs * 2, 20000);
+      void reconnectPane(pane);
+    }, delay);
+
+    if (pane.id === activePaneId) {
+      statusBar.setTerminal('warn');
+      statusBar.setText(`终端连接断开，${Math.ceil(delay / 1000)}s 后重连...`);
+      syncReconnectProgressForActivePane();
+    }
+  }
+
+  function disconnectPane(pane, options = {}) {
+    if (!pane) {
+      return;
+    }
+    const { clearSession = false } = options;
+    clearPaneReconnectTimer(pane);
+    resetPaneIoBuffers(pane);
+    if (pane.socket) {
+      pane.socket.onclose = null;
+      pane.socket.close();
+      pane.socket = null;
+    }
+    pane.connected = false;
+    pane.binaryEnabled = false;
+    pane.lastResizeSessionId = '';
+    pane.lastResizeCols = 0;
+    pane.lastResizeRows = 0;
+    if (clearSession) {
+      pane.sessionId = '';
+      pane.cwd = '';
+    }
+    updatePaneTitle(pane);
+    setPaneConnectionState(pane, pane.sessionId ? 'offline' : 'idle');
+    if (pane.id === activePaneId) {
+      syncLegacyStateFromActivePane();
+    }
+  }
+
+  function createPane() {
+    if (!DOM.terminalGrid || panes.size >= TERMINAL_MAX_PANES) {
+      return null;
+    }
+
+    paneCounter += 1;
+    const paneId = `pane-${paneCounter}`;
+    const rootEl = document.createElement('section');
+    rootEl.className = 'terminal-pane';
+    rootEl.dataset.paneId = paneId;
+
+    const headerEl = document.createElement('header');
+    headerEl.className = 'terminal-pane-header';
+
+    const titleEl = document.createElement('span');
+    titleEl.className = 'terminal-pane-title';
+    headerEl.appendChild(titleEl);
+
+    const closeBtnEl = document.createElement('button');
+    closeBtnEl.type = 'button';
+    closeBtnEl.className = 'terminal-pane-close';
+    closeBtnEl.textContent = '×';
+    closeBtnEl.title = '关闭面板';
+    closeBtnEl.setAttribute('aria-label', '关闭面板');
+    headerEl.appendChild(closeBtnEl);
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'terminal-pane-body';
+
+    const terminalHostEl = document.createElement('div');
+    terminalHostEl.className = 'terminal-pane-terminal';
+    bodyEl.appendChild(terminalHostEl);
+
+    rootEl.appendChild(headerEl);
+    rootEl.appendChild(bodyEl);
+    DOM.terminalGrid.appendChild(rootEl);
+
+    const terminal = new TerminalCtor({
+      cursorBlink: true,
+      convertEol: true,
+      fontFamily: 'IBM Plex Mono, Menlo, Consolas, monospace',
+      fontSize: clampFontSize(State.terminalFontSize || DEFAULT_FONT_SIZE),
+      theme: {
+        background: '#090b14',
+        foreground: '#f0f2f8'
+      }
+    });
+    const fitAddon = new FitAddonCtor();
+    terminal.loadAddon(fitAddon);
+    terminal.open(terminalHostEl);
+
+    let webglAddon = null;
+    if (WebglAddonCtor) {
+      try {
+        webglAddon = new WebglAddonCtor();
+        terminal.loadAddon(webglAddon);
+        if (webglAddon && typeof webglAddon.onContextLoss === 'function') {
+          webglAddon.onContextLoss(() => {
+            toast.show('WebGL 上下文丢失，已回退默认渲染', 'warn');
+            if (webglAddon && typeof webglAddon.dispose === 'function') {
+              webglAddon.dispose();
+            }
+            webglAddon = null;
+          });
+        }
+      } catch {
+        webglAddon = null;
+      }
+    }
+
+    const pane = {
+      id: paneId,
+      index: paneOrder.length + 1,
+      rootEl,
+      titleEl,
+      closeBtnEl,
+      terminalHostEl,
+      terminal,
+      fitAddon,
+      webglAddon,
+      socket: null,
+      inputDisposable: null,
+      inputQueue: '',
+      inputRafId: 0,
+      writeQueue: [],
+      writeQueuedBytes: 0,
+      writeInProgress: false,
+      writeBackpressured: false,
+      connected: false,
+      binaryEnabled: false,
+      reconnectDelayMs: 1000,
+      reconnectDelayActive: 0,
+      reconnectStartedAt: 0,
+      reconnectTimer: 0,
+      connectSeq: 0,
+      sessionId: '',
+      cwd: '',
+      lastResizeSessionId: '',
+      lastResizeCols: 0,
+      lastResizeRows: 0
+    };
+
+    pane.inputDisposable = terminal.onData((data) => {
+      setActivePane(pane.id);
+      sendDataOnPane(pane, data);
+    });
+
+    rootEl.addEventListener('click', () => {
+      setActivePane(pane.id);
+    });
+
+    closeBtnEl.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (panes.size <= 1) {
+        toast.show('至少保留一个面板', 'warn');
+        return;
+      }
+      removePane(pane.id);
+    });
+
+    panes.set(pane.id, pane);
+    paneOrder.push(pane.id);
+    setPaneConnectionState(pane, 'idle');
+    updatePaneTitle(pane);
+    updatePaneOrderingAndLayout();
+    return pane;
+  }
+
+  function removePane(paneId) {
+    const pane = getPane(paneId);
+    if (!pane || panes.size <= 1) {
+      return false;
+    }
+    const removeIndex = paneOrder.indexOf(paneId);
+    if (removeIndex >= 0) {
+      paneOrder.splice(removeIndex, 1);
+    }
+    const wasActive = paneId === activePaneId;
+
+    disconnectPane(pane, { clearSession: true });
+    if (pane.inputDisposable) {
+      pane.inputDisposable.dispose();
+      pane.inputDisposable = null;
+    }
+    if (pane.webglAddon && typeof pane.webglAddon.dispose === 'function') {
+      pane.webglAddon.dispose();
+      pane.webglAddon = null;
+    }
+    pane.terminal.dispose();
+    pane.rootEl.remove();
+    panes.delete(paneId);
+
+    if (wasActive) {
+      const fallbackId = paneOrder[removeIndex] || paneOrder[removeIndex - 1] || paneOrder[0] || '';
+      activePaneId = '';
+      if (fallbackId) {
+        setActivePane(fallbackId, { focus: false });
+      } else {
+        syncLegacyStateFromActivePane();
+      }
+    } else {
+      syncLegacyStateFromActivePane();
+    }
+    updatePaneOrderingAndLayout();
+    return true;
+  }
+
   return {
     init() {
-      if (!TerminalCtor || !FitAddonCtor || !DOM.terminalRoot) {
+      if (!TerminalCtor || !FitAddonCtor || !DOM.terminalWrap || !DOM.terminalGrid) {
         statusBar.setText('xterm.js 本地资源加载失败');
         toast.show('xterm.js 本地资源加载失败', 'danger');
         return;
       }
-
-      State.terminal = new TerminalCtor({
-        cursorBlink: true,
-        convertEol: true,
-        fontFamily: 'IBM Plex Mono, Menlo, Consolas, monospace',
-        fontSize: 14,
-        theme: {
-          background: '#090b14',
-          foreground: '#f0f2f8'
+      splitMode = readSplitMode();
+      State.terminalFontSize = clampFontSize(State.terminalFontSize || DEFAULT_FONT_SIZE);
+      if (panes.size === 0) {
+        const firstPane = createPane();
+        if (!firstPane) {
+          statusBar.setText('终端初始化失败');
+          return;
         }
-      });
-
-      State.fitAddon = new FitAddonCtor();
-      State.terminal.loadAddon(State.fitAddon);
-      State.terminal.open(DOM.terminalRoot);
-      State.fitAddon.fit();
-
-      if (WebglAddonCtor) {
-        try {
-          State.webglAddon = new WebglAddonCtor();
-          State.terminal.loadAddon(State.webglAddon);
-          if (State.webglAddon && typeof State.webglAddon.onContextLoss === 'function') {
-            State.webglAddon.onContextLoss(() => {
-              toast.show('WebGL 上下文丢失，已回退默认渲染', 'warn');
-              if (State.webglAddon && typeof State.webglAddon.dispose === 'function') {
-                State.webglAddon.dispose();
-              }
-              State.webglAddon = null;
-            });
-          }
-        } catch {
-          State.webglAddon = null;
-        }
+        setActivePane(firstPane.id, { focus: false });
       }
 
-      this.bindResizeSources();
-      this.scheduleResize();
-    },
-
-    bindResizeSources() {
       if (window.ResizeObserver && DOM.terminalWrap) {
         State.resizeObserver = new ResizeObserver(() => {
           this.scheduleResize();
@@ -87,16 +813,18 @@ export function createTerm({ getControl, statusBar, toast }) {
         },
         { passive: true }
       );
+
+      this.scheduleResize(true);
     },
 
     scheduleResize(force = false) {
-      if (!State.terminal || !State.fitAddon) {
+      if (panes.size === 0) {
         return;
       }
-      if (State.zoomActive && !force) {
+      if (!force && State.zoomActive) {
         return;
       }
-      if (State.keyboardVisible && !force) {
+      if (!force && State.keyboardVisible) {
         State.pendingResizeAfterKeyboard = true;
         return;
       }
@@ -107,15 +835,7 @@ export function createTerm({ getControl, statusBar, toast }) {
         }
         State.resizeRafId = window.requestAnimationFrame(() => {
           State.resizeRafId = 0;
-          if (!State.fitAddon || !State.terminal) {
-            return;
-          }
-          if (State.keyboardVisible && !force) {
-            State.pendingResizeAfterKeyboard = true;
-            return;
-          }
-          State.fitAddon.fit();
-          this.sendResize();
+          fitAllPanes(force);
         });
       };
 
@@ -129,7 +849,6 @@ export function createTerm({ getControl, statusBar, toast }) {
       }
       if (State.resizeDebounceTimer) {
         window.clearTimeout(State.resizeDebounceTimer);
-        State.resizeDebounceTimer = 0;
       }
       State.resizeDebounceTimer = window.setTimeout(() => {
         State.resizeDebounceTimer = 0;
@@ -137,341 +856,165 @@ export function createTerm({ getControl, statusBar, toast }) {
       }, RESIZE_DEBOUNCE_MS);
     },
 
-    sendResize() {
-      if (!State.currentSessionId || !State.terminal) {
-        return;
-      }
-      const cols = State.terminal.cols;
-      const rows = State.terminal.rows;
-      if (
-        State.lastResizeSessionId === State.currentSessionId &&
-        State.lastResizeCols === cols &&
-        State.lastResizeRows === rows
-      ) {
-        return;
-      }
-
-      const control = getControl();
-      const sent = control
-        ? control.send({
-            type: 'resize',
-            sessionId: State.currentSessionId,
-            cols,
-            rows
-          })
-        : false;
-
-      if (!sent) {
-        return;
-      }
-      State.lastResizeSessionId = State.currentSessionId;
-      State.lastResizeCols = cols;
-      State.lastResizeRows = rows;
-    },
-
-    sendTerminalInput(socket, sessionId, data) {
-      if (!data) {
-        return;
-      }
-      if (State.terminalBinaryEnabled) {
-        socket.send(encodeTerminalFrame(TERMINAL_FRAME_TYPE_INPUT, sessionId, data));
-        return;
-      }
-      socket.send(data);
-    },
-
-    flushQueuedInput(socket, sessionId) {
-      if (!State.terminalInputQueue) {
-        return;
-      }
-      this.sendTerminalInput(socket, sessionId, State.terminalInputQueue);
-      State.terminalInputQueue = '';
-    },
-
     sendData(data) {
-      const socket = State.terminalSocket;
-      const sessionId = State.currentSessionId;
-      if (!sessionId || !socket || socket.readyState !== WebSocket.OPEN) {
+      const pane = getActivePane();
+      if (!pane) {
         return false;
       }
-      if (!data) {
-        return true;
-      }
-
-      if (data.length <= TERMINAL_INPUT_DIRECT_CHARS && !State.terminalInputQueue) {
-        this.sendTerminalInput(socket, sessionId, data);
-        return true;
-      }
-
-      if (data.length >= TERMINAL_INPUT_BATCH_CHARS) {
-        if (State.terminalInputRafId) {
-          window.cancelAnimationFrame(State.terminalInputRafId);
-          State.terminalInputRafId = 0;
-        }
-        this.flushQueuedInput(socket, sessionId);
-        this.sendTerminalInput(socket, sessionId, data);
-        return true;
-      }
-
-      State.terminalInputQueue += data;
-      if (State.terminalInputQueue.length >= TERMINAL_INPUT_BATCH_CHARS) {
-        if (State.terminalInputRafId) {
-          window.cancelAnimationFrame(State.terminalInputRafId);
-          State.terminalInputRafId = 0;
-        }
-        this.flushQueuedInput(socket, sessionId);
-        return true;
-      }
-
-      if (!State.terminalInputRafId) {
-        State.terminalInputRafId = window.requestAnimationFrame(() => {
-          State.terminalInputRafId = 0;
-          const activeSocket = State.terminalSocket;
-          if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || !State.terminalInputQueue) {
-            return;
-          }
-          const activeSessionId = State.currentSessionId;
-          if (!activeSessionId) {
-            return;
-          }
-          this.flushQueuedInput(activeSocket, activeSessionId);
-        });
-      }
-      return true;
-    },
-
-    queueServerOutput(data, options = {}) {
-      if (!State.terminal || !data) {
-        return;
-      }
-      const queueEntry = {
-        data,
-        queueBytes: data.length,
-        sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
-        logBytes: Number.isFinite(options.logBytes) ? Math.max(0, Math.floor(options.logBytes)) : 0
-      };
-      State.terminalWriteQueue.push(queueEntry);
-      State.terminalWriteQueuedBytes += queueEntry.queueBytes;
-      if (!State.terminalBackpressured && State.terminalWriteQueuedBytes >= TERMINAL_WRITE_HIGH_WATER_BYTES) {
-        State.terminalBackpressured = true;
-      }
-      this.drainServerOutput();
-    },
-
-    drainServerOutput() {
-      if (!State.terminal || State.terminalWriteInProgress) {
-        return;
-      }
-      const chunk = State.terminalWriteQueue.shift();
-      if (!chunk) {
-        if (State.terminalBackpressured && State.terminalWriteQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
-          State.terminalBackpressured = false;
-        }
-        return;
-      }
-      State.terminalWriteInProgress = true;
-      State.terminalWriteQueuedBytes = Math.max(0, State.terminalWriteQueuedBytes - chunk.queueBytes);
-      State.terminal.write(chunk.data, () => {
-        State.terminalWriteInProgress = false;
-        if (chunk.sessionId && chunk.logBytes > 0) {
-          addSessionOffset(chunk.sessionId, chunk.logBytes);
-        }
-        if (State.terminalBackpressured && State.terminalWriteQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
-          State.terminalBackpressured = false;
-        }
-        this.drainServerOutput();
-      });
-    },
-
-    resetIoBuffers() {
-      if (State.terminalInputRafId) {
-        window.cancelAnimationFrame(State.terminalInputRafId);
-        State.terminalInputRafId = 0;
-      }
-      State.terminalInputQueue = '';
-      State.terminalWriteQueue.length = 0;
-      State.terminalWriteQueuedBytes = 0;
-      State.terminalWriteInProgress = false;
-      State.terminalBackpressured = false;
-    },
-
-    cancelTerminalReconnect() {
-      if (State.terminalReconnectTimer) {
-        window.clearTimeout(State.terminalReconnectTimer);
-        State.terminalReconnectTimer = 0;
-      }
-    },
-
-    bindTerminalInput() {
-      if (!State.terminal) {
-        return;
-      }
-      if (State.terminalInputDisposable) {
-        State.terminalInputDisposable.dispose();
-      }
-      State.terminalInputDisposable = State.terminal.onData((data) => {
-        this.sendData(data);
-      });
-    },
-
-    disconnect() {
-      this.cancelTerminalReconnect();
-      if (State.resizeDebounceTimer) {
-        window.clearTimeout(State.resizeDebounceTimer);
-        State.resizeDebounceTimer = 0;
-      }
-      if (State.terminalInputDisposable) {
-        State.terminalInputDisposable.dispose();
-        State.terminalInputDisposable = null;
-      }
-      this.resetIoBuffers();
-      if (State.terminalSocket) {
-        State.terminalSocket.onclose = null;
-        State.terminalSocket.close();
-        State.terminalSocket = null;
-      }
-      State.terminalConnected = false;
-      State.terminalBinaryEnabled = false;
-      statusBar.setTerminal('offline');
-    },
-
-    scheduleTerminalReconnect(sessionId) {
-      if (!sessionId || sessionId !== State.currentSessionId) {
-        return;
-      }
-      this.cancelTerminalReconnect();
-      const delay = State.terminalReconnectDelayMs;
-      statusBar.setTerminal('warn');
-      statusBar.setText(`终端连接断开，${Math.ceil(delay / 1000)}s 后重连...`);
-      State.terminalReconnectTimer = window.setTimeout(() => {
-        State.terminalReconnectTimer = 0;
-        if (sessionId !== State.currentSessionId) {
-          return;
-        }
-        State.terminalReconnectDelayMs = Math.min(State.terminalReconnectDelayMs * 2, 20000);
-        void this.reconnect(sessionId);
-      }, delay);
-    },
-
-    async reconnect(sessionId) {
-      if (!State.terminal || !sessionId || sessionId !== State.currentSessionId) {
-        return;
-      }
-      const replayFrom = getSessionOffset(sessionId);
-      await this.connect(sessionId, {
-        clearTerminal: replayFrom === 0,
-        replayFrom: replayFrom > 0 ? replayFrom : undefined,
-        keepReconnectDelay: true
-      });
+      return sendDataOnPane(pane, data);
     },
 
     async connect(sessionId, options = {}) {
-      if (!State.terminal) {
+      if (!sessionId) {
         return;
       }
-      const { clearTerminal = true, replayFrom, keepReconnectDelay = false } = options;
-      State.terminalConnectSeq += 1;
-      const connectSeq = State.terminalConnectSeq;
-
-      this.disconnect();
-      if (clearTerminal) {
-        State.terminal.write('\x1bc');
+      let pane = getActivePane();
+      if (!pane) {
+        pane = createPane();
+        if (!pane) {
+          return;
+        }
+        setActivePane(pane.id, { focus: false });
       }
-      if (!keepReconnectDelay) {
-        State.terminalReconnectDelayMs = 1000;
+      await connectPane(pane, sessionId, options);
+      if (pane.id === activePaneId) {
+        syncLegacyStateFromActivePane();
       }
+    },
 
-      let effectiveReplayFrom = 0;
-      if (Number.isFinite(replayFrom) && replayFrom >= 0) {
-        effectiveReplayFrom = Math.floor(replayFrom);
-      } else if (!clearTerminal) {
-        effectiveReplayFrom = getSessionOffset(sessionId);
+    async reconnect(sessionId) {
+      if (!sessionId) {
+        return;
+      }
+      let pane = getActivePane();
+      if (!pane || pane.sessionId !== sessionId) {
+        pane = Array.from(panes.values()).find((entry) => entry.sessionId === sessionId) || getActivePane();
+      }
+      if (!pane) {
+        return;
+      }
+      if (pane.sessionId !== sessionId) {
+        const replayFrom = getSessionOffset(sessionId);
+        await connectPane(pane, sessionId, {
+          clearTerminal: false,
+          replayFrom: replayFrom >= 0 ? replayFrom : 0,
+          keepReconnectDelay: true
+        });
       } else {
-        const logBytes = await fetchSessionLogBytes(sessionId);
-        effectiveReplayFrom = Math.max(0, logBytes - TERMINAL_REPLAY_TAIL_BYTES);
+        await reconnectPane(pane);
       }
-      setSessionOffset(sessionId, effectiveReplayFrom);
+      if (pane.id === activePaneId) {
+        syncLegacyStateFromActivePane();
+      }
+    },
 
-      if (connectSeq !== State.terminalConnectSeq || sessionId !== State.currentSessionId) {
+    disconnect() {
+      const pane = getActivePane();
+      if (!pane) {
         return;
       }
+      disconnectPane(pane, { clearSession: true });
+      syncLegacyStateFromActivePane();
+    },
 
-      const supportsBinaryCodec =
-        Array.isArray(State.serverCapabilities) &&
-        State.serverCapabilities.includes(CAPABILITY_TERMINAL_BINARY_V1);
-      State.terminalBinaryEnabled = supportsBinaryCodec;
-
-      const extraParams = { session: sessionId };
-      if (effectiveReplayFrom > 0) {
-        extraParams.replayFrom = effectiveReplayFrom;
+    handleSessionExit(sessionId) {
+      if (!sessionId) {
+        return;
       }
-      if (supportsBinaryCodec) {
-        extraParams.codec = TERMINAL_BINARY_CODEC;
+      panes.forEach((pane) => {
+        if (pane.sessionId !== sessionId) {
+          return;
+        }
+        disconnectPane(pane, { clearSession: true });
+      });
+      syncLegacyStateFromActivePane();
+    },
+
+    openSessionInNewPane(sessionId, options = {}) {
+      if (!sessionId) {
+        return false;
       }
-      const socket = new WebSocket(wsUrl('/ws/terminal', extraParams));
-      socket.binaryType = 'arraybuffer';
-      State.terminalSocket = socket;
-      statusBar.setTerminal('warn');
+      if (panes.size >= TERMINAL_MAX_PANES) {
+        toast.show(`最多支持 ${TERMINAL_MAX_PANES} 个面板`, 'warn');
+        return false;
+      }
+      const pane = createPane();
+      if (!pane) {
+        return false;
+      }
+      setActivePane(pane.id);
+      void connectPane(pane, sessionId, {
+        clearTerminal: true,
+        cwd: options.cwd
+      });
+      syncLegacyStateFromActivePane();
+      return true;
+    },
 
-      socket.onopen = () => {
-        if (State.terminalSocket !== socket) {
+    toggleSplitMode() {
+      splitMode = splitMode === SPLIT_MODE_VERTICAL ? SPLIT_MODE_HORIZONTAL : SPLIT_MODE_VERTICAL;
+      writeSplitMode(splitMode);
+      updatePaneOrderingAndLayout();
+      this.scheduleResize(true);
+      toast.show(splitMode === SPLIT_MODE_VERTICAL ? '切换为上下分屏' : '切换为左右分屏', 'info');
+    },
+
+    forceReconnectNow() {
+      panes.forEach((pane) => {
+        if (!pane.sessionId || pane.connected) {
           return;
         }
-        State.terminalConnected = true;
-        State.terminalReconnectDelayMs = 1000;
-        statusBar.setTerminal('online');
-        statusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
-        this.bindTerminalInput();
-        this.sendResize();
-      };
+        if (pane.reconnectTimer) {
+          window.clearTimeout(pane.reconnectTimer);
+          pane.reconnectTimer = 0;
+        }
+        pane.reconnectDelayActive = 0;
+        pane.reconnectStartedAt = 0;
+        void reconnectPane(pane);
+      });
+      syncReconnectProgressForActivePane();
+    },
 
-      socket.onmessage = (event) => {
-        if (State.terminalSocket !== socket) {
-          return;
-        }
-        let data = '';
-        let logBytes = 0;
-        if (typeof event.data === 'string') {
-          data = event.data;
-          logBytes = textEncoder.encode(data).byteLength;
-        } else if (event.data instanceof ArrayBuffer) {
-          if (State.terminalBinaryEnabled) {
-            const frame = decodeTerminalFrame(event.data, sessionId);
-            if (!frame || frame.frameType !== TERMINAL_FRAME_TYPE_OUTPUT) {
-              return;
-            }
-            data = frame.payloadText;
-            logBytes = frame.payloadBytes;
-          } else {
-            logBytes = event.data.byteLength;
-            data = textDecoder.decode(event.data);
-          }
-        }
-        if (data) {
-          this.queueServerOutput(data, {
-            sessionId,
-            logBytes
-          });
-        }
-      };
+    setFontSize(fontSize) {
+      const nextSize = clampFontSize(fontSize);
+      const current = clampFontSize(State.terminalFontSize || DEFAULT_FONT_SIZE);
+      if (nextSize === current) {
+        return current;
+      }
+      State.terminalFontSize = nextSize;
+      panes.forEach((pane) => {
+        pane.terminal.options.fontSize = nextSize;
+      });
+      this.scheduleResize(true);
+      return nextSize;
+    },
 
-      socket.onclose = () => {
-        if (State.terminalSocket !== socket) {
-          return;
-        }
-        State.terminalSocket = null;
-        State.terminalConnected = false;
-        this.resetIoBuffers();
-        if (State.currentSessionId === sessionId) {
-          this.scheduleTerminalReconnect(sessionId);
-        }
-      };
+    scaleFont(baseFontSize, scale) {
+      const base = clampFontSize(baseFontSize || State.terminalFontSize || DEFAULT_FONT_SIZE);
+      if (!Number.isFinite(scale) || scale <= 0) {
+        return base;
+      }
+      return this.setFontSize(base * scale);
+    },
 
-      socket.onerror = () => {
-        if (State.terminalSocket === socket) {
-          socket.close();
-        }
-      };
+    getFontSize() {
+      return clampFontSize(State.terminalFontSize || DEFAULT_FONT_SIZE);
+    },
+
+    getActiveSelectionText() {
+      const pane = getActivePane();
+      if (!pane || !pane.terminal || typeof pane.terminal.getSelection !== 'function') {
+        return '';
+      }
+      return pane.terminal.getSelection() || '';
+    },
+
+    clearActiveSelection() {
+      const pane = getActivePane();
+      if (!pane || !pane.terminal || typeof pane.terminal.clearSelection !== 'function') {
+        return;
+      }
+      pane.terminal.clearSelection();
     }
   };
 }

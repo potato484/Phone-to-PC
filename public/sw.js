@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v2';
+const CACHE_NAME = 'c2p-v3';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -8,6 +8,7 @@ const APP_SHELL_ASSETS = [
   '/lib/term.js',
   '/lib/control.js',
   '/lib/ui.js',
+  '/lib/gestures.js',
   '/manifest.json',
   '/vendor/xterm.css',
   '/vendor/xterm.js',

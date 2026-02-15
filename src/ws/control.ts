@@ -44,6 +44,7 @@ type ControlOutbound =
   | { type: 'hello'; version: 1; capabilities: string[] }
   | { type: 'spawned'; sessionId: string; cli: CliKind; cwd: string }
   | { type: 'exited'; sessionId: string; exitCode: number }
+  | { type: 'clipboard'; sessionId: string; text: string }
   | { type: 'sessions'; list: unknown[] }
   | { type: 'error'; message: string };
 
@@ -234,6 +235,10 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
         status
       });
     }
+  });
+
+  ptyManager.onClipboard((sessionId, text) => {
+    broadcastControl({ type: 'clipboard', sessionId, text });
   });
 
   wss.on('connection', (ws) => {

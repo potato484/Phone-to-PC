@@ -1,4 +1,5 @@
 import { createControl } from './lib/control.js';
+import { createGestures } from './lib/gestures.js';
 import { createTerm } from './lib/term.js';
 import { createUi } from './lib/ui.js';
 
@@ -13,7 +14,10 @@ const ui = createUi({ getControl, getTerm });
 term = createTerm({
   getControl,
   statusBar: ui.StatusBar,
-  toast: ui.Toast
+  toast: ui.Toast,
+  onActiveSessionChange: (sessionId) => {
+    ui.onActiveSessionChanged(sessionId);
+  }
 });
 
 control = createControl({
@@ -24,4 +28,11 @@ control = createControl({
   actions: ui.Actions
 });
 
+const gestures = createGestures({
+  getTerm,
+  sessionTabs: ui.SessionTabs,
+  toast: ui.Toast
+});
+
 ui.bootstrap();
+gestures.bind();

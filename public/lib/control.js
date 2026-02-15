@@ -47,7 +47,7 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         statusBar.setTerminal('warn');
         setActionButtonsEnabled(true);
         actions.resetKillConfirm();
-        void term.connect(payload.sessionId, { replayFrom: 0 });
+        void term.connect(payload.sessionId, { replayFrom: 0, cwd: payload.cwd });
         term.scheduleResize();
         const cli = payload.cli || 'shell';
         statusBar.setText(`已启动 ${cli}`);
@@ -65,7 +65,15 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         return;
       }
 
-      if (payload.type === 'exited' && payload.sessionId === State.currentSessionId) {
+      if (payload.type === 'exited' && payload.sessionId) {
+        const exitedSessionId = payload.sessionId;
+        const isCurrentSession = exitedSessionId === State.currentSessionId;
+        if (typeof term.handleSessionExit === 'function') {
+          term.handleSessionExit(exitedSessionId);
+        }
+        if (!isCurrentSession) {
+          return;
+        }
         const code = Number.isFinite(payload.exitCode) ? payload.exitCode : Number(payload.exitCode) || 0;
         statusBar.setText(`会话已退出 (code=${code})`);
         if (State.killRequested) {
@@ -73,7 +81,7 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         } else {
           toast.show(`会话已退出 (code=${code})`, code === 0 ? 'info' : 'danger');
         }
-        delete State.sessionOffsets[payload.sessionId];
+        delete State.sessionOffsets[exitedSessionId];
         State.currentSessionId = '';
         State.killRequested = false;
         actions.resetKillRequest();
@@ -139,6 +147,18 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         return;
       }
 
+      if (
+        payload.type === 'clipboard' &&
+        typeof payload.sessionId === 'string' &&
+        typeof payload.text === 'string' &&
+        payload.text
+      ) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          void navigator.clipboard.writeText(payload.text).catch(() => {});
+        }
+        return;
+      }
+
       if (payload.type === 'error') {
         const message = payload.message || '控制通道错误';
         statusBar.setText(message);
@@ -155,6 +175,14 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         this.connect();
         State.reconnectDelayMs = Math.min(State.reconnectDelayMs * 2, 20000);
       }, State.reconnectDelayMs);
+    },
+
+    reconnectNow() {
+      if (State.reconnectTimer) {
+        window.clearTimeout(State.reconnectTimer);
+        State.reconnectTimer = 0;
+      }
+      this.connect();
     },
 
     connect() {

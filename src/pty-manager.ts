@@ -11,6 +11,11 @@ const SESSION_LOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FLOW_CONTROL_PAUSE = '\u0013';
 const FLOW_CONTROL_RESUME = '\u0011';
 const KILL_ESCALATION_DELAY_MS = 1500;
+const OSC52_START = '\u001b]52;';
+const OSC52_BEL = '\u0007';
+const OSC52_ST = '\u001b\\';
+const OSC52_MAX_CARRY_CHARS = 8192;
+const OSC52_MAX_TEXT_BYTES = 128 * 1024;
 
 export interface SpawnOptions {
   id: string;
@@ -40,6 +45,7 @@ interface SessionRecord {
   logPath: string;
   logBytes: number;
   outputPaused: boolean;
+  osc52Carry: string;
 }
 
 type DataListener = (sessionId: string, data: string) => void;
@@ -51,6 +57,7 @@ export interface DataChunk {
 }
 type DataChunkListener = (sessionId: string, chunk: DataChunk) => void;
 type ExitListener = (sessionId: string, exitCode: number) => void;
+type ClipboardListener = (sessionId: string, text: string) => void;
 
 interface PendingChunk {
   data: string;
@@ -147,12 +154,72 @@ function buildCliCommand(_cli: CliKind): string | null {
   return null;
 }
 
+function parseOsc52Clipboard(data: string, carry: string): { clipboardTexts: string[]; carry: string } {
+  const combined = `${carry}${data}`;
+  const clipboardTexts: string[] = [];
+  let searchFrom = 0;
+  let incompleteStart = -1;
+
+  while (searchFrom < combined.length) {
+    const start = combined.indexOf(OSC52_START, searchFrom);
+    if (start === -1) {
+      break;
+    }
+
+    const targetDelimiter = combined.indexOf(';', start + OSC52_START.length);
+    if (targetDelimiter === -1) {
+      incompleteStart = start;
+      break;
+    }
+
+    const belIndex = combined.indexOf(OSC52_BEL, targetDelimiter + 1);
+    const stIndex = combined.indexOf(OSC52_ST, targetDelimiter + 1);
+    let endIndex = -1;
+    let terminatorLength = 0;
+    if (belIndex !== -1 && (stIndex === -1 || belIndex < stIndex)) {
+      endIndex = belIndex;
+      terminatorLength = 1;
+    } else if (stIndex !== -1) {
+      endIndex = stIndex;
+      terminatorLength = 2;
+    }
+
+    if (endIndex === -1) {
+      incompleteStart = start;
+      break;
+    }
+
+    const encoded = combined.slice(targetDelimiter + 1, endIndex).trim();
+    if (encoded.length > 0 && /^[A-Za-z0-9+/=]+$/.test(encoded)) {
+      const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+      if (decoded.length > 0 && Buffer.byteLength(decoded, 'utf8') <= OSC52_MAX_TEXT_BYTES) {
+        clipboardTexts.push(decoded);
+      }
+    }
+    searchFrom = endIndex + terminatorLength;
+  }
+
+  let nextCarry = '';
+  if (incompleteStart >= 0) {
+    nextCarry = combined.slice(incompleteStart);
+  }
+  if (nextCarry.length > OSC52_MAX_CARRY_CHARS) {
+    nextCarry = nextCarry.slice(-OSC52_MAX_CARRY_CHARS);
+  }
+
+  return {
+    clipboardTexts,
+    carry: nextCarry
+  };
+}
+
 export class PtyManager {
   private readonly defaultCwd: string;
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly dataListeners = new Set<DataListener>();
   private readonly dataChunkListeners = new Set<DataChunkListener>();
   private readonly exitListeners = new Set<ExitListener>();
+  private readonly clipboardListeners = new Set<ClipboardListener>();
 
   constructor(defaultCwd = process.cwd()) {
     this.defaultCwd = normalizeCwd(defaultCwd, process.cwd());
@@ -243,6 +310,11 @@ export class PtyManager {
     return () => this.exitListeners.delete(listener);
   }
 
+  onClipboard(listener: ClipboardListener): () => void {
+    this.clipboardListeners.add(listener);
+    return () => this.clipboardListeners.delete(listener);
+  }
+
   spawn(options: SpawnOptions): SessionInfo {
     if (this.sessions.has(options.id)) {
       throw new Error(`Session already exists: ${options.id}`);
@@ -310,7 +382,8 @@ export class PtyManager {
       logStream,
       logPath,
       logBytes: existingLogBytes,
-      outputPaused: false
+      outputPaused: false,
+      osc52Carry: ''
     };
 
     pty.onData((data) => {
@@ -331,6 +404,15 @@ export class PtyManager {
         endOffset: record.logBytes,
         byteLength: chunk.byteLength
       });
+      const osc52 = parseOsc52Clipboard(data, record.osc52Carry);
+      record.osc52Carry = osc52.carry;
+      if (osc52.clipboardTexts.length > 0 && this.clipboardListeners.size > 0) {
+        for (const text of osc52.clipboardTexts) {
+          for (const listener of this.clipboardListeners) {
+            listener(options.id, text);
+          }
+        }
+      }
       this.scheduleDataFlush(options.id, record);
     });
 

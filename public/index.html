@@ -31,25 +31,23 @@
       </header>
 
       <main id="terminal-wrap" aria-label="终端区域">
-        <div id="terminal"></div>
+        <div id="terminal-reconnect" class="terminal-reconnect" hidden>
+          <p id="terminal-reconnect-text" class="terminal-reconnect-text"></p>
+          <div class="terminal-reconnect-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <span id="terminal-reconnect-fill" class="terminal-reconnect-fill"></span>
+          </div>
+        </div>
+        <div id="terminal-grid" class="terminal-grid" aria-live="polite"></div>
       </main>
 
       <section id="dock" class="dock" aria-label="底部控制坞">
         <div id="session-tabs" class="session-tabs" role="tablist" aria-label="活跃会话" hidden></div>
 
-        <div id="quick-keys" class="quick-keys" role="group" aria-label="快捷键">
-          <button class="quick-key-btn" type="button" data-key="ctrl-c">^C</button>
-          <button class="quick-key-btn" type="button" data-key="tab">Tab</button>
-          <button class="quick-key-btn" type="button" data-key="shift-tab">⇤</button>
-          <button class="quick-key-btn" type="button" data-key="/">/</button>
-          <button class="quick-key-btn" type="button" data-key="up">↑</button>
-          <button class="quick-key-btn" type="button" data-key="down">↓</button>
-          <button class="quick-key-btn" type="button" data-key="esc">Esc</button>
-          <button class="quick-key-btn" type="button" data-key="enter">⏎</button>
-        </div>
+        <div id="quick-keys" class="quick-keys" role="group" aria-label="快捷键"></div>
 
         <div class="quick-actions">
           <button id="detach-btn" class="btn" type="button" disabled>关闭终端</button>
+          <button id="split-toggle-btn" class="btn" type="button">切换分屏</button>
         </div>
 
         <button id="dock-handle" class="dock-handle" type="button" aria-expanded="false">

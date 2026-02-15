@@ -1,6 +1,10 @@
 export const DOM = {
   terminalRoot: document.getElementById('terminal'),
   terminalWrap: document.getElementById('terminal-wrap'),
+  terminalGrid: document.getElementById('terminal-grid'),
+  terminalReconnect: document.getElementById('terminal-reconnect'),
+  terminalReconnectText: document.getElementById('terminal-reconnect-text'),
+  terminalReconnectFill: document.getElementById('terminal-reconnect-fill'),
   statusText: document.getElementById('status-text'),
   cwdText: document.getElementById('cwd-text'),
   controlSignal: document.getElementById('control-signal'),
@@ -10,12 +14,16 @@ export const DOM = {
   dockHandle: document.getElementById('dock-handle'),
   sessionTabs: document.getElementById('session-tabs'),
   quickKeys: document.getElementById('quick-keys'),
+  splitToggleBtn: document.getElementById('split-toggle-btn'),
   detachBtn: document.getElementById('detach-btn'),
   killBtn: document.getElementById('kill-btn'),
   toastRoot: document.getElementById('toast-root')
 };
 
 export const TOKEN_STORAGE_KEY = 'c2p_token';
+export const QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
+export const QUICK_KEY_LONG_PRESS_MS = 520;
+export const TERMINAL_SPLIT_MODE_STORAGE_KEY = 'c2p_split_mode_v1';
 export const SIGNAL_STATES = ['is-online', 'is-warn', 'is-offline'];
 export const QUICK_KEY_SEQUENCES = {
   'ctrl-c': '\x03',
@@ -24,12 +32,17 @@ export const QUICK_KEY_SEQUENCES = {
   '/': '/',
   up: '\x1b[A',
   down: '\x1b[B',
+  left: '\x1b[D',
+  right: '\x1b[C',
   esc: '\x1b',
   enter: '\r'
 };
 export const KEYBOARD_VISIBLE_THRESHOLD_PX = 80;
 export const ZOOM_SCALE_EPSILON = 0.02;
 export const ZOOM_SETTLE_MS = 260;
+export const TERMINAL_FONT_SIZE_MIN = 10;
+export const TERMINAL_FONT_SIZE_MAX = 28;
+export const TERMINAL_MAX_PANES = 4;
 export const TERMINAL_WRITE_HIGH_WATER_BYTES = 256 * 1024;
 export const TERMINAL_WRITE_LOW_WATER_BYTES = 96 * 1024;
 export const TERMINAL_INPUT_DIRECT_CHARS = 8;
@@ -93,6 +106,7 @@ export const State = {
   initialSessionsReceived: false,
   currentSessionId: '',
   cwd: '',
+  terminalFontSize: 14,
   pushRegistered: false,
   pushAutoRequested: false,
   serviceWorkerRegistration: null,
