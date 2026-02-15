@@ -390,6 +390,12 @@ button:active {
   transition: width 90ms linear;
 }
 
+.terminal-input-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .terminal-grid {
   min-height: 0;
   height: 100%;
