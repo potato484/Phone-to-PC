@@ -1,5 +1,8 @@
 import { createControl } from './lib/control.js';
+import { createDesktop } from './lib/desktop.js';
+import { createFiles } from './lib/files.js';
 import { createGestures } from './lib/gestures.js';
+import { createMonitor } from './lib/monitor.js';
 import { createTerm } from './lib/term.js';
 import { createUi } from './lib/ui.js';
 
@@ -34,5 +37,22 @@ const gestures = createGestures({
   toast: ui.Toast
 });
 
+const desktop = createDesktop({
+  getTerm,
+  statusBar: ui.StatusBar,
+  toast: ui.Toast
+});
+
+const files = createFiles({
+  toast: ui.Toast
+});
+
+const monitor = createMonitor({
+  toast: ui.Toast
+});
+
 ui.bootstrap();
+desktop.init();
+files.init();
+monitor.init();
 gestures.bind();

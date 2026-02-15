@@ -10,8 +10,10 @@ import { PushService } from './push.js';
 import { registerApiRoutes } from './routes/api.js';
 import { C2PStore } from './store.js';
 import { getLanAddress, isEnabledEnvFlag, resolveTunnelMode, startTunnel } from './tunnel.js';
+import { VncManager } from './vnc-manager.js';
 import { createControlChannel } from './ws/control.js';
 import type { WsChannel } from './ws/channel.js';
+import { createDesktopChannel } from './ws/desktop.js';
 import { createTerminalChannel } from './ws/terminal.js';
 
 interface ServerCliOptions {
@@ -63,6 +65,7 @@ const token = ensureAuthToken();
 const authMiddleware = createAuthMiddleware(token);
 const ptyManager = new PtyManager(defaultWorkingDirectory);
 const pushService = new PushService(store);
+const vncManager = new VncManager();
 
 pushService.init({
   subject: process.env.VAPID_SUBJECT,
@@ -72,22 +75,26 @@ pushService.init({
 
 const app = express();
 const publicDir = path.resolve(process.cwd(), 'public');
+const noVncDir = path.resolve(process.cwd(), 'node_modules', 'novnc');
 
 app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(publicDir));
+app.use('/vendor/novnc', express.static(noVncDir));
 app.use('/api', authMiddleware);
 registerApiRoutes(app, {
   store,
   ptyManager,
   pushService,
-  defaultWorkingDirectory
+  defaultWorkingDirectory,
+  vncManager
 });
 
 const server = http.createServer(app);
 const channels: WsChannel[] = [
   createControlChannel({ ptyManager, store, pushService }),
-  createTerminalChannel({ ptyManager })
+  createTerminalChannel({ ptyManager }),
+  createDesktopChannel({ vncManager })
 ];
 const channelMap = new Map(channels.map((channel) => [channel.pathname, channel]));
 
@@ -107,6 +114,10 @@ server.on('upgrade', (request, socket, head) => {
   }
 
   channel.handleUpgrade(request, socket, head);
+});
+
+server.on('close', () => {
+  vncManager.dispose();
 });
 
 server.listen(port, async () => {

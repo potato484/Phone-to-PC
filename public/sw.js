@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v3';
+const CACHE_NAME = 'c2p-v4';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -9,12 +9,17 @@ const APP_SHELL_ASSETS = [
   '/lib/control.js',
   '/lib/ui.js',
   '/lib/gestures.js',
+  '/lib/desktop.js',
+  '/lib/files.js',
+  '/lib/monitor.js',
   '/manifest.json',
   '/vendor/xterm.css',
   '/vendor/xterm.js',
   '/vendor/xterm-addon-fit.js',
   '/vendor/xterm-addon-attach.js',
-  '/vendor/xterm-addon-webgl.js'
+  '/vendor/xterm-addon-webgl.js',
+  '/vendor/novnc/core/rfb.js',
+  '/vendor/novnc/core/input/keysym.js'
 ];
 
 function shouldBypassRequest(url, request) {

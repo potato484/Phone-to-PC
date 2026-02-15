@@ -30,14 +30,61 @@
         </button>
       </header>
 
-      <main id="terminal-wrap" aria-label="终端区域">
-        <div id="terminal-reconnect" class="terminal-reconnect" hidden>
-          <p id="terminal-reconnect-text" class="terminal-reconnect-text"></p>
-          <div class="terminal-reconnect-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
-            <span id="terminal-reconnect-fill" class="terminal-reconnect-fill"></span>
-          </div>
+      <main class="workspace" aria-label="工作区">
+        <div class="workspace-tabs" role="tablist" aria-label="模式切换">
+          <button id="view-terminal-btn" class="workspace-tab is-active" type="button" role="tab" aria-selected="true">
+            终端
+          </button>
+          <button id="view-desktop-btn" class="workspace-tab" type="button" role="tab" aria-selected="false">
+            桌面
+          </button>
         </div>
-        <div id="terminal-grid" class="terminal-grid" aria-live="polite"></div>
+
+        <section id="terminal-wrap" aria-label="终端区域">
+          <div id="terminal-reconnect" class="terminal-reconnect" hidden>
+            <p id="terminal-reconnect-text" class="terminal-reconnect-text"></p>
+            <div class="terminal-reconnect-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+              <span id="terminal-reconnect-fill" class="terminal-reconnect-fill"></span>
+            </div>
+          </div>
+          <div id="terminal-grid" class="terminal-grid" aria-live="polite"></div>
+        </section>
+
+        <section id="desktop-wrap" class="desktop-wrap" aria-label="桌面区域" hidden>
+          <div class="desktop-toolbar">
+            <button id="desktop-connect-btn" class="btn desktop-connect-btn" type="button">连接桌面</button>
+            <div class="desktop-toggle-group" role="group" aria-label="指针模式">
+              <button id="desktop-input-trackpad-btn" class="desktop-toggle is-active" type="button" aria-pressed="true">
+                触控板
+              </button>
+              <button id="desktop-input-direct-btn" class="desktop-toggle" type="button" aria-pressed="false">
+                直点
+              </button>
+            </div>
+            <label class="desktop-fps" for="desktop-fps-select">
+              帧率
+              <select id="desktop-fps-select">
+                <option value="10">10</option>
+                <option value="15" selected>15</option>
+                <option value="24">24</option>
+                <option value="30">30</option>
+              </select>
+            </label>
+            <span id="desktop-status-text" class="desktop-status-text">未连接</span>
+          </div>
+
+          <div class="desktop-toolbar desktop-toolbar-mods">
+            <button id="desktop-mod-ctrl" class="desktop-mod-btn" type="button" aria-pressed="false">Ctrl</button>
+            <button id="desktop-mod-alt" class="desktop-mod-btn" type="button" aria-pressed="false">Alt</button>
+            <button id="desktop-mod-meta" class="desktop-mod-btn" type="button" aria-pressed="false">Win</button>
+            <button id="desktop-cad-btn" class="desktop-mod-btn desktop-mod-danger" type="button">Ctrl+Alt+Del</button>
+          </div>
+
+          <div id="desktop-surface" class="desktop-surface" data-connection="offline">
+            <div id="desktop-canvas" class="desktop-canvas" aria-label="远程桌面画面"></div>
+            <p id="desktop-placeholder" class="desktop-placeholder">切换到桌面模式后自动连接</p>
+          </div>
+        </section>
       </main>
 
       <section id="dock" class="dock" aria-label="底部控制坞">
@@ -58,6 +105,59 @@
           <div class="action-row">
             <button id="kill-btn" class="btn btn-danger" type="button" disabled>终止会话</button>
           </div>
+
+          <section class="dock-card files-card" aria-label="文件管理">
+            <header class="dock-card-header">
+              <h3 class="dock-card-title">文件管理</h3>
+              <code id="files-path" class="files-path">.</code>
+            </header>
+            <div class="files-toolbar">
+              <button id="files-up-btn" class="btn" type="button">上级</button>
+              <button id="files-refresh-btn" class="btn" type="button">刷新</button>
+              <button id="files-mkdir-btn" class="btn" type="button">新建目录</button>
+              <button id="files-upload-btn" class="btn" type="button">上传</button>
+              <input id="files-upload-input" type="file" multiple hidden />
+            </div>
+            <div id="files-list" class="files-list" aria-live="polite"></div>
+            <div id="files-editor-wrap" class="files-editor-wrap" hidden>
+              <p class="files-editor-path">
+                编辑: <code id="files-editor-path"></code>
+              </p>
+              <textarea id="files-editor" class="files-editor" spellcheck="false"></textarea>
+              <div class="files-editor-actions">
+                <button id="files-editor-save-btn" class="btn" type="button">保存</button>
+                <button id="files-editor-cancel-btn" class="btn" type="button">关闭</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="monitor-panel" class="dock-card monitor-card" aria-label="系统监控">
+            <header class="dock-card-header">
+              <h3 class="dock-card-title">系统监控</h3>
+              <span id="monitor-updated-at" class="monitor-updated-at">--:--:--</span>
+            </header>
+            <div class="monitor-item">
+              <span class="monitor-label">CPU</span>
+              <div class="monitor-meter"><span id="monitor-cpu-fill" class="monitor-meter-fill"></span></div>
+              <span id="monitor-cpu-text" class="monitor-value">-</span>
+            </div>
+            <div class="monitor-item">
+              <span class="monitor-label">内存</span>
+              <div class="monitor-meter"><span id="monitor-memory-fill" class="monitor-meter-fill"></span></div>
+              <span id="monitor-memory-text" class="monitor-value">-</span>
+            </div>
+            <div class="monitor-item">
+              <span class="monitor-label">磁盘</span>
+              <div class="monitor-meter"><span id="monitor-disk-fill" class="monitor-meter-fill"></span></div>
+              <span id="monitor-disk-text" class="monitor-value">-</span>
+            </div>
+            <div class="monitor-inline">
+              <span id="monitor-net-rx-text">↓ -</span>
+              <span id="monitor-net-tx-text">↑ -</span>
+              <span id="monitor-uptime-text">-</span>
+              <span id="monitor-vnc-text">离线</span>
+            </div>
+          </section>
         </div>
       </section>
     </div>
