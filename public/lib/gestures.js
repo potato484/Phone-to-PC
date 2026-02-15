@@ -1,8 +1,6 @@
 import { DOM } from './state.js';
 
-const SWIPE_THRESHOLD_PX = 52;
-const SWIPE_MAX_DURATION_MS = 550;
-const SWIPE_VERTICAL_TOLERANCE_PX = 44;
+const DIRECTION_LOCK_THRESHOLD_PX = 8;
 const LONG_PRESS_MS = 560;
 const LONG_PRESS_MOVE_CANCEL_PX = 12;
 
@@ -22,12 +20,13 @@ function clampMenuPosition(x, y, menuWidth, menuHeight) {
   };
 }
 
-export function createGestures({ getTerm, sessionTabs, toast }) {
+export function createGestures({ getTerm, toast }) {
   let menuEl = null;
   let longPressTimer = 0;
   let longPressPoint = null;
   let suppressTouchEnd = false;
   let swipeStart = null;
+  let directionLock = '';
   let pinchState = null;
 
   function ensureMenu() {
@@ -151,6 +150,17 @@ export function createGestures({ getTerm, sessionTabs, toast }) {
     longPressPoint = null;
   }
 
+  function resolveHorizontalScrollTarget(target) {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+    const container = target.closest('.terminal-pane-body');
+    if (!container) {
+      return null;
+    }
+    return container.scrollWidth > container.clientWidth + 1 ? container : null;
+  }
+
   function bind() {
     if (!DOM.terminalWrap) {
       return;
@@ -165,6 +175,7 @@ export function createGestures({ getTerm, sessionTabs, toast }) {
           clearLongPress();
           suppressTouchEnd = false;
           swipeStart = null;
+          directionLock = '';
           const term = getTerm();
           pinchState = {
             baseDistance: touchDistance(touches[0], touches[1]),
@@ -175,17 +186,21 @@ export function createGestures({ getTerm, sessionTabs, toast }) {
         if (touches.length !== 1) {
           clearLongPress();
           swipeStart = null;
+          directionLock = '';
           pinchState = null;
           return;
         }
 
         pinchState = null;
         const touch = touches[0];
+        const horizontalScrollTarget = resolveHorizontalScrollTarget(event.target);
         swipeStart = {
           x: touch.clientX,
           y: touch.clientY,
-          time: Date.now()
+          horizontalScrollTarget,
+          horizontalScrollLeft: horizontalScrollTarget ? horizontalScrollTarget.scrollLeft : 0
         };
+        directionLock = '';
         longPressPoint = {
           x: touch.clientX,
           y: touch.clientY
@@ -223,13 +238,42 @@ export function createGestures({ getTerm, sessionTabs, toast }) {
           return;
         }
 
-        if (touches.length !== 1 || !swipeStart || !longPressTimer) {
+        if (touches.length !== 1 || !swipeStart) {
           return;
         }
         const touch = touches[0];
         const dx = touch.clientX - swipeStart.x;
         const dy = touch.clientY - swipeStart.y;
-        if (Math.abs(dx) > LONG_PRESS_MOVE_CANCEL_PX || Math.abs(dy) > LONG_PRESS_MOVE_CANCEL_PX) {
+        if (
+          !directionLock &&
+          (Math.abs(dx) >= DIRECTION_LOCK_THRESHOLD_PX || Math.abs(dy) >= DIRECTION_LOCK_THRESHOLD_PX)
+        ) {
+          directionLock = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        }
+        if (directionLock === 'x' && swipeStart.horizontalScrollTarget) {
+          const scroller = swipeStart.horizontalScrollTarget;
+          const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+          if (maxScrollLeft > 0) {
+            const nextScrollLeft = Math.max(
+              0,
+              Math.min(maxScrollLeft, swipeStart.horizontalScrollLeft - dx)
+            );
+            if (Math.abs(nextScrollLeft - scroller.scrollLeft) > 0.5) {
+              scroller.scrollLeft = nextScrollLeft;
+            }
+            event.preventDefault();
+          }
+        }
+        if (!longPressTimer) {
+          return;
+        }
+        const primaryDelta =
+          directionLock === 'x'
+            ? Math.abs(dx)
+            : directionLock === 'y'
+              ? Math.abs(dy)
+              : Math.max(Math.abs(dx), Math.abs(dy));
+        if (primaryDelta > LONG_PRESS_MOVE_CANCEL_PX) {
           clearLongPress();
         }
       },
@@ -238,7 +282,7 @@ export function createGestures({ getTerm, sessionTabs, toast }) {
 
     DOM.terminalWrap.addEventListener(
       'touchend',
-      (event) => {
+      () => {
         clearLongPress();
         const term = getTerm();
         if (pinchState) {
@@ -247,39 +291,19 @@ export function createGestures({ getTerm, sessionTabs, toast }) {
             term.scheduleResize(true);
           }
           swipeStart = null;
+          directionLock = '';
           return;
         }
 
         if (suppressTouchEnd) {
           suppressTouchEnd = false;
           swipeStart = null;
+          directionLock = '';
           return;
         }
 
-        if (!swipeStart || event.changedTouches.length === 0) {
-          swipeStart = null;
-          return;
-        }
-        const touch = event.changedTouches[0];
-        const duration = Date.now() - swipeStart.time;
-        const dx = touch.clientX - swipeStart.x;
-        const dy = touch.clientY - swipeStart.y;
         swipeStart = null;
-        if (
-          duration > SWIPE_MAX_DURATION_MS ||
-          Math.abs(dx) < SWIPE_THRESHOLD_PX ||
-          Math.abs(dy) > SWIPE_VERTICAL_TOLERANCE_PX
-        ) {
-          return;
-        }
-        if (!sessionTabs || typeof sessionTabs.switchByOffset !== 'function') {
-          return;
-        }
-        const offset = dx < 0 ? 1 : -1;
-        const switched = sessionTabs.switchByOffset(offset);
-        if (switched) {
-          toast.show(offset > 0 ? '切换到下一个会话' : '切换到上一个会话', 'info');
-        }
+        directionLock = '';
       },
       { passive: true }
     );
@@ -289,6 +313,7 @@ export function createGestures({ getTerm, sessionTabs, toast }) {
       () => {
         clearLongPress();
         swipeStart = null;
+        directionLock = '';
         pinchState = null;
       },
       { passive: true }

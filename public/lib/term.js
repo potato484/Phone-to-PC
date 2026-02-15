@@ -13,7 +13,6 @@ import {
   TERMINAL_FRAME_TYPE_OUTPUT,
   TERMINAL_MAX_PANES,
   TERMINAL_REPLAY_TAIL_BYTES,
-  TERMINAL_SPLIT_MODE_STORAGE_KEY,
   TERMINAL_WRITE_HIGH_WATER_BYTES,
   TERMINAL_WRITE_LOW_WATER_BYTES,
   TerminalCtor,
@@ -32,8 +31,6 @@ import {
 
 const DEFAULT_FONT_SIZE = 14;
 const RECONNECT_PROGRESS_TICK_MS = 80;
-const SPLIT_MODE_VERTICAL = 'vertical';
-const SPLIT_MODE_HORIZONTAL = 'horizontal';
 
 function clampFontSize(size) {
   if (!Number.isFinite(size)) {
@@ -42,32 +39,11 @@ function clampFontSize(size) {
   return Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(size)));
 }
 
-function normalizeSplitMode(value) {
-  return value === SPLIT_MODE_HORIZONTAL ? SPLIT_MODE_HORIZONTAL : SPLIT_MODE_VERTICAL;
-}
-
-function readSplitMode() {
-  try {
-    return normalizeSplitMode(window.localStorage.getItem(TERMINAL_SPLIT_MODE_STORAGE_KEY));
-  } catch {
-    return SPLIT_MODE_VERTICAL;
-  }
-}
-
-function writeSplitMode(mode) {
-  try {
-    window.localStorage.setItem(TERMINAL_SPLIT_MODE_STORAGE_KEY, normalizeSplitMode(mode));
-  } catch {
-    // ignore storage errors
-  }
-}
-
 export function createTerm({ getControl, statusBar, toast, onActiveSessionChange }) {
   const panes = new Map();
   const paneOrder = [];
   let paneCounter = 0;
   let activePaneId = '';
-  let splitMode = readSplitMode();
   let reconnectProgressTimer = 0;
 
   function getPane(paneId) {
@@ -217,8 +193,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     });
 
     DOM.terminalGrid.dataset.paneCount = String(panes.size);
-    DOM.terminalGrid.classList.toggle('is-split-vertical', splitMode === SPLIT_MODE_VERTICAL);
-    DOM.terminalGrid.classList.toggle('is-split-horizontal', splitMode === SPLIT_MODE_HORIZONTAL);
   }
 
   function sendResizeForPane(pane) {
@@ -819,7 +793,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         toast.show('xterm.js 本地资源加载失败', 'danger');
         return;
       }
-      splitMode = readSplitMode();
       State.terminalFontSize = clampFontSize(State.terminalFontSize || DEFAULT_FONT_SIZE);
       if (panes.size === 0) {
         const firstPane = createPane();
@@ -986,14 +959,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       });
       syncLegacyStateFromActivePane();
       return true;
-    },
-
-    toggleSplitMode() {
-      splitMode = splitMode === SPLIT_MODE_VERTICAL ? SPLIT_MODE_HORIZONTAL : SPLIT_MODE_VERTICAL;
-      writeSplitMode(splitMode);
-      updatePaneOrderingAndLayout();
-      this.scheduleResize(true);
-      toast.show(splitMode === SPLIT_MODE_VERTICAL ? '切换为上下分屏' : '切换为左右分屏', 'info');
     },
 
     forceReconnectNow() {

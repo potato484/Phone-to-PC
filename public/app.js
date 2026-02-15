@@ -32,7 +32,6 @@ control = createControl({
 
 const gestures = createGestures({
   getTerm,
-  sessionTabs: ui.SessionTabs,
   toast: ui.Toast
 });
 

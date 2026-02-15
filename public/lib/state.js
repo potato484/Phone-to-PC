@@ -14,7 +14,6 @@ export const DOM = {
   dockHandle: document.getElementById('dock-handle'),
   sessionTabs: document.getElementById('session-tabs'),
   quickKeys: document.getElementById('quick-keys'),
-  splitToggleBtn: document.getElementById('split-toggle-btn'),
   filesPath: document.getElementById('files-path'),
   filesList: document.getElementById('files-list'),
   filesRefreshBtn: document.getElementById('files-refresh-btn'),
@@ -45,7 +44,6 @@ export const DOM = {
 export const TOKEN_STORAGE_KEY = 'c2p_token';
 export const QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 export const QUICK_KEY_LONG_PRESS_MS = 520;
-export const TERMINAL_SPLIT_MODE_STORAGE_KEY = 'c2p_split_mode_v1';
 export const SIGNAL_STATES = ['is-online', 'is-warn', 'is-offline'];
 export const QUICK_KEY_SEQUENCES = {
   'ctrl-c': '\x03',

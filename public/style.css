@@ -152,10 +152,11 @@ button:active {
   flex-direction: column;
   gap: 8px;
   padding: 10px 10px calc(14px + var(--dock-height));
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  overscroll-behavior-y: contain;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
 }
 
 .terminal-reconnect {
@@ -206,14 +207,9 @@ button:active {
   grid-template-rows: 1fr;
 }
 
-.terminal-grid[data-pane-count="2"].is-split-vertical {
+.terminal-grid[data-pane-count="2"] {
   grid-template-columns: 1fr;
   grid-template-rows: repeat(2, minmax(0, 1fr));
-}
-
-.terminal-grid[data-pane-count="2"].is-split-horizontal {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: 1fr;
 }
 
 .terminal-grid[data-pane-count="3"],
@@ -295,10 +291,16 @@ button:active {
 
 .terminal-pane-body {
   min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
 }
 
 .terminal-pane-terminal {
   width: 100%;
+  min-width: 960px;
   height: 100%;
 }
 

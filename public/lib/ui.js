@@ -745,15 +745,6 @@ export function createUi({ getControl, getTerm }) {
 
   const Actions = {
     bind() {
-      if (DOM.splitToggleBtn) {
-        DOM.splitToggleBtn.addEventListener('click', () => {
-          const term = getTerm();
-          if (term && typeof term.toggleSplitMode === 'function') {
-            term.toggleSplitMode();
-            Dock.collapse();
-          }
-        });
-      }
     },
 
     resetKillRequest() {
