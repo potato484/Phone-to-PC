@@ -8,6 +8,9 @@ const BUFFER_FLUSH_INTERVAL_MS = 4;
 const RING_INITIAL_CAPACITY = 16;
 const SESSION_LOG_DIR = path.join(process.cwd(), '.c2p-sessions');
 const SESSION_LOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const FLOW_CONTROL_PAUSE = '\u0013';
+const FLOW_CONTROL_RESUME = '\u0011';
+const KILL_ESCALATION_DELAY_MS = 1500;
 
 export interface SpawnOptions {
   id: string;
@@ -30,15 +33,31 @@ interface SessionRecord {
   info: SessionInfo;
   pty: IPty;
   buffer: BufferRing;
-  pendingData: string[];
+  pendingData: PendingChunk[];
   flushTimer: NodeJS.Timeout | null;
+  killTimer: NodeJS.Timeout | null;
   logStream: fs.WriteStream | null;
   logPath: string;
   logBytes: number;
+  outputPaused: boolean;
 }
 
 type DataListener = (sessionId: string, data: string) => void;
+export interface DataChunk {
+  data: string;
+  startOffset: number;
+  endOffset: number;
+  byteLength: number;
+}
+type DataChunkListener = (sessionId: string, chunk: DataChunk) => void;
 type ExitListener = (sessionId: string, exitCode: number) => void;
+
+interface PendingChunk {
+  data: string;
+  startOffset: number;
+  endOffset: number;
+  byteLength: number;
+}
 
 interface BufferRing {
   chunks: Array<Buffer | undefined>;
@@ -132,6 +151,7 @@ export class PtyManager {
   private readonly defaultCwd: string;
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly dataListeners = new Set<DataListener>();
+  private readonly dataChunkListeners = new Set<DataChunkListener>();
   private readonly exitListeners = new Set<ExitListener>();
 
   constructor(defaultCwd = process.cwd()) {
@@ -178,10 +198,24 @@ export class PtyManager {
     if (record.pendingData.length === 0) {
       return;
     }
-    const merged = record.pendingData.join('');
+    const chunks = record.pendingData.slice();
+    const merged = chunks.map((chunk) => chunk.data).join('');
     record.pendingData.length = 0;
     for (const listener of this.dataListeners) {
       listener(sessionId, merged);
+    }
+    if (this.dataChunkListeners.size > 0) {
+      for (const chunk of chunks) {
+        const payload: DataChunk = {
+          data: chunk.data,
+          startOffset: chunk.startOffset,
+          endOffset: chunk.endOffset,
+          byteLength: chunk.byteLength
+        };
+        for (const listener of this.dataChunkListeners) {
+          listener(sessionId, payload);
+        }
+      }
     }
   }
 
@@ -197,6 +231,11 @@ export class PtyManager {
   onData(listener: DataListener): () => void {
     this.dataListeners.add(listener);
     return () => this.dataListeners.delete(listener);
+  }
+
+  onDataChunk(listener: DataChunkListener): () => void {
+    this.dataChunkListeners.add(listener);
+    return () => this.dataChunkListeners.delete(listener);
   }
 
   onExit(listener: ExitListener): () => void {
@@ -221,6 +260,7 @@ export class PtyManager {
           name: 'xterm-256color',
           cols: options.cols,
           rows: options.rows,
+          handleFlowControl: true,
           cwd,
           env: {
             ...process.env,
@@ -231,6 +271,7 @@ export class PtyManager {
           name: 'xterm-256color',
           cols: options.cols,
           rows: options.rows,
+          handleFlowControl: true,
           cwd,
           env: {
             ...process.env,
@@ -265,9 +306,11 @@ export class PtyManager {
       buffer: createBufferRing(),
       pendingData: [],
       flushTimer: null,
+      killTimer: null,
       logStream,
       logPath,
-      logBytes: existingLogBytes
+      logBytes: existingLogBytes,
+      outputPaused: false
     };
 
     pty.onData((data) => {
@@ -279,9 +322,15 @@ export class PtyManager {
       }
       if (record.logStream && !record.logStream.destroyed) {
         record.logStream.write(chunk);
-        record.logBytes += chunk.byteLength;
       }
-      record.pendingData.push(data);
+      const startOffset = record.logBytes;
+      record.logBytes += chunk.byteLength;
+      record.pendingData.push({
+        data,
+        startOffset,
+        endOffset: record.logBytes,
+        byteLength: chunk.byteLength
+      });
       this.scheduleDataFlush(options.id, record);
     });
 
@@ -289,6 +338,10 @@ export class PtyManager {
       if (record.flushTimer) {
         clearTimeout(record.flushTimer);
         record.flushTimer = null;
+      }
+      if (record.killTimer) {
+        clearTimeout(record.killTimer);
+        record.killTimer = null;
       }
       this.flushData(options.id, record);
       if (record.logStream) {
@@ -323,12 +376,42 @@ export class PtyManager {
     session.pty.resize(cols, rows);
   }
 
+  pauseOutput(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.outputPaused) {
+      return;
+    }
+    session.outputPaused = true;
+    session.pty.write(FLOW_CONTROL_PAUSE);
+  }
+
+  resumeOutput(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.outputPaused) {
+      return;
+    }
+    session.outputPaused = false;
+    session.pty.write(FLOW_CONTROL_RESUME);
+  }
+
   kill(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return;
     }
-    session.pty.kill();
+    if (session.killTimer) {
+      clearTimeout(session.killTimer);
+      session.killTimer = null;
+    }
+    session.pty.kill('SIGTERM');
+    session.killTimer = setTimeout(() => {
+      const active = this.sessions.get(sessionId);
+      if (!active) {
+        return;
+      }
+      active.killTimer = null;
+      active.pty.kill('SIGKILL');
+    }, KILL_ESCALATION_DELAY_MS);
   }
 
   getBuffer(sessionId: string): string {

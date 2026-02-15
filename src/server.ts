@@ -55,6 +55,7 @@ interface ServerCliOptions {
 const TERMINAL_SEND_BATCH_MS = 16;
 const TERMINAL_SEND_HIGH_WATER_BYTES = 64 * 1024;
 const TERMINAL_SEND_LOW_WATER_BYTES = 32 * 1024;
+const TERMINAL_REPLAY_CHUNK_BYTES = 64 * 1024;
 
 function isCliKind(value: unknown): value is CliKind {
   return value === 'shell';
@@ -227,6 +228,63 @@ function rawDataToString(raw: RawData): string {
     return Buffer.from(raw).toString('utf8');
   }
   return Buffer.concat(raw.map((part) => (Buffer.isBuffer(part) ? part : Buffer.from(part)))).toString('utf8');
+}
+
+async function streamLogRange(
+  logPath: string,
+  startOffset: number,
+  endOffset: number,
+  onChunk: (data: string) => void
+): Promise<void> {
+  if (endOffset <= startOffset) {
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const decoder = new TextDecoder();
+    const stream = fs.createReadStream(logPath, {
+      start: startOffset,
+      end: endOffset - 1,
+      highWaterMark: TERMINAL_REPLAY_CHUNK_BYTES
+    });
+    stream.on('data', (chunk) => {
+      const payload = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+      const text = decoder.decode(payload, { stream: true });
+      if (text.length > 0) {
+        onChunk(text);
+      }
+    });
+    stream.on('end', () => {
+      const tail = decoder.decode();
+      if (tail.length > 0) {
+        onChunk(tail);
+      }
+      resolve();
+    });
+    stream.on('error', reject);
+  });
+}
+
+function trimChunkToOffset(
+  chunk: { data: string; startOffset: number; endOffset: number },
+  offset: number
+): string {
+  if (offset <= chunk.startOffset) {
+    return chunk.data;
+  }
+  if (offset >= chunk.endOffset) {
+    return '';
+  }
+  const skipBytes = offset - chunk.startOffset;
+  return Buffer.from(chunk.data, 'utf8').subarray(skipBytes).toString('utf8');
+}
+
+function applySessionLogHeaders(res: Response, logBytes: number): number {
+  const contentLength = Math.max(0, logBytes);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Length', String(contentLength));
+  res.setHeader('X-Log-Bytes', String(contentLength));
+  res.setHeader('Cache-Control', 'no-store');
+  return contentLength;
 }
 
 interface TailscaleStatusSelf {
@@ -553,6 +611,18 @@ app.get('/api/sessions', (_req: Request, res: Response) => {
   res.json({ sessions: ptyManager.listSessions() });
 });
 
+app.head('/api/sessions/:id/log', (req: Request, res: Response) => {
+  const sessionId = typeof req.params.id === 'string' ? req.params.id : '';
+  const logPath = ptyManager.getLogPath(sessionId);
+  if (!logPath) {
+    res.status(404).end();
+    return;
+  }
+
+  applySessionLogHeaders(res, ptyManager.getLogBytes(sessionId));
+  res.status(200).end();
+});
+
 app.get('/api/sessions/:id/log', (req: Request, res: Response) => {
   const sessionId = typeof req.params.id === 'string' ? req.params.id : '';
   const logPath = ptyManager.getLogPath(sessionId);
@@ -561,12 +631,7 @@ app.get('/api/sessions/:id/log', (req: Request, res: Response) => {
     return;
   }
 
-  const logBytes = ptyManager.getLogBytes(sessionId);
-  const contentLength = Math.max(0, logBytes);
-  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Content-Length', String(contentLength));
-  res.setHeader('X-Log-Bytes', String(contentLength));
-  res.setHeader('Cache-Control', 'no-store');
+  const contentLength = applySessionLogHeaders(res, ptyManager.getLogBytes(sessionId));
 
   if (contentLength === 0) {
     res.status(200).end();
@@ -741,6 +806,39 @@ terminalWss.on('connection', (ws, request) => {
   let queuedBytes = 0;
   let flushTimer: NodeJS.Timeout | null = null;
   let drainTimer: NodeJS.Timeout | null = null;
+  let flowPaused = false;
+  let replayReady = false;
+  let replayCursor = Math.max(0, replayFrom);
+  const liveQueue: Array<{ data: string; startOffset: number; endOffset: number }> = [];
+
+  const releaseFlowControl = (): void => {
+    if (!flowPaused) {
+      return;
+    }
+    flowPaused = false;
+    ptyManager.resumeOutput(sessionId);
+  };
+
+  const maybeReleaseFlowControl = (): void => {
+    if (
+      flowPaused &&
+      queuedBytes <= TERMINAL_SEND_LOW_WATER_BYTES &&
+      ws.bufferedAmount <= TERMINAL_SEND_LOW_WATER_BYTES
+    ) {
+      releaseFlowControl();
+    }
+  };
+
+  const applyFlowControl = (): void => {
+    if (flowPaused) {
+      return;
+    }
+    if (queuedBytes < TERMINAL_SEND_HIGH_WATER_BYTES && ws.bufferedAmount <= TERMINAL_SEND_HIGH_WATER_BYTES) {
+      return;
+    }
+    flowPaused = true;
+    ptyManager.pauseOutput(sessionId);
+  };
 
   const clearTimers = (): void => {
     if (flushTimer) {
@@ -776,6 +874,7 @@ terminalWss.on('connection', (ws, request) => {
         if (sendQueue.length > 0) {
           scheduleFlush();
         }
+        maybeReleaseFlowControl();
         return;
       }
       drainTimer = setTimeout(checkDrain, TERMINAL_SEND_BATCH_MS);
@@ -804,11 +903,15 @@ terminalWss.on('connection', (ws, request) => {
       if (sendQueue.length > 0) {
         scheduleFlush();
       }
+      maybeReleaseFlowControl();
     });
 
     if (ws.bufferedAmount > TERMINAL_SEND_HIGH_WATER_BYTES) {
       waitForDrain();
+      applyFlowControl();
+      return;
     }
+    maybeReleaseFlowControl();
   };
 
   const enqueueOutput = (data: string): void => {
@@ -818,22 +921,43 @@ terminalWss.on('connection', (ws, request) => {
     sendQueue.push(data);
     queuedBytes += Buffer.byteLength(data, 'utf8');
     if (queuedBytes >= TERMINAL_SEND_HIGH_WATER_BYTES) {
+      applyFlowControl();
       flushQueue();
       return;
     }
+    applyFlowControl();
     scheduleFlush();
   };
 
-  if (replayFrom === 0) {
-    const replay = ptyManager.getBuffer(sessionId);
-    if (replay.length > 0) {
-      enqueueOutput(replay);
+  const flushLiveQueue = (): void => {
+    while (liveQueue.length > 0) {
+      const chunk = liveQueue.shift();
+      if (!chunk || chunk.endOffset <= replayCursor) {
+        continue;
+      }
+      const text = trimChunkToOffset(chunk, replayCursor);
+      replayCursor = chunk.endOffset;
+      if (text.length > 0) {
+        enqueueOutput(text);
+      }
     }
-  }
+  };
 
-  const offData = ptyManager.onData((id, data) => {
-    if (id === sessionId) {
-      enqueueOutput(data);
+  const offDataChunk = ptyManager.onDataChunk((id, chunk) => {
+    if (id !== sessionId) {
+      return;
+    }
+    if (!replayReady) {
+      liveQueue.push(chunk);
+      return;
+    }
+    if (chunk.endOffset <= replayCursor) {
+      return;
+    }
+    const text = trimChunkToOffset(chunk, replayCursor);
+    replayCursor = chunk.endOffset;
+    if (text.length > 0) {
+      enqueueOutput(text);
     }
   });
 
@@ -842,6 +966,23 @@ terminalWss.on('connection', (ws, request) => {
       ws.close(1000, 'session exited');
     }
   });
+
+  void (async () => {
+    const logPath = ptyManager.getLogPath(sessionId);
+    const snapshotEnd = ptyManager.getLogBytes(sessionId);
+    const replayStart = Math.min(replayCursor, snapshotEnd);
+    replayCursor = replayStart;
+    if (logPath && replayStart < snapshotEnd) {
+      try {
+        await streamLogRange(logPath, replayStart, snapshotEnd, enqueueOutput);
+      } catch {
+        // skip replay on read failure and continue with live data
+      }
+    }
+    replayCursor = Math.max(replayCursor, snapshotEnd);
+    replayReady = true;
+    flushLiveQueue();
+  })();
 
   ws.on('message', (raw) => {
     if (!ptyManager.hasSession(sessionId)) {
@@ -852,7 +993,8 @@ terminalWss.on('connection', (ws, request) => {
 
   ws.on('close', () => {
     clearTimers();
-    offData();
+    releaseFlowControl();
+    offDataChunk();
     offExit();
   });
 });

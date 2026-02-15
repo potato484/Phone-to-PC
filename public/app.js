@@ -11,6 +11,7 @@
     dockHandle: document.getElementById('dock-handle'),
     sessionTabs: document.getElementById('session-tabs'),
     quickKeys: document.getElementById('quick-keys'),
+    detachBtn: document.getElementById('detach-btn'),
     killBtn: document.getElementById('kill-btn'),
     toastRoot: document.getElementById('toast-root')
   };
@@ -28,11 +29,17 @@
     enter: '\r'
   };
   const KEYBOARD_VISIBLE_THRESHOLD_PX = 80;
+  const ZOOM_SCALE_EPSILON = 0.02;
+  const ZOOM_SETTLE_MS = 260;
   const TERMINAL_WRITE_HIGH_WATER_BYTES = 256 * 1024;
   const TERMINAL_WRITE_LOW_WATER_BYTES = 96 * 1024;
   const TERMINAL_INPUT_DIRECT_CHARS = 8;
   const TERMINAL_INPUT_BATCH_CHARS = 4096;
+  const RESIZE_DEBOUNCE_MS = 90;
+  const KILL_REQUEST_TIMEOUT_MS = 6000;
+  const TERMINAL_REPLAY_TAIL_BYTES = 64 * 1024;
   const textDecoder = new TextDecoder();
+  const textEncoder = new TextEncoder();
 
   const TerminalCtor = window.Terminal;
   const FitAddonCtor = window.FitAddon && window.FitAddon.FitAddon;
@@ -57,13 +64,21 @@
     terminalBackpressured: false,
     resizeObserver: null,
     resizeRafId: 0,
+    resizeDebounceTimer: 0,
     keyboardVisible: false,
     pendingResizeAfterKeyboard: false,
+    zoomActive: false,
+    zoomNoticeShown: false,
+    zoomSettleTimer: 0,
+    lastResizeSessionId: '',
+    lastResizeCols: 0,
+    lastResizeRows: 0,
     dockMeasureRafId: 0,
     controlConnected: false,
     terminalConnected: false,
     terminalReconnectDelayMs: 1000,
     terminalReconnectTimer: 0,
+    terminalConnectSeq: 0,
     reconnectDelayMs: 1000,
     reconnectTimer: 0,
     initialSessionsReceived: false,
@@ -72,8 +87,11 @@
     pushRegistered: false,
     pushAutoRequested: false,
     serviceWorkerRegistration: null,
+    sessionOffsets: {},
     killConfirmTimer: 0,
+    killRequestTimer: 0,
     killConfirmArmed: false,
+    killInFlight: false,
     killRequested: false
   };
 
@@ -145,6 +163,72 @@
       });
     }
     return url.toString();
+  }
+
+  function getSessionOffset(sessionId) {
+    if (!sessionId) {
+      return 0;
+    }
+    const value = State.sessionOffsets[sessionId];
+    if (!Number.isFinite(value) || value < 0) {
+      return 0;
+    }
+    return Math.floor(value);
+  }
+
+  function setSessionOffset(sessionId, offset) {
+    if (!sessionId) {
+      return;
+    }
+    const nextOffset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+    State.sessionOffsets[sessionId] = nextOffset;
+  }
+
+  function addSessionOffset(sessionId, delta) {
+    if (!sessionId || !Number.isFinite(delta) || delta <= 0) {
+      return;
+    }
+    const next = getSessionOffset(sessionId) + Math.floor(delta);
+    State.sessionOffsets[sessionId] = next;
+  }
+
+  function pruneSessionOffsets(sessionIds) {
+    const keep = new Set(sessionIds);
+    Object.keys(State.sessionOffsets).forEach((sessionId) => {
+      if (!keep.has(sessionId)) {
+        delete State.sessionOffsets[sessionId];
+      }
+    });
+  }
+
+  async function fetchSessionLogBytes(sessionId) {
+    if (!sessionId) {
+      return 0;
+    }
+    try {
+      const response = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/log`), { method: 'HEAD' });
+      if (!response.ok) {
+        return 0;
+      }
+      const headerValue = response.headers.get('x-log-bytes') || response.headers.get('content-length') || '0';
+      const parsed = Number.parseInt(headerValue, 10);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        return 0;
+      }
+      return parsed;
+    } catch {
+      return 0;
+    }
+  }
+
+  function setActionButtonsEnabled(enabled) {
+    const nextEnabled = !!enabled;
+    if (DOM.detachBtn) {
+      DOM.detachBtn.disabled = !nextEnabled;
+    }
+    if (DOM.killBtn) {
+      DOM.killBtn.disabled = !nextEnabled || State.killInFlight;
+    }
   }
 
   function urlBase64ToUint8Array(base64String) {
@@ -322,12 +406,11 @@
           State.cwd = tab.dataset.cwd;
           StatusBar.setCwd(tab.dataset.cwd);
         }
-        if (DOM.killBtn) {
-          DOM.killBtn.disabled = false;
-        }
+        Actions.resetKillRequest();
+        setActionButtonsEnabled(true);
         Actions.resetKillConfirm();
         this.renderActiveState();
-        Term.connect(sessionId);
+        void Term.connect(sessionId);
         Term.scheduleResize();
         StatusBar.setText(`已切换到会话 ${shortenSessionId(sessionId)}`);
       });
@@ -347,6 +430,7 @@
         return [];
       }
       const sessions = Array.isArray(list) ? list.map((item) => normalizeSessionEntry(item)).filter(Boolean) : [];
+      pruneSessionOffsets(sessions.map((session) => session.id));
       DOM.sessionTabs.textContent = '';
 
       const fragment = document.createDocumentFragment();
@@ -442,36 +526,77 @@
       );
     },
     scheduleResize(force = false) {
-      if (!State.terminal || !State.fitAddon || State.resizeRafId) {
+      if (!State.terminal || !State.fitAddon) {
+        return;
+      }
+      if (State.zoomActive && !force) {
         return;
       }
       if (State.keyboardVisible && !force) {
         State.pendingResizeAfterKeyboard = true;
         return;
       }
-      State.resizeRafId = window.requestAnimationFrame(() => {
-        State.resizeRafId = 0;
-        if (!State.fitAddon || !State.terminal) {
+
+      const runFit = () => {
+        if (State.resizeRafId) {
           return;
         }
-        if (State.keyboardVisible && !force) {
-          State.pendingResizeAfterKeyboard = true;
-          return;
+        State.resizeRafId = window.requestAnimationFrame(() => {
+          State.resizeRafId = 0;
+          if (!State.fitAddon || !State.terminal) {
+            return;
+          }
+          if (State.keyboardVisible && !force) {
+            State.pendingResizeAfterKeyboard = true;
+            return;
+          }
+          State.fitAddon.fit();
+          this.sendResize();
+        });
+      };
+
+      if (force) {
+        if (State.resizeDebounceTimer) {
+          window.clearTimeout(State.resizeDebounceTimer);
+          State.resizeDebounceTimer = 0;
         }
-        State.fitAddon.fit();
-        this.sendResize();
-      });
+        runFit();
+        return;
+      }
+      if (State.resizeDebounceTimer) {
+        window.clearTimeout(State.resizeDebounceTimer);
+        State.resizeDebounceTimer = 0;
+      }
+      State.resizeDebounceTimer = window.setTimeout(() => {
+        State.resizeDebounceTimer = 0;
+        runFit();
+      }, RESIZE_DEBOUNCE_MS);
     },
     sendResize() {
       if (!State.currentSessionId || !State.terminal) {
         return;
       }
-      Control.send({
+      const cols = State.terminal.cols;
+      const rows = State.terminal.rows;
+      if (
+        State.lastResizeSessionId === State.currentSessionId &&
+        State.lastResizeCols === cols &&
+        State.lastResizeRows === rows
+      ) {
+        return;
+      }
+      const sent = Control.send({
         type: 'resize',
         sessionId: State.currentSessionId,
-        cols: State.terminal.cols,
-        rows: State.terminal.rows
+        cols,
+        rows
       });
+      if (!sent) {
+        return;
+      }
+      State.lastResizeSessionId = State.currentSessionId;
+      State.lastResizeCols = cols;
+      State.lastResizeRows = rows;
     },
     flushQueuedInput(socket) {
       if (!State.terminalInputQueue) {
@@ -526,12 +651,18 @@
       }
       return true;
     },
-    queueServerOutput(data) {
+    queueServerOutput(data, options = {}) {
       if (!State.terminal || !data) {
         return;
       }
-      State.terminalWriteQueue.push(data);
-      State.terminalWriteQueuedBytes += data.length;
+      const queueEntry = {
+        data,
+        queueBytes: data.length,
+        sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
+        logBytes: Number.isFinite(options.logBytes) ? Math.max(0, Math.floor(options.logBytes)) : 0
+      };
+      State.terminalWriteQueue.push(queueEntry);
+      State.terminalWriteQueuedBytes += queueEntry.queueBytes;
       if (!State.terminalBackpressured && State.terminalWriteQueuedBytes >= TERMINAL_WRITE_HIGH_WATER_BYTES) {
         State.terminalBackpressured = true;
       }
@@ -549,9 +680,12 @@
         return;
       }
       State.terminalWriteInProgress = true;
-      State.terminalWriteQueuedBytes = Math.max(0, State.terminalWriteQueuedBytes - chunk.length);
-      State.terminal.write(chunk, () => {
+      State.terminalWriteQueuedBytes = Math.max(0, State.terminalWriteQueuedBytes - chunk.queueBytes);
+      State.terminal.write(chunk.data, () => {
         State.terminalWriteInProgress = false;
+        if (chunk.sessionId && chunk.logBytes > 0) {
+          addSessionOffset(chunk.sessionId, chunk.logBytes);
+        }
         if (State.terminalBackpressured && State.terminalWriteQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
           State.terminalBackpressured = false;
         }
@@ -588,6 +722,10 @@
     },
     disconnect() {
       this.cancelTerminalReconnect();
+      if (State.resizeDebounceTimer) {
+        window.clearTimeout(State.resizeDebounceTimer);
+        State.resizeDebounceTimer = 0;
+      }
       if (State.terminalInputDisposable) {
         State.terminalInputDisposable.dispose();
         State.terminalInputDisposable = null;
@@ -622,74 +760,20 @@
       if (!State.terminal || !sessionId || sessionId !== State.currentSessionId) {
         return;
       }
-
-      this.disconnect();
-      State.terminal.write('\x1bc');
-      this.queueServerOutput('正在加载历史输出...\r\n');
-
-      let replayFrom = 0;
-      try {
-        const response = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/log`));
-        if (!response.ok) {
-          throw new Error(`history fetch failed: ${response.status}`);
-        }
-
-        const expectedBytes = Number.parseInt(response.headers.get('X-Log-Bytes') || '0', 10);
-        let streamedBytes = 0;
-        const replayDecoder = new TextDecoder();
-
-        if (response.body && typeof response.body.getReader === 'function') {
-          const reader = response.body.getReader();
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) {
-              break;
-            }
-            if (!value || value.byteLength === 0) {
-              continue;
-            }
-            streamedBytes += value.byteLength;
-            const text = replayDecoder.decode(value, { stream: true });
-            if (text) {
-              this.queueServerOutput(text);
-            }
-          }
-          const tail = replayDecoder.decode();
-          if (tail) {
-            this.queueServerOutput(tail);
-          }
-        } else {
-          const text = await response.text();
-          if (text) {
-            this.queueServerOutput(text);
-            streamedBytes = new Blob([text]).size;
-          }
-        }
-
-        replayFrom = Number.isFinite(expectedBytes) && expectedBytes > 0 ? expectedBytes : streamedBytes;
-      } catch {
-        this.queueServerOutput('\r\n[c2p] 历史输出加载失败，切换到实时流。\r\n');
-      }
-
-      if (sessionId !== State.currentSessionId) {
-        return;
-      }
-
-      this.connect(sessionId, {
-        clearTerminal: false,
-        replayFrom,
+      const replayFrom = getSessionOffset(sessionId);
+      await this.connect(sessionId, {
+        clearTerminal: replayFrom === 0,
+        replayFrom: replayFrom > 0 ? replayFrom : undefined,
         keepReconnectDelay: true
       });
     },
-    connect(sessionId, options = {}) {
+    async connect(sessionId, options = {}) {
       if (!State.terminal) {
         return;
       }
-      const {
-        clearTerminal = true,
-        replayFrom = 0,
-        keepReconnectDelay = false
-      } = options;
+      const { clearTerminal = true, replayFrom, keepReconnectDelay = false } = options;
+      State.terminalConnectSeq += 1;
+      const connectSeq = State.terminalConnectSeq;
 
       this.disconnect();
       if (clearTerminal) {
@@ -699,9 +783,24 @@
         State.terminalReconnectDelayMs = 1000;
       }
 
+      let effectiveReplayFrom = 0;
+      if (Number.isFinite(replayFrom) && replayFrom >= 0) {
+        effectiveReplayFrom = Math.floor(replayFrom);
+      } else if (!clearTerminal) {
+        effectiveReplayFrom = getSessionOffset(sessionId);
+      } else {
+        const logBytes = await fetchSessionLogBytes(sessionId);
+        effectiveReplayFrom = Math.max(0, logBytes - TERMINAL_REPLAY_TAIL_BYTES);
+      }
+      setSessionOffset(sessionId, effectiveReplayFrom);
+
+      if (connectSeq !== State.terminalConnectSeq || sessionId !== State.currentSessionId) {
+        return;
+      }
+
       const extraParams = { session: sessionId };
-      if (replayFrom > 0) {
-        extraParams.replayFrom = replayFrom;
+      if (effectiveReplayFrom > 0) {
+        extraParams.replayFrom = effectiveReplayFrom;
       }
       const socket = new WebSocket(wsUrl('/ws/terminal', extraParams));
       socket.binaryType = 'arraybuffer';
@@ -717,17 +816,27 @@
         StatusBar.setTerminal('online');
         StatusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
         this.bindTerminalInput();
+        this.sendResize();
       };
 
       socket.onmessage = (event) => {
+        if (State.terminalSocket !== socket) {
+          return;
+        }
         let data = '';
+        let logBytes = 0;
         if (typeof event.data === 'string') {
           data = event.data;
+          logBytes = textEncoder.encode(data).byteLength;
         } else if (event.data instanceof ArrayBuffer) {
+          logBytes = event.data.byteLength;
           data = textDecoder.decode(event.data);
         }
         if (data) {
-          this.queueServerOutput(data);
+          this.queueServerOutput(data, {
+            sessionId,
+            logBytes
+          });
         }
       };
 
@@ -740,6 +849,12 @@
         this.resetIoBuffers();
         if (State.currentSessionId === sessionId) {
           this.scheduleTerminalReconnect(sessionId);
+        }
+      };
+
+      socket.onerror = () => {
+        if (State.terminalSocket === socket) {
+          socket.close();
         }
       };
     }
@@ -766,15 +881,17 @@
       if (payload.type === 'spawned' && payload.sessionId) {
         State.currentSessionId = payload.sessionId;
         State.killRequested = false;
+        Actions.resetKillRequest();
+        setSessionOffset(payload.sessionId, 0);
         if (typeof payload.cwd === 'string' && payload.cwd) {
           State.cwd = payload.cwd;
           StatusBar.setCwd(payload.cwd);
         }
         StatusBar.setSession(payload.sessionId);
         StatusBar.setTerminal('warn');
-        DOM.killBtn.disabled = false;
+        setActionButtonsEnabled(true);
         Actions.resetKillConfirm();
-        Term.connect(payload.sessionId);
+        void Term.connect(payload.sessionId, { replayFrom: 0 });
         Term.scheduleResize();
         const cli = payload.cli || 'shell';
         StatusBar.setText(`已启动 ${cli}`);
@@ -800,10 +917,12 @@
         } else {
           Toast.show(`会话已退出 (code=${code})`, code === 0 ? 'info' : 'danger');
         }
+        delete State.sessionOffsets[payload.sessionId];
         State.currentSessionId = '';
         State.killRequested = false;
+        Actions.resetKillRequest();
         StatusBar.setSession('');
-        DOM.killBtn.disabled = true;
+        setActionButtonsEnabled(false);
         Actions.resetKillConfirm();
         Term.disconnect();
         return;
@@ -819,10 +938,9 @@
           if (!activeSession) {
             State.currentSessionId = '';
             State.killRequested = false;
+            Actions.resetKillRequest();
             StatusBar.setSession('');
-            if (DOM.killBtn) {
-              DOM.killBtn.disabled = true;
-            }
+            setActionButtonsEnabled(false);
             Actions.resetKillConfirm();
             Term.disconnect();
           } else {
@@ -839,23 +957,26 @@
               Term.scheduleResize();
             }
           }
-        } else if (sessions.length > 0) {
+        } else if (sessions.length > 0 && isFirstSessionsMessage) {
           const latest = sessions[sessions.length - 1];
           State.currentSessionId = latest.id;
           State.killRequested = false;
+          Actions.resetKillRequest();
           StatusBar.setSession(latest.id);
           if (latest.cwd) {
             State.cwd = latest.cwd;
             StatusBar.setCwd(latest.cwd);
           }
-          if (DOM.killBtn) {
-            DOM.killBtn.disabled = false;
-          }
+          setActionButtonsEnabled(true);
           Actions.resetKillConfirm();
           void Term.reconnect(latest.id);
           Term.scheduleResize();
+        } else if (sessions.length > 0) {
+          setActionButtonsEnabled(false);
         } else if (isFirstSessionsMessage) {
           Actions.spawn();
+        } else {
+          setActionButtonsEnabled(false);
         }
 
         SessionTabs.renderActiveState();
@@ -930,15 +1051,28 @@
 
   const Actions = {
     bind() {
+      if (DOM.detachBtn) {
+        DOM.detachBtn.addEventListener('click', () => this.detach());
+      }
       if (DOM.killBtn) {
         DOM.killBtn.addEventListener('click', () => this.kill());
       }
+    },
+    resetKillRequest() {
+      if (State.killRequestTimer) {
+        window.clearTimeout(State.killRequestTimer);
+        State.killRequestTimer = 0;
+      }
+      State.killInFlight = false;
     },
     spawn() {
       if (!State.terminal) {
         Toast.show('终端尚未就绪', 'warn');
         return;
       }
+      this.resetKillRequest();
+      State.killRequested = false;
+      this.resetKillConfirm();
       const ok = Control.send({
         type: 'spawn',
         cli: 'shell',
@@ -954,6 +1088,25 @@
       StatusBar.setText('启动请求已发送');
       Dock.collapse();
     },
+    detach() {
+      if (!State.currentSessionId) {
+        return;
+      }
+      const detachedSession = State.currentSessionId;
+      State.currentSessionId = '';
+      State.killRequested = false;
+      this.resetKillRequest();
+      this.resetKillConfirm();
+      StatusBar.setSession('');
+      setActionButtonsEnabled(false);
+      SessionTabs.renderActiveState();
+      Term.disconnect();
+      if (State.terminal) {
+        State.terminal.write('\x1bc');
+      }
+      StatusBar.setText(`已关闭会话 ${shortenSessionId(detachedSession)} 的终端连接`);
+      Toast.show('终端已关闭，可点击会话标签重新附加', 'info');
+    },
     resetKillConfirm() {
       if (State.killConfirmTimer) {
         window.clearTimeout(State.killConfirmTimer);
@@ -961,7 +1114,7 @@
       }
       State.killConfirmArmed = false;
       if (DOM.killBtn) {
-        DOM.killBtn.textContent = '终止';
+        DOM.killBtn.textContent = '终止会话';
         DOM.killBtn.classList.remove('is-confirm');
       }
     },
@@ -969,10 +1122,15 @@
       if (!State.currentSessionId) {
         return;
       }
+      if (State.killInFlight) {
+        return;
+      }
       if (!State.killConfirmArmed) {
         State.killConfirmArmed = true;
-        DOM.killBtn.textContent = '确认终止';
-        DOM.killBtn.classList.add('is-confirm');
+        if (DOM.killBtn) {
+          DOM.killBtn.textContent = '确认终止';
+          DOM.killBtn.classList.add('is-confirm');
+        }
         StatusBar.setText('再次点击以确认终止');
         State.killConfirmTimer = window.setTimeout(() => {
           this.resetKillConfirm();
@@ -990,9 +1148,21 @@
         return;
       }
       State.killRequested = true;
-      DOM.killBtn.disabled = true;
-      StatusBar.setText('终止请求已发送');
+      State.killInFlight = true;
+      setActionButtonsEnabled(false);
+      StatusBar.setText('终止请求已发送，等待会话退出...');
       Toast.show('终止请求已发送', 'warn');
+      State.killRequestTimer = window.setTimeout(() => {
+        State.killRequestTimer = 0;
+        if (!State.killInFlight || !State.currentSessionId) {
+          return;
+        }
+        State.killInFlight = false;
+        State.killRequested = false;
+        setActionButtonsEnabled(true);
+        StatusBar.setText('终止超时，可重试');
+        Toast.show('终止超时，可再次尝试', 'warn');
+      }, KILL_REQUEST_TIMEOUT_MS);
     },
     async initServiceWorker() {
       if (!('serviceWorker' in navigator)) {
@@ -1107,8 +1277,37 @@
   };
 
   const Viewport = {
+    clearZoomSettleTimer() {
+      if (!State.zoomSettleTimer) {
+        return;
+      }
+      window.clearTimeout(State.zoomSettleTimer);
+      State.zoomSettleTimer = 0;
+    },
+    scheduleZoomSettleCheck() {
+      this.clearZoomSettleTimer();
+      State.zoomSettleTimer = window.setTimeout(() => {
+        State.zoomSettleTimer = 0;
+        if (!window.visualViewport) {
+          State.zoomActive = false;
+          State.zoomNoticeShown = false;
+          return;
+        }
+        const scale = Number(window.visualViewport.scale) || 1;
+        if (Math.abs(scale - 1) > ZOOM_SCALE_EPSILON) {
+          return;
+        }
+        State.zoomActive = false;
+        State.zoomNoticeShown = false;
+        this.applyInset();
+        Term.scheduleResize(true);
+      }, ZOOM_SETTLE_MS);
+    },
     applyInset() {
       if (!window.visualViewport) {
+        this.clearZoomSettleTimer();
+        State.zoomActive = false;
+        State.zoomNoticeShown = false;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
         if (State.keyboardVisible) {
           State.keyboardVisible = false;
@@ -1120,6 +1319,24 @@
         return;
       }
       const viewport = window.visualViewport;
+      const scale = Number(viewport.scale) || 1;
+      const zoomed = Math.abs(scale - 1) > ZOOM_SCALE_EPSILON;
+      if (zoomed) {
+        State.zoomActive = true;
+        document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
+        if (State.keyboardVisible) {
+          State.keyboardVisible = false;
+          State.pendingResizeAfterKeyboard = false;
+        }
+        if (!State.zoomNoticeShown) {
+          State.zoomNoticeShown = true;
+          Toast.show('检测到页面缩放，已暂停终端重排', 'warn');
+        }
+        this.scheduleZoomSettleCheck();
+        return;
+      }
+      this.clearZoomSettleTimer();
+      State.zoomActive = false;
       const keyboardOffset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
       document.documentElement.style.setProperty('--dock-bottom-offset', `${Math.round(keyboardOffset)}px`);
 
@@ -1222,6 +1439,7 @@
     StatusBar.setSession('');
     StatusBar.setText('初始化中...');
     StatusBar.setCwd('读取中...');
+    setActionButtonsEnabled(false);
 
     SessionTabs.bind();
     Dock.bind();

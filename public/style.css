@@ -213,6 +213,13 @@ button:active {
   gap: 6px;
 }
 
+.quick-actions {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+
 .quick-key-btn {
   min-height: 44px;
   border-radius: 10px;

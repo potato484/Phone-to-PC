@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=overlays-content"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content"
     />
     <meta name="theme-color" content="#1a1a2e" />
     <title>C2P Controller</title>
@@ -48,13 +48,17 @@
           <button class="quick-key-btn" type="button" data-key="enter">⏎</button>
         </div>
 
+        <div class="quick-actions">
+          <button id="detach-btn" class="btn" type="button" disabled>关闭终端</button>
+        </div>
+
         <button id="dock-handle" class="dock-handle" type="button" aria-expanded="false">
           控制面板
         </button>
 
         <div id="dock-panel" class="dock-panel">
           <div class="action-row">
-            <button id="kill-btn" class="btn btn-danger" type="button" disabled>终止</button>
+            <button id="kill-btn" class="btn btn-danger" type="button" disabled>终止会话</button>
           </div>
         </div>
       </section>
