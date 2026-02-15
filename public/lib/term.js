@@ -818,6 +818,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       );
 
       this.scheduleResize(true);
+      window.requestAnimationFrame(() => {
+        this.scheduleResize(true);
+      });
     },
 
     scheduleResize(force = false) {

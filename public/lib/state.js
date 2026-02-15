@@ -42,8 +42,6 @@ export const DOM = {
 };
 
 export const TOKEN_STORAGE_KEY = 'c2p_token';
-export const QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
-export const QUICK_KEY_LONG_PRESS_MS = 520;
 export const SIGNAL_STATES = ['is-online', 'is-warn', 'is-offline'];
 export const QUICK_KEY_SEQUENCES = {
   'ctrl-c': '\x03',

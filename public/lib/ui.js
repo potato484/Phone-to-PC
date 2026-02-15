@@ -2,9 +2,7 @@ import {
   DOM,
   KEYBOARD_VISIBLE_THRESHOLD_PX,
   KILL_REQUEST_TIMEOUT_MS,
-  QUICK_KEY_LONG_PRESS_MS,
   QUICK_KEY_SEQUENCES,
-  QUICK_KEY_STORAGE_KEY,
   State,
   TOKEN_STORAGE_KEY,
   ZOOM_SCALE_EPSILON,
@@ -36,105 +34,10 @@ const QUICK_KEY_ROWS = [
   ]
 ];
 const SERVICE_WORKER_URL = '/sw.js?v=13';
-const MIN_TERMINAL_VISIBLE_PX = 220;
-const MIN_DOCK_VISIBLE_PX = 120;
-
-function decodeEscapedSequence(input) {
-  let output = '';
-  for (let i = 0; i < input.length; i += 1) {
-    const ch = input[i];
-    if (ch !== '\\') {
-      output += ch;
-      continue;
-    }
-    const next = input[i + 1];
-    if (!next) {
-      output += '\\';
-      continue;
-    }
-    if (next === 'r') {
-      output += '\r';
-      i += 1;
-      continue;
-    }
-    if (next === 'n') {
-      output += '\n';
-      i += 1;
-      continue;
-    }
-    if (next === 't') {
-      output += '\t';
-      i += 1;
-      continue;
-    }
-    if (next === '\\') {
-      output += '\\';
-      i += 1;
-      continue;
-    }
-    if (next === 'x') {
-      const hex = input.slice(i + 2, i + 4);
-      if (/^[0-9a-fA-F]{2}$/.test(hex)) {
-        output += String.fromCharCode(Number.parseInt(hex, 16));
-        i += 3;
-        continue;
-      }
-    }
-    output += next;
-    i += 1;
-  }
-  return output;
-}
-
-function encodeEscapedSequence(input) {
-  return input
-    .replaceAll('\\', '\\\\')
-    .replaceAll('\u001b', '\\x1b')
-    .replaceAll('\r', '\\r')
-    .replaceAll('\n', '\\n')
-    .replaceAll('\t', '\\t');
-}
-
-function loadQuickKeyConfig() {
-  try {
-    const raw = window.localStorage.getItem(QUICK_KEY_STORAGE_KEY);
-    if (!raw) {
-      return { custom: [] };
-    }
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.custom)) {
-      return { custom: [] };
-    }
-    const custom = parsed.custom
-      .map((entry) => {
-        if (!entry || typeof entry !== 'object') {
-          return null;
-        }
-        const label = typeof entry.label === 'string' ? entry.label.trim() : '';
-        const sequence = typeof entry.sequence === 'string' ? entry.sequence : '';
-        if (!label || !sequence) {
-          return null;
-        }
-        return { label, sequence };
-      })
-      .filter(Boolean)
-      .slice(0, 16);
-    return { custom };
-  } catch {
-    return { custom: [] };
-  }
-}
-
-function saveQuickKeyConfig(config) {
-  try {
-    window.localStorage.setItem(QUICK_KEY_STORAGE_KEY, JSON.stringify(config));
-  } catch {
-    // ignore storage failures
-  }
-}
+const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
+const SESSION_TAB_LONG_PRESS_MS = 520;
 
 export function createUi({ getControl, getTerm }) {
-  let quickKeyConfig = loadQuickKeyConfig();
   let sessionCache = [];
 
   const Toast = {
@@ -200,18 +103,6 @@ export function createUi({ getControl, getTerm }) {
       if (!DOM.dock) {
         return;
       }
-      const statusBarEl = document.querySelector('.status-bar');
-      const statusHeight = statusBarEl ? Math.ceil(statusBarEl.getBoundingClientRect().height) : 0;
-      const viewportHeight = Math.ceil(
-        window.visualViewport && Number.isFinite(window.visualViewport.height)
-          ? window.visualViewport.height
-          : window.innerHeight
-      );
-      const maxDockHeight = Math.max(
-        MIN_DOCK_VISIBLE_PX,
-        viewportHeight - statusHeight - MIN_TERMINAL_VISIBLE_PX
-      );
-      DOM.dock.style.maxHeight = `${maxDockHeight}px`;
       const height = Math.ceil(DOM.dock.getBoundingClientRect().height);
       document.documentElement.style.setProperty('--dock-height', `${height}px`);
     },
@@ -623,7 +514,7 @@ export function createUi({ getControl, getTerm }) {
           suppressClick = true;
           this.openSessionInNewPane(longPressSessionId);
           longPressSessionId = '';
-        }, QUICK_KEY_LONG_PRESS_MS);
+        }, SESSION_TAB_LONG_PRESS_MS);
       });
 
       DOM.sessionTabs.addEventListener('pointerup', () => {
@@ -938,30 +829,6 @@ export function createUi({ getControl, getTerm }) {
         });
         DOM.quickKeys.appendChild(rowEl);
       });
-
-      const customRow = document.createElement('div');
-      customRow.className = 'quick-key-row quick-key-row-custom';
-      customRow.dataset.row = 'custom';
-      customRow.dataset.editHint = 'long-press';
-
-      quickKeyConfig.custom.forEach((entry, index) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'quick-key-btn quick-key-btn-custom';
-        button.dataset.sequence = entry.sequence;
-        button.dataset.customIndex = String(index);
-        button.textContent = entry.label;
-        customRow.appendChild(button);
-      });
-
-      const addButton = document.createElement('button');
-      addButton.type = 'button';
-      addButton.className = 'quick-key-btn quick-key-btn-add';
-      addButton.dataset.action = 'add-custom';
-      addButton.textContent = '+ 命令';
-      customRow.appendChild(addButton);
-
-      DOM.quickKeys.appendChild(customRow);
     },
 
     runSequence(sequence) {
@@ -979,93 +846,15 @@ export function createUi({ getControl, getTerm }) {
       }
     },
 
-    askForCustomCommand(initialLabel = '', initialSequence = '') {
-      const nextLabelRaw = window.prompt('快捷键名称', initialLabel || '命令');
-      if (nextLabelRaw === null) {
-        return null;
-      }
-      const nextLabel = nextLabelRaw.trim();
-      if (!nextLabel) {
-        return null;
-      }
-      const defaultSequence = encodeEscapedSequence(initialSequence || '');
-      const rawSequence = window.prompt('发送内容（支持 \\r \\n \\t \\x1b）', defaultSequence);
-      if (rawSequence === null) {
-        return null;
-      }
-      const decoded = decodeEscapedSequence(rawSequence);
-      if (!decoded) {
-        return null;
-      }
-      return {
-        label: nextLabel,
-        sequence: decoded
-      };
-    },
-
-    addCustom() {
-      const next = this.askForCustomCommand('', '');
-      if (!next) {
-        return;
-      }
-      quickKeyConfig.custom.push(next);
-      saveQuickKeyConfig(quickKeyConfig);
-      this.render();
-      Toast.show(`已添加快捷键 ${next.label}`, 'success');
-    },
-
-    editCustom(index) {
-      const current = quickKeyConfig.custom[index];
-      if (!current) {
-        return;
-      }
-      const next = this.askForCustomCommand(current.label, current.sequence);
-      if (!next) {
-        const shouldRemove = window.confirm(`删除快捷键 ${current.label}？`);
-        if (!shouldRemove) {
-          return;
-        }
-        quickKeyConfig.custom.splice(index, 1);
-        saveQuickKeyConfig(quickKeyConfig);
-        this.render();
-        Toast.show(`已删除快捷键 ${current.label}`, 'warn');
-        return;
-      }
-      quickKeyConfig.custom[index] = next;
-      saveQuickKeyConfig(quickKeyConfig);
-      this.render();
-      Toast.show(`已更新快捷键 ${next.label}`, 'success');
-    },
-
     bind() {
       if (!DOM.quickKeys) {
         return;
       }
       this.render();
 
-      let suppressClick = false;
-      let longPressTimer = 0;
-      let longPressTarget = null;
-
-      const clearLongPress = () => {
-        if (longPressTimer) {
-          window.clearTimeout(longPressTimer);
-          longPressTimer = 0;
-        }
-        longPressTarget = null;
-      };
-
       DOM.quickKeys.addEventListener('click', (event) => {
-        if (suppressClick) {
-          suppressClick = false;
-          return;
-        }
         const button = event.target.closest('.quick-key-btn');
         if (!button) {
-          return;
-        }
-        if (button.dataset.action === 'add-custom') {
-          this.addCustom();
           return;
         }
         const sequence = button.dataset.sequence;
@@ -1074,51 +863,6 @@ export function createUi({ getControl, getTerm }) {
         }
         this.runSequence(sequence);
       });
-
-      DOM.quickKeys.addEventListener('pointerdown', (event) => {
-        const button = event.target.closest('.quick-key-btn');
-        if (!button) {
-          return;
-        }
-        const isCustom = button.dataset.customIndex !== undefined;
-        const isAdd = button.dataset.action === 'add-custom';
-        if (!isCustom && !isAdd) {
-          return;
-        }
-        clearLongPress();
-        longPressTarget = button;
-        longPressTimer = window.setTimeout(() => {
-          longPressTimer = 0;
-          if (!longPressTarget) {
-            return;
-          }
-          suppressClick = true;
-          if (longPressTarget.dataset.action === 'add-custom') {
-            this.addCustom();
-          } else {
-            const index = Number.parseInt(longPressTarget.dataset.customIndex || '-1', 10);
-            if (Number.isFinite(index) && index >= 0) {
-              this.editCustom(index);
-            }
-          }
-          longPressTarget = null;
-        }, QUICK_KEY_LONG_PRESS_MS);
-      });
-
-      DOM.quickKeys.addEventListener('pointerup', clearLongPress);
-      DOM.quickKeys.addEventListener('pointercancel', clearLongPress);
-      DOM.quickKeys.addEventListener(
-        'pointermove',
-        (event) => {
-          if (!longPressTimer) {
-            return;
-          }
-          if (Math.abs(event.movementX) > 5 || Math.abs(event.movementY) > 5) {
-            clearLongPress();
-          }
-        },
-        { passive: true }
-      );
     }
   };
 
@@ -1353,6 +1097,7 @@ export function createUi({ getControl, getTerm }) {
     StatusBar.setText('初始化中...');
     StatusBar.setCwd('读取中...');
     setActionButtonsEnabled(false);
+    window.localStorage.removeItem(LEGACY_QUICK_KEY_STORAGE_KEY);
 
     SessionTabs.bind();
     Dock.bind();
