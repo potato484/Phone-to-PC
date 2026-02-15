@@ -7,12 +7,20 @@
     <style>
       :root {
         color-scheme: dark;
+        --bg: #1e1e2e;
+        --surface: #181825;
+        --surface-high: #313244;
+        --border: #45475a;
+        --text: #cdd6f4;
+        --text-muted: #a6adc8;
+        --accent: #94e2d5;
+        --danger: #f38ba8;
       }
       body {
         margin: 0;
-        font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-        background: #0f1324;
-        color: #e8ecff;
+        font-family: system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
       }
       main {
         min-height: 100vh;
@@ -22,9 +30,9 @@
       }
       .card {
         width: min(100%, 520px);
-        border: 1px solid rgba(255, 255, 255, 0.16);
+        border: 1px solid var(--border);
         border-radius: 14px;
-        background: rgba(18, 24, 44, 0.96);
+        background: rgba(24, 24, 37, 0.94);
         padding: 18px;
       }
       h1 {
@@ -33,27 +41,28 @@
       }
       p {
         margin: 0;
-        color: #b8c2ea;
+        color: var(--text-muted);
         line-height: 1.6;
       }
       code {
-        color: #8de0c7;
+        color: var(--accent);
       }
       .status {
         margin-top: 12px;
         font-size: 13px;
       }
       .error {
-        color: #ff9e9e;
+        color: var(--danger);
       }
+      .btn,
       button {
         margin-top: 14px;
         min-height: 38px;
         padding: 0 14px;
         border-radius: 10px;
-        border: 1px solid rgba(255, 255, 255, 0.3);
-        background: #1f2a50;
-        color: #e8ecff;
+        border: 1px solid var(--border);
+        background: var(--surface-high);
+        color: var(--text);
       }
     </style>
   </head>
@@ -63,7 +72,7 @@
         <h1>正在重置 C2P 本地缓存</h1>
         <p>此页面会自动清除旧 Service Worker 与缓存，然后返回主页面。</p>
         <p class="status" id="status">正在执行...</p>
-        <button id="retry-btn" type="button" hidden>重试</button>
+        <button id="retry-btn" class="btn" type="button" hidden>重试</button>
       </section>
     </main>
 

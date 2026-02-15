@@ -3,7 +3,7 @@
   "short_name": "C2P",
   "display": "standalone",
   "start_url": "/",
-  "background_color": "#0f1220",
-  "theme_color": "#1a1a2e",
+  "background_color": "#1e1e2e",
+  "theme_color": "#1e1e2e",
   "description": "Phone to computer CLI controller"
 }
