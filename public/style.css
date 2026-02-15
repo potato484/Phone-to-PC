@@ -292,6 +292,66 @@ button:active {
   font-size: 12px;
 }
 
+.desktop-credentials-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  background: rgba(3, 6, 13, 0.68);
+  backdrop-filter: blur(3px);
+}
+
+.desktop-credentials-dialog {
+  width: min(100%, 380px);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 12px;
+  background: rgba(9, 13, 25, 0.98);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.4);
+  padding: 12px;
+}
+
+.desktop-credentials-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+.desktop-credentials-hint {
+  margin: 6px 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.desktop-credentials-row {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.desktop-credentials-row input {
+  min-height: 38px;
+  border-radius: 10px;
+  border: 1px solid #3b425e;
+  background: #141a32;
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.desktop-credentials-actions {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.desktop-credentials-submit {
+  border-color: rgba(54, 199, 164, 0.7);
+  background: rgba(54, 199, 164, 0.18);
+}
+
 .terminal-reconnect {
   border: 1px solid rgba(240, 160, 48, 0.45);
   border-radius: 10px;

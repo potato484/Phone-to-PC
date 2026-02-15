@@ -84,6 +84,33 @@
             <div id="desktop-canvas" class="desktop-canvas" aria-label="远程桌面画面"></div>
             <p id="desktop-placeholder" class="desktop-placeholder">切换到桌面模式后自动连接</p>
           </div>
+
+          <div id="desktop-credentials-modal" class="desktop-credentials-modal" hidden>
+            <form id="desktop-credentials-form" class="desktop-credentials-dialog" autocomplete="off">
+              <h3 class="desktop-credentials-title">桌面认证</h3>
+              <p id="desktop-credentials-hint" class="desktop-credentials-hint">请输入 VNC 认证信息</p>
+
+              <label id="desktop-credentials-username-row" class="desktop-credentials-row">
+                用户名
+                <input id="desktop-credentials-username" type="text" autocomplete="username" />
+              </label>
+
+              <label id="desktop-credentials-password-row" class="desktop-credentials-row">
+                密码
+                <input id="desktop-credentials-password" type="password" autocomplete="current-password" />
+              </label>
+
+              <label id="desktop-credentials-target-row" class="desktop-credentials-row">
+                Target
+                <input id="desktop-credentials-target" type="text" autocomplete="off" />
+              </label>
+
+              <div class="desktop-credentials-actions">
+                <button id="desktop-credentials-cancel" class="btn" type="button">取消</button>
+                <button class="btn desktop-credentials-submit" type="submit">提交认证</button>
+              </div>
+            </form>
+          </div>
         </section>
       </main>
 

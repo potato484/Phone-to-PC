@@ -11,6 +11,14 @@ const VIEW_DESKTOP = 'desktop';
 const INPUT_TRACKPAD = 'trackpad';
 const INPUT_DIRECT = 'direct';
 const DEFAULT_FRAME_RATE = 15;
+const CREDENTIAL_TYPE_USERNAME = 'username';
+const CREDENTIAL_TYPE_PASSWORD = 'password';
+const CREDENTIAL_TYPE_TARGET = 'target';
+const CREDENTIAL_TYPE_SET = new Set([
+  CREDENTIAL_TYPE_USERNAME,
+  CREDENTIAL_TYPE_PASSWORD,
+  CREDENTIAL_TYPE_TARGET
+]);
 
 const MODIFIER_CONFIG = {
   ctrl: {
@@ -81,6 +89,10 @@ export function createDesktop({ getTerm, statusBar, toast }) {
   let viewMode = normalizeViewMode(readStorage(VIEW_MODE_STORAGE_KEY, VIEW_TERMINAL));
   let inputMode = normalizeInputMode(readStorage(DESKTOP_INPUT_STORAGE_KEY, INPUT_TRACKPAD));
   let frameRate = normalizeFrameRate(readStorage(DESKTOP_FPS_STORAGE_KEY, DEFAULT_FRAME_RATE));
+  let credentialDialogCleanup = null;
+  let credentialsPromptOpen = false;
+  let lastCredentialUsername = '';
+  let lastCredentialTarget = '';
   const modifiers = {
     ctrl: false,
     alt: false,
@@ -105,6 +117,224 @@ export function createDesktop({ getTerm, statusBar, toast }) {
     if (DOM.desktopPlaceholder) {
       DOM.desktopPlaceholder.hidden = true;
     }
+  }
+
+  function normalizeCredentialTypes(types) {
+    if (!Array.isArray(types)) {
+      return [CREDENTIAL_TYPE_PASSWORD];
+    }
+    const normalized = [];
+    const seen = new Set();
+    for (const entry of types) {
+      if (typeof entry !== 'string') {
+        continue;
+      }
+      const value = entry.trim().toLowerCase();
+      if (!CREDENTIAL_TYPE_SET.has(value) || seen.has(value)) {
+        continue;
+      }
+      seen.add(value);
+      normalized.push(value);
+    }
+    if (normalized.length === 0) {
+      normalized.push(CREDENTIAL_TYPE_PASSWORD);
+    }
+    return normalized;
+  }
+
+  function hideCredentialDialog() {
+    if (credentialDialogCleanup) {
+      credentialDialogCleanup();
+      credentialDialogCleanup = null;
+    }
+    credentialsPromptOpen = false;
+  }
+
+  function requestCredentialsWithPrompt(requiredTypes) {
+    const credentials = {};
+    if (requiredTypes.includes(CREDENTIAL_TYPE_USERNAME)) {
+      const username = window.prompt('请输入 VNC 用户名', lastCredentialUsername || '');
+      if (username === null) {
+        return null;
+      }
+      credentials.username = username;
+    }
+    if (requiredTypes.includes(CREDENTIAL_TYPE_PASSWORD)) {
+      const password = window.prompt('请输入 VNC 密码');
+      if (password === null) {
+        return null;
+      }
+      credentials.password = password;
+    }
+    if (requiredTypes.includes(CREDENTIAL_TYPE_TARGET)) {
+      const target = window.prompt('请输入 VNC target', lastCredentialTarget || '');
+      if (target === null) {
+        return null;
+      }
+      credentials.target = target;
+    }
+    return credentials;
+  }
+
+  function requestCredentials(requiredTypes) {
+    const normalizedTypes = normalizeCredentialTypes(requiredTypes);
+    const modal = DOM.desktopCredentialsModal;
+    const form = DOM.desktopCredentialsForm;
+    const hint = DOM.desktopCredentialsHint;
+    const usernameRow = DOM.desktopCredentialsUsernameRow;
+    const passwordRow = DOM.desktopCredentialsPasswordRow;
+    const targetRow = DOM.desktopCredentialsTargetRow;
+    const usernameInput = DOM.desktopCredentialsUsername;
+    const passwordInput = DOM.desktopCredentialsPassword;
+    const targetInput = DOM.desktopCredentialsTarget;
+    const cancelBtn = DOM.desktopCredentialsCancelBtn;
+
+    if (
+      !modal ||
+      !form ||
+      !hint ||
+      !usernameRow ||
+      !passwordRow ||
+      !targetRow ||
+      !usernameInput ||
+      !passwordInput ||
+      !targetInput
+    ) {
+      const fallback = requestCredentialsWithPrompt(normalizedTypes);
+      if (!fallback) {
+        return Promise.reject(new Error('credentials cancelled'));
+      }
+      return Promise.resolve(fallback);
+    }
+
+    hideCredentialDialog();
+    credentialsPromptOpen = true;
+
+    const needUsername = normalizedTypes.includes(CREDENTIAL_TYPE_USERNAME);
+    const needPassword = normalizedTypes.includes(CREDENTIAL_TYPE_PASSWORD);
+    const needTarget = normalizedTypes.includes(CREDENTIAL_TYPE_TARGET);
+    const labelText = normalizedTypes
+      .map((type) => {
+        if (type === CREDENTIAL_TYPE_USERNAME) {
+          return '用户名';
+        }
+        if (type === CREDENTIAL_TYPE_PASSWORD) {
+          return '密码';
+        }
+        if (type === CREDENTIAL_TYPE_TARGET) {
+          return 'target';
+        }
+        return type;
+      })
+      .join(' / ');
+    hint.textContent = `VNC 要求提供：${labelText}`;
+
+    usernameRow.hidden = !needUsername;
+    passwordRow.hidden = !needPassword;
+    targetRow.hidden = !needTarget;
+
+    usernameInput.value = needUsername ? lastCredentialUsername : '';
+    passwordInput.value = '';
+    targetInput.value = needTarget ? lastCredentialTarget : '';
+
+    return new Promise((resolve, reject) => {
+      const close = () => {
+        form.removeEventListener('submit', onSubmit);
+        if (cancelBtn) {
+          cancelBtn.removeEventListener('click', onCancel);
+        }
+        modal.removeEventListener('click', onOverlayClick);
+        document.removeEventListener('keydown', onKeydown);
+        modal.hidden = true;
+        credentialsPromptOpen = false;
+        if (credentialDialogCleanup === close) {
+          credentialDialogCleanup = null;
+        }
+      };
+
+      const onCancel = (event) => {
+        if (event) {
+          event.preventDefault();
+        }
+        close();
+        reject(new Error('credentials cancelled'));
+      };
+
+      const onSubmit = (event) => {
+        event.preventDefault();
+        const credentials = {};
+
+        if (needUsername) {
+          const value = usernameInput.value.trim();
+          if (!value) {
+            usernameInput.focus();
+            toast.show('请输入用户名', 'warn');
+            return;
+          }
+          credentials.username = value;
+          lastCredentialUsername = value;
+        }
+
+        if (needPassword) {
+          const value = passwordInput.value;
+          if (!value) {
+            passwordInput.focus();
+            toast.show('请输入密码', 'warn');
+            return;
+          }
+          credentials.password = value;
+        }
+
+        if (needTarget) {
+          const value = targetInput.value.trim();
+          if (!value) {
+            targetInput.focus();
+            toast.show('请输入 target', 'warn');
+            return;
+          }
+          credentials.target = value;
+          lastCredentialTarget = value;
+        }
+
+        close();
+        resolve(credentials);
+      };
+
+      const onOverlayClick = (event) => {
+        if (event.target === modal) {
+          onCancel(event);
+        }
+      };
+
+      const onKeydown = (event) => {
+        if (event.key === 'Escape') {
+          onCancel(event);
+        }
+      };
+
+      credentialDialogCleanup = close;
+      form.addEventListener('submit', onSubmit);
+      if (cancelBtn) {
+        cancelBtn.addEventListener('click', onCancel);
+      }
+      modal.addEventListener('click', onOverlayClick);
+      document.addEventListener('keydown', onKeydown);
+
+      modal.hidden = false;
+      window.requestAnimationFrame(() => {
+        if (needPassword) {
+          passwordInput.focus();
+          return;
+        }
+        if (needUsername) {
+          usernameInput.focus();
+          return;
+        }
+        if (needTarget) {
+          targetInput.focus();
+        }
+      });
+    });
   }
 
   function updateViewButtons() {
@@ -213,6 +443,7 @@ export function createDesktop({ getTerm, statusBar, toast }) {
 
   function disconnectDesktop(options = {}) {
     const { silent = false } = options;
+    hideCredentialDialog();
     const activeRfb = rfb;
     rfb = null;
     State.desktopRfb = null;
@@ -246,6 +477,7 @@ export function createDesktop({ getTerm, statusBar, toast }) {
     if (rfb) {
       disconnectDesktop({ silent: true });
     }
+    hideCredentialDialog();
 
     updateDesktopStatus('连接中...');
     updatePlaceholder('正在连接桌面...');
@@ -293,6 +525,7 @@ export function createDesktop({ getTerm, statusBar, toast }) {
       if (rfb !== nextRfb) {
         return;
       }
+      hideCredentialDialog();
       setDesktopConnected(true);
       hidePlaceholder();
       updateDesktopStatus('已连接');
@@ -306,6 +539,7 @@ export function createDesktop({ getTerm, statusBar, toast }) {
       if (rfb !== nextRfb) {
         return;
       }
+      hideCredentialDialog();
       const clean = !!(event && event.detail && event.detail.clean);
       rfb = null;
       State.desktopRfb = null;
@@ -330,13 +564,34 @@ export function createDesktop({ getTerm, statusBar, toast }) {
       toast.show('桌面安全协商失败', 'danger');
     });
 
-    nextRfb.addEventListener('credentialsrequired', () => {
+    nextRfb.addEventListener('credentialsrequired', async (event) => {
       if (rfb !== nextRfb) {
+        return;
+      }
+      if (credentialsPromptOpen) {
         return;
       }
       statusBar.setText('桌面需要认证凭据');
       updateDesktopStatus('需要认证');
-      toast.show('VNC 需要认证，请配置无密码本地接入', 'warn');
+      const requiredTypes =
+        event && event.detail && Array.isArray(event.detail.types) ? event.detail.types : [CREDENTIAL_TYPE_PASSWORD];
+      try {
+        const credentials = await requestCredentials(requiredTypes);
+        if (rfb !== nextRfb) {
+          return;
+        }
+        nextRfb.sendCredentials(credentials);
+        updateDesktopStatus('认证中...');
+        statusBar.setText('已提交桌面认证信息');
+      } catch {
+        if (rfb !== nextRfb) {
+          return;
+        }
+        updateDesktopStatus('认证已取消');
+        statusBar.setText('已取消桌面认证');
+        toast.show('已取消桌面认证', 'warn');
+        disconnectDesktop({ silent: true });
+      }
     });
   }
 
