@@ -37,7 +37,10 @@ const gestures = createGestures({
 });
 
 const files = createFiles({
-  toast: ui.Toast
+  toast: ui.Toast,
+  openTerminalAtPath: (cwd) => {
+    ui.Actions.spawn({ cwd });
+  }
 });
 
 const monitor = createMonitor({

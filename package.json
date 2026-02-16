@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "setup": "node scripts/setup-vapid.mjs",
     "postinstall": "node scripts/copy-vendor.mjs",
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
@@ -21,9 +20,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "node-pty": "^1.1.0",
-    "@novnc/novnc": "^1.6.0",
     "qrcode-terminal": "^0.12.0",
-    "web-push": "^3.6.5",
     "ws": "^8.18.0",
     "xterm": "^5.3.0",
     "xterm-addon-attach": "^0.9.0",
@@ -33,7 +30,6 @@
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.2",
     "@types/qrcode-terminal": "^0.12.2",
-    "@types/web-push": "^3.6.4",
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

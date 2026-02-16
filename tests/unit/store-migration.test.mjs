@@ -43,11 +43,8 @@ test('C2PStore migrates legacy JSON once and remains idempotent', async () => {
   const storeA = new C2PStore(dbPath);
   try {
     const tasks = storeA.listTasks();
-    const subs = storeA.listSubscriptions();
     assert.equal(tasks.length, 1);
     assert.equal(tasks[0]?.id, 'task-1');
-    assert.equal(subs.length, 1);
-    assert.equal(subs[0]?.endpoint, 'https://example.com/sub/1');
 
     const backups = (await readdir(tempDir)).filter((name) => name.startsWith('.c2p-store.json.bak.'));
     assert.ok(backups.length >= 1);
@@ -61,9 +58,7 @@ test('C2PStore migrates legacy JSON once and remains idempotent', async () => {
   const storeB = new C2PStore(dbPath);
   try {
     const tasks = storeB.listTasks();
-    const subs = storeB.listSubscriptions();
     assert.equal(tasks.length, 1);
-    assert.equal(subs.length, 1);
   } finally {
     storeB.close();
     await rm(tempDir, { recursive: true, force: true });

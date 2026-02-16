@@ -40,7 +40,6 @@ export const DOM = {
   monitorNetRxText: document.getElementById('monitor-net-rx-text'),
   monitorNetTxText: document.getElementById('monitor-net-tx-text'),
   monitorUptimeText: document.getElementById('monitor-uptime-text'),
-  monitorVncText: document.getElementById('monitor-vnc-text'),
   monitorCqsText: document.getElementById('monitor-cqs-text'),
   monitorRttText: document.getElementById('monitor-rtt-text'),
   monitorJitterText: document.getElementById('monitor-jitter-text'),
@@ -134,9 +133,6 @@ export const State = {
   currentSessionId: '',
   cwd: '',
   terminalFontSize: 14,
-  pushRegistered: false,
-  pushAutoRequested: false,
-  serviceWorkerRegistration: null,
   sessionOffsets: {},
   killRequestTimer: 0,
   killInFlight: false,
@@ -340,15 +336,4 @@ export async function fetchSessionLogBytes(sessionId) {
 
 export function setActionButtonsEnabled(enabled) {
   void enabled;
-}
-
-export function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-  const normalized = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = window.atob(normalized);
-  const output = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i += 1) {
-    output[i] = raw.charCodeAt(i);
-  }
-  return output;
 }

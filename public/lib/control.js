@@ -90,16 +90,6 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         const cli = payload.cli || 'shell';
         statusBar.setText(`已启动 ${cli}`);
         toast.show(`已启动 ${cli}，会话已附加`, 'success');
-        if (!State.pushAutoRequested && !State.pushRegistered && 'Notification' in window) {
-          State.pushAutoRequested = true;
-          void actions
-            .requestPush({
-              silentPermissionDenied: true,
-              silentFailure: true,
-              showSuccessToast: false
-            })
-            .catch(() => {});
-        }
         return;
       }
 

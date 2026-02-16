@@ -19,15 +19,6 @@ export interface TaskRecord {
   exitCode?: number;
 }
 
-export interface PushSubscriptionRecord {
-  endpoint: string;
-  expirationTime: number | null;
-  keys: {
-    p256dh: string;
-    auth: string;
-  };
-}
-
 export interface IssuedTokenRecord {
   jti: string;
   scope: string;
@@ -73,7 +64,6 @@ export interface TelemetrySummary {
 
 interface LegacyStoreData {
   tasks?: unknown;
-  subscriptions?: unknown;
 }
 
 function toInt(value: unknown, fallback = 0): number {
@@ -217,14 +207,6 @@ export class C2PStore {
         exit_code INTEGER
       );
 
-      CREATE TABLE IF NOT EXISTS push_subscriptions (
-        endpoint TEXT PRIMARY KEY,
-        expiration_time INTEGER,
-        p256dh TEXT NOT NULL,
-        auth TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
       CREATE TABLE IF NOT EXISTS tokens (
         jti TEXT PRIMARY KEY,
         scope TEXT NOT NULL,
@@ -258,6 +240,8 @@ export class C2PStore {
         happened_at TEXT NOT NULL,
         payload_json TEXT NOT NULL
       );
+
+      DROP TABLE IF EXISTS push_subscriptions;
 
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -293,18 +277,10 @@ export class C2PStore {
     }
 
     const tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
-    const subs = Array.isArray(parsed.subscriptions) ? parsed.subscriptions : [];
-
     const insertTask = this.db.prepare(`
       INSERT OR REPLACE INTO tasks (
         id, cli, prompt, cwd, status, created_at, started_at, finished_at, updated_at, exit_code
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const insertSub = this.db.prepare(`
-      INSERT OR REPLACE INTO push_subscriptions (
-        endpoint, expiration_time, p256dh, auth, updated_at
-      ) VALUES (?, ?, ?, ?, ?)
     `);
 
     const now = new Date().toISOString();
@@ -335,23 +311,6 @@ export class C2PStore {
           updatedAt,
           Number.isFinite(Number(row.exitCode)) ? Number(row.exitCode) : null
         );
-      }
-
-      for (const sub of subs) {
-        if (!sub || typeof sub !== 'object') {
-          continue;
-        }
-        const row = sub as Record<string, unknown>;
-        const keys = row.keys && typeof row.keys === 'object' ? (row.keys as Record<string, unknown>) : null;
-        const endpoint = toStringValue(row.endpoint).trim();
-        const p256dh = keys ? toStringValue(keys.p256dh).trim() : '';
-        const auth = keys ? toStringValue(keys.auth).trim() : '';
-        if (!endpoint || !p256dh || !auth) {
-          continue;
-        }
-        const expirationValue = row.expirationTime;
-        const expiration = typeof expirationValue === 'number' && Number.isFinite(expirationValue) ? expirationValue : null;
-        insertSub.run(endpoint, expiration, p256dh, auth, now);
       }
 
       this.db.exec('COMMIT');
@@ -462,41 +421,6 @@ export class C2PStore {
     };
 
     this.addTask(next);
-  }
-
-  listSubscriptions(): PushSubscriptionRecord[] {
-    const rows = this.db
-      .prepare('SELECT endpoint, expiration_time, p256dh, auth FROM push_subscriptions ORDER BY updated_at DESC')
-      .all() as Array<Record<string, unknown>>;
-
-    return rows.map((row) => ({
-      endpoint: toStringValue(row.endpoint),
-      expirationTime: row.expiration_time === null ? null : toInt(row.expiration_time, 0),
-      keys: {
-        p256dh: toStringValue(row.p256dh),
-        auth: toStringValue(row.auth)
-      }
-    }));
-  }
-
-  upsertSubscription(subscription: PushSubscriptionRecord): void {
-    this.db
-      .prepare(
-        `INSERT OR REPLACE INTO push_subscriptions (
-          endpoint, expiration_time, p256dh, auth, updated_at
-        ) VALUES (?, ?, ?, ?, ?)`
-      )
-      .run(
-        subscription.endpoint,
-        subscription.expirationTime,
-        subscription.keys.p256dh,
-        subscription.keys.auth,
-        new Date().toISOString()
-      );
-  }
-
-  removeSubscription(endpoint: string): void {
-    this.db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
   }
 
   recordIssuedToken(record: IssuedTokenRecord): void {

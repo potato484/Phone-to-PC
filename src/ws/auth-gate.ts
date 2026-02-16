@@ -15,7 +15,7 @@ interface WsAuthMessage {
 }
 
 export interface WsAuthGateDeps {
-  channel: 'control' | 'terminal' | 'desktop';
+  channel: 'control' | 'terminal';
   request: IncomingMessage;
   accessTokenService: AccessTokenService;
   auditLogger: AuditLogger;

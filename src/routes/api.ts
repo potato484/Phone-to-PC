@@ -6,10 +6,8 @@ import { pipeline } from 'node:stream/promises';
 import type { Application, Request, Response } from 'express';
 import type { AuditLogger } from '../audit-log.js';
 import type { PtyManager } from '../pty-manager.js';
-import type { PushService } from '../push.js';
 import { getClientIp } from '../security.js';
-import type { C2PStore, PushSubscriptionRecord, TelemetryEventInput } from '../store.js';
-import type { VncManager } from '../vnc-manager.js';
+import type { C2PStore, TelemetryEventInput } from '../store.js';
 
 const FS_UPLOAD_LIMIT_BYTES = 100 * 1024 * 1024;
 const FS_READ_LIMIT_BYTES = 2 * 1024 * 1024;
@@ -37,28 +35,8 @@ let previousNetworkSnapshot: NetworkSnapshot | null = null;
 interface ApiRouteDeps {
   store: C2PStore;
   ptyManager: PtyManager;
-  pushService: PushService;
   defaultWorkingDirectory: string;
-  vncManager: VncManager;
   auditLogger: AuditLogger;
-}
-
-function isPushSubscriptionRecord(value: unknown): value is PushSubscriptionRecord {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const v = value as Record<string, unknown>;
-  if (typeof v.endpoint !== 'string' || v.endpoint.length === 0) {
-    return false;
-  }
-  if (v.expirationTime !== null && typeof v.expirationTime !== 'number') {
-    return false;
-  }
-  if (!v.keys || typeof v.keys !== 'object') {
-    return false;
-  }
-  const keys = v.keys as Record<string, unknown>;
-  return typeof keys.p256dh === 'string' && typeof keys.auth === 'string';
 }
 
 function applySessionLogHeaders(res: Response, logBytes: number): number {
@@ -365,7 +343,7 @@ function collectNetworkStats(): {
 }
 
 export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
-  const { store, ptyManager, pushService, defaultWorkingDirectory, vncManager, auditLogger } = deps;
+  const { store, ptyManager, defaultWorkingDirectory, auditLogger } = deps;
   const fsRoot = path.resolve(defaultWorkingDirectory);
 
   const auditFsEvent = (
@@ -438,19 +416,6 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
 
   app.get('/api/runtime', (_req: Request, res: Response) => {
     res.json({ cwd: defaultWorkingDirectory });
-  });
-
-  app.get('/api/vapid-public-key', (_req: Request, res: Response) => {
-    res.json({ publicKey: pushService.getPublicKey() });
-  });
-
-  app.post('/api/push/subscribe', (req: Request, res: Response) => {
-    if (!isPushSubscriptionRecord(req.body)) {
-      res.status(400).json({ error: 'invalid subscription payload' });
-      return;
-    }
-    store.upsertSubscription(req.body);
-    res.status(201).json({ ok: true });
   });
 
   app.post('/api/telemetry/events', (req: Request, res: Response) => {
@@ -865,15 +830,13 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
   app.get('/api/system/stats', async (_req: Request, res: Response) => {
     try {
       const disk = collectDiskStats(fsRoot);
-      const vnc = await vncManager.getStatusSnapshot();
       res.json({
         timestamp: new Date().toISOString(),
         uptimeSec: Math.floor(os.uptime()),
         cpu: collectCpuStats(),
         memory: collectMemoryStats(),
         disk,
-        network: collectNetworkStats(),
-        vnc
+        network: collectNetworkStats()
       });
     } catch {
       res.status(500).json({ error: 'failed to collect system stats' });

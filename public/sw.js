@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v13';
+const CACHE_NAME = 'c2p-v17';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -16,9 +16,7 @@ const APP_SHELL_ASSETS = [
   '/vendor/xterm.js',
   '/vendor/xterm-addon-fit.js',
   '/vendor/xterm-addon-attach.js',
-  '/vendor/xterm-addon-webgl.js',
-  '/vendor/novnc/lib/rfb.js',
-  '/vendor/novnc/lib/input/keysym.js'
+  '/vendor/xterm-addon-webgl.js'
 ];
 
 function shouldBypassRequest(url, request) {
@@ -88,61 +86,6 @@ self.addEventListener('fetch', (event) => {
         }
         throw error;
       }
-    })
-  );
-});
-
-self.addEventListener('push', (event) => {
-  let payload = {
-    title: 'C2P Update',
-    body: 'Task status changed.',
-    data: { url: '/' }
-  };
-
-  if (event.data) {
-    try {
-      payload = event.data.json();
-    } catch {
-      payload.body = event.data.text();
-    }
-  }
-
-  const data = payload && payload.data && typeof payload.data === 'object' ? payload.data : { url: '/' };
-  if (typeof data.url !== 'string' || data.url.length === 0) {
-    data.url = '/';
-  }
-  if (data.type === 'url-update') {
-    payload.title = payload.title || 'C2P 已启动';
-    payload.body = payload.body || '点击连接';
-  }
-
-  event.waitUntil(
-    self.registration.showNotification(payload.title || 'C2P Update', {
-      body: payload.body || 'Task status changed.',
-      data
-    })
-  );
-});
-
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-  const target =
-    event.notification.data && typeof event.notification.data.url === 'string'
-      ? event.notification.data.url
-      : '/';
-
-  event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
-      for (const client of list) {
-        if ('focus' in client) {
-          client.navigate(target);
-          return client.focus();
-        }
-      }
-      if (clients.openWindow) {
-        return clients.openWindow(target);
-      }
-      return undefined;
     })
   );
 });

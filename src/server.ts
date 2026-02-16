@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import fs from 'node:fs';
 import http from 'node:http';
-import { createRequire } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -17,7 +17,6 @@ import {
 import { AuditLogger } from './audit-log.js';
 import { MetricsRegistry } from './metrics.js';
 import { PtyManager } from './pty-manager.js';
-import { PushService } from './push.js';
 import { registerApiRoutes } from './routes/api.js';
 import {
   checkOriginAndHost,
@@ -29,10 +28,8 @@ import {
 } from './security.js';
 import { C2PStore } from './store.js';
 import { getLanAddress, isEnabledEnvFlag, resolveTunnelMode, startTunnel } from './tunnel.js';
-import { VncManager } from './vnc-manager.js';
 import { createControlChannel } from './ws/control.js';
 import type { WsChannel } from './ws/channel.js';
-import { createDesktopChannel } from './ws/desktop.js';
 import { createTerminalChannel } from './ws/terminal.js';
 
 interface ServerCliOptions {
@@ -61,8 +58,20 @@ function parseServerCliOptions(args: string[]): ServerCliOptions {
 }
 
 function resolveDefaultWorkingDirectory(rawCwd: string | undefined): string {
-  if (!rawCwd || rawCwd.trim().length === 0) {
+  const fallbackCwd = (() => {
+    const homeDir = os.homedir();
+    try {
+      if (homeDir && fs.statSync(homeDir).isDirectory()) {
+        return homeDir;
+      }
+    } catch {
+      // ignore and fall back to process cwd
+    }
     return process.cwd();
+  })();
+
+  if (!rawCwd || rawCwd.trim().length === 0) {
+    return fallbackCwd;
   }
   const candidate = path.resolve(rawCwd.trim());
   try {
@@ -72,8 +81,8 @@ function resolveDefaultWorkingDirectory(rawCwd: string | undefined): string {
   } catch {
     // fall through to default
   }
-  console.log(`[c2p] cli: invalid --cwd=${rawCwd}, fallback to ${process.cwd()}`);
-  return process.cwd();
+  console.log(`[c2p] cli: invalid --cwd=${rawCwd}, fallback to ${fallbackCwd}`);
+  return fallbackCwd;
 }
 
 function parseIntEnv(name: string, fallback: number): number {
@@ -104,8 +113,6 @@ const auditLogger = new AuditLogger({
 const metrics = new MetricsRegistry();
 
 const ptyManager = new PtyManager(defaultWorkingDirectory);
-const pushService = new PushService(store);
-const vncManager = new VncManager();
 
 if (!ptyManager.isReady()) {
   console.warn('[c2p] warn: tmux not available, terminal sessions will not be ready');
@@ -156,35 +163,17 @@ const exchangeFailureLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 5,
 const wsUpgradeLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 60 });
 const wsAuthFailureLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 5, lockMs: 15 * 60_000 });
 
-pushService.init({
-  subject: process.env.VAPID_SUBJECT,
-  publicKey: process.env.VAPID_PUBLIC_KEY,
-  privateKey: process.env.VAPID_PRIVATE_KEY
-});
-
 const app = express();
 const runtimeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(import.meta.url);
 const publicDir = path.resolve(runtimeRoot, 'public');
-let noVncDir = path.resolve(runtimeRoot, 'node_modules', '@novnc', 'novnc');
-try {
-  const noVncPackageJson = require.resolve('@novnc/novnc/package.json');
-  noVncDir = path.dirname(noVncPackageJson);
-} catch {
-  // fallback to runtimeRoot-relative path
-}
 
 if (!fs.existsSync(publicDir)) {
   console.log(`[c2p] warn: public assets directory missing: ${publicDir}`);
-}
-if (!fs.existsSync(noVncDir)) {
-  console.log(`[c2p] warn: noVNC assets directory missing: ${noVncDir}`);
 }
 
 app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(publicDir));
-app.use('/vendor/novnc', express.static(noVncDir));
 
 app.get('/healthz', (_req, res) => {
   res.status(200).json({
@@ -197,8 +186,7 @@ app.get('/readyz', async (_req, res) => {
   const checks = {
     sqlitePing: store.ping(),
     sqliteWritable: store.isWritable(),
-    ptyReady: ptyManager.isReady(),
-    vncAvailable: false
+    ptyReady: ptyManager.isReady()
   };
 
   if (checks.ptyReady) {
@@ -207,13 +195,6 @@ app.get('/readyz', async (_req, res) => {
     } catch {
       checks.ptyReady = false;
     }
-  }
-
-  try {
-    const vnc = await vncManager.getStatusSnapshot();
-    checks.vncAvailable = vnc.available;
-  } catch {
-    checks.vncAvailable = false;
   }
 
   const ready = checks.sqlitePing && checks.sqliteWritable && checks.ptyReady;
@@ -336,9 +317,7 @@ app.post('/api/auth/revoke', (req, res) => {
 registerApiRoutes(app, {
   store,
   ptyManager,
-  pushService,
   defaultWorkingDirectory,
-  vncManager,
   auditLogger
 });
 
@@ -347,7 +326,6 @@ const channels: WsChannel[] = [
   createControlChannel({
     ptyManager,
     store,
-    pushService,
     accessTokenService,
     auditLogger,
     metrics,
@@ -355,13 +333,6 @@ const channels: WsChannel[] = [
   }),
   createTerminalChannel({
     ptyManager,
-    accessTokenService,
-    auditLogger,
-    metrics,
-    wsAuthFailureLimiter
-  }),
-  createDesktopChannel({
-    vncManager,
     accessTokenService,
     auditLogger,
     metrics,
@@ -398,7 +369,6 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 server.on('close', () => {
-  vncManager.dispose();
   ptyManager.dispose();
   metrics.dispose();
   store.close();
@@ -427,9 +397,5 @@ server.listen(port, async () => {
     }
     console.log('[c2p] scan to connect:');
     qrcode.generate(tunnelUrl, { small: true });
-    void pushService.notify('C2P 已启动', '点击连接', {
-      type: 'url-update',
-      url: tunnelUrl
-    });
   }
 });

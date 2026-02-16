@@ -48,8 +48,31 @@ export function createGestures({ getTerm, toast }) {
     `;
     document.body.appendChild(menuEl);
 
+    const resolveActionButton = (event) => {
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      for (const node of path) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+        const buttonFromPath = node.closest('[data-action]');
+        if (buttonFromPath && menuEl && menuEl.contains(buttonFromPath)) {
+          return buttonFromPath;
+        }
+      }
+      const target = event.target;
+      const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+      if (!element) {
+        return;
+      }
+      const button = element.closest('[data-action]');
+      if (!button || (menuEl && !menuEl.contains(button))) {
+        return;
+      }
+      return button;
+    };
+
     menuEl.addEventListener('click', async (event) => {
-      const button = event.target.closest('[data-action]');
+      const button = resolveActionButton(event);
       if (!button) {
         return;
       }
@@ -113,19 +136,18 @@ export function createGestures({ getTerm, toast }) {
       }
     });
 
-    document.addEventListener(
-      'pointerdown',
-      (event) => {
-        if (!menuEl || menuEl.hidden) {
-          return;
-        }
-        if (menuEl.contains(event.target)) {
-          return;
-        }
-        hideMenu();
-      },
-      { passive: true }
-    );
+    const dismissOnOutsidePress = (event) => {
+      if (!menuEl || menuEl.hidden) {
+        return;
+      }
+      if (menuEl.contains(event.target)) {
+        return;
+      }
+      hideMenu();
+    };
+
+    document.addEventListener('pointerdown', dismissOnOutsidePress, { passive: true, capture: true });
+    document.addEventListener('click', dismissOnOutsidePress, { passive: true, capture: true });
 
     return menuEl;
   }

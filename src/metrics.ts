@@ -1,7 +1,6 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import type { DesktopQualityProfile } from './ws/desktop-quality.js';
 
-export type WsChannelName = 'control' | 'terminal' | 'desktop';
+export type WsChannelName = 'control' | 'terminal';
 
 function toFiniteNumber(value: number, fallback = 0): number {
   if (!Number.isFinite(value)) {
@@ -28,18 +27,10 @@ export class MetricsRegistry {
   private readonly eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
   private wsConnections: Record<WsChannelName, number> = {
     control: 0,
-    terminal: 0,
-    desktop: 0
-  };
-  private desktopQualityProfileConnections: Record<DesktopQualityProfile, number> = {
-    low: 0,
-    balanced: 0,
-    high: 0
+    terminal: 0
   };
   private wsAuthFailTotal = 0;
   private terminalSessionsActive = 0;
-  private desktopUpstreamBufferedBytes = 0;
-  private desktopBackpressurePauseTotal = 0;
   private terminalSendBufferedBytes = 0;
   private readonly startedAt = Date.now();
 
@@ -65,22 +56,6 @@ export class MetricsRegistry {
 
   setTerminalSessionsActive(value: number): void {
     this.terminalSessionsActive = Math.max(0, Math.floor(toFiniteNumber(value)));
-  }
-
-  setDesktopUpstreamBufferedBytes(value: number): void {
-    this.desktopUpstreamBufferedBytes = Math.max(0, Math.floor(toFiniteNumber(value)));
-  }
-
-  incDesktopQualityProfileConnection(profile: DesktopQualityProfile): void {
-    this.desktopQualityProfileConnections[profile] = Math.max(0, this.desktopQualityProfileConnections[profile] + 1);
-  }
-
-  incDesktopBackpressurePauseTotal(increment = 1): void {
-    const delta = Math.max(0, Math.floor(toFiniteNumber(increment, 1)));
-    if (delta === 0) {
-      return;
-    }
-    this.desktopBackpressurePauseTotal += delta;
   }
 
   setTerminalSendBufferedBytes(value: number): void {
@@ -138,7 +113,6 @@ export class MetricsRegistry {
     lines.push('# TYPE c2p_ws_connections gauge');
     lines.push(formatMetricLine('c2p_ws_connections', { channel: 'control' }, this.wsConnections.control));
     lines.push(formatMetricLine('c2p_ws_connections', { channel: 'terminal' }, this.wsConnections.terminal));
-    lines.push(formatMetricLine('c2p_ws_connections', { channel: 'desktop' }, this.wsConnections.desktop));
 
     lines.push('# HELP c2p_ws_auth_fail_total Total websocket auth failures');
     lines.push('# TYPE c2p_ws_auth_fail_total counter');
@@ -153,38 +127,6 @@ export class MetricsRegistry {
     lines.push('# HELP c2p_terminal_sessions_active Active terminal sessions');
     lines.push('# TYPE c2p_terminal_sessions_active gauge');
     lines.push(`c2p_terminal_sessions_active ${this.terminalSessionsActive}`);
-
-    lines.push('# HELP c2p_desktop_upstream_buffered_bytes Buffered bytes on desktop upstream path');
-    lines.push('# TYPE c2p_desktop_upstream_buffered_bytes gauge');
-    lines.push(`c2p_desktop_upstream_buffered_bytes ${this.desktopUpstreamBufferedBytes}`);
-
-    lines.push('# HELP c2p_desktop_quality_connections_total Desktop connections by quality profile');
-    lines.push('# TYPE c2p_desktop_quality_connections_total counter');
-    lines.push(
-      formatMetricLine(
-        'c2p_desktop_quality_connections_total',
-        { profile: 'low' },
-        this.desktopQualityProfileConnections.low
-      )
-    );
-    lines.push(
-      formatMetricLine(
-        'c2p_desktop_quality_connections_total',
-        { profile: 'balanced' },
-        this.desktopQualityProfileConnections.balanced
-      )
-    );
-    lines.push(
-      formatMetricLine(
-        'c2p_desktop_quality_connections_total',
-        { profile: 'high' },
-        this.desktopQualityProfileConnections.high
-      )
-    );
-
-    lines.push('# HELP c2p_desktop_backpressure_pause_total Desktop upstream pauses due to websocket backpressure');
-    lines.push('# TYPE c2p_desktop_backpressure_pause_total counter');
-    lines.push(`c2p_desktop_backpressure_pause_total ${this.desktopBackpressurePauseTotal}`);
 
     lines.push('# HELP c2p_terminal_send_buffered_bytes Buffered bytes pending terminal send');
     lines.push('# TYPE c2p_terminal_send_buffered_bytes gauge');

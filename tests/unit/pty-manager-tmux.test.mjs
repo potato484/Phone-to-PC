@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -57,17 +57,31 @@ test('PtyManager uses tmux backend for spawn/attach/recover/kill', async (t) => 
 
   try {
     assert.equal(manager.isReady(), true);
+    const nestedDir = path.join(runtimeDir, 'nested-workspace');
+    await mkdir(nestedDir, { recursive: true });
 
     const info = manager.spawn({
       id: 'session-test-1',
       cli: 'shell',
-      cwd: runtimeDir,
+      cwd: 'nested-workspace',
       cols: 120,
       rows: 40
     });
 
     assert.equal(info.id, 'session-test-1');
+    assert.equal(info.cwd, nestedDir);
     assert.equal(manager.hasSession('session-test-1'), true);
+
+    const fallbackInfo = manager.spawn({
+      id: 'session-test-2',
+      cli: 'shell',
+      cwd: 'missing-dir',
+      cols: 100,
+      rows: 30
+    });
+    assert.equal(fallbackInfo.cwd, runtimeDir);
+    manager.kill('session-test-2');
+    await new Promise((resolve) => setTimeout(resolve, 50));
 
     const attachment = manager.attach('session-test-1', {
       cols: 120,
@@ -85,7 +99,7 @@ test('PtyManager uses tmux backend for spawn/attach/recover/kill', async (t) => 
       {
         id: 'session-test-1',
         cli: 'shell',
-        cwd: runtimeDir,
+        cwd: nestedDir,
         cols: 120,
         rows: 40,
         startedAt: info.startedAt,

@@ -123,12 +123,6 @@ export function createMonitor({ toast }) {
     }
 
     setText(DOM.monitorUptimeText, formatUptime(stats ? stats.uptimeSec : 0));
-    if (stats && stats.vnc) {
-      const prefix = stats.vnc.available ? '在线' : '离线';
-      setText(DOM.monitorVncText, `${prefix} · ${stats.vnc.backend}`);
-    } else {
-      setText(DOM.monitorVncText, '离线');
-    }
 
     const updatedAt = stats && stats.timestamp ? new Date(stats.timestamp) : new Date();
     const hh = String(updatedAt.getHours()).padStart(2, '0');

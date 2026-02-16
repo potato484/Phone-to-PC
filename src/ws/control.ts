@@ -6,7 +6,6 @@ import type { AccessTokenService } from '../auth.js';
 import type { AuditLogger } from '../audit-log.js';
 import type { MetricsRegistry } from '../metrics.js';
 import type { PtyManager } from '../pty-manager.js';
-import type { PushService } from '../push.js';
 import { getClientIp, type MemoryRateLimiter } from '../security.js';
 import type { C2PStore, CliKind, TaskRecord, TaskStatus } from '../store.js';
 import { requireWsAuth } from './auth-gate.js';
@@ -66,7 +65,6 @@ type ControlOutbound =
 interface ControlChannelDeps {
   ptyManager: PtyManager;
   store: C2PStore;
-  pushService: PushService;
   accessTokenService: AccessTokenService;
   auditLogger: AuditLogger;
   metrics: MetricsRegistry;
@@ -91,13 +89,6 @@ function normalizeDimension(value: unknown, fallback: number): number {
     return fallback;
   }
   return rounded;
-}
-
-function shortenSessionId(sessionId: string): string {
-  if (sessionId.length <= 12) {
-    return sessionId;
-  }
-  return `${sessionId.slice(0, 6)}...${sessionId.slice(-4)}`;
 }
 
 function normalizeHeartbeatNumber(value: unknown): number {
@@ -221,7 +212,7 @@ function sendControlMessage(ws: WebSocket, payload: ControlOutbound): void {
 }
 
 export function createControlChannel(deps: ControlChannelDeps): WsChannel {
-  const { ptyManager, store, pushService, accessTokenService, auditLogger, metrics, wsAuthFailureLimiter } = deps;
+  const { ptyManager, store, accessTokenService, auditLogger, metrics, wsAuthFailureLimiter } = deps;
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: WS_PER_MESSAGE_DEFLATE });
   attachWsHeartbeat(wss);
 
@@ -244,7 +235,6 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
 
   ptyManager.onExit((sessionId, exitCode) => {
     const now = new Date().toISOString();
-    const task = store.getTask(sessionId);
     const wasKilled = killRequested.delete(sessionId);
     const status: TaskStatus = wasKilled ? 'killed' : exitCode === 0 ? 'done' : 'error';
 
@@ -272,23 +262,6 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
 
     broadcastControl({ type: 'exited', sessionId, exitCode });
     broadcastSessions();
-
-    if (task) {
-      const shortId = shortenSessionId(sessionId);
-      const title = status === 'done' ? '任务已完成' : status === 'error' ? '任务异常退出' : '会话已终止';
-      const body =
-        status === 'done'
-          ? `会话 ${shortId} 已结束`
-          : status === 'error'
-            ? `会话 ${shortId} 退出码 ${exitCode}`
-            : `会话 ${shortId} 已被终止`;
-      void pushService.notify(title, body, {
-        sessionId,
-        cli: task.cli,
-        exitCode,
-        status
-      });
-    }
   });
 
   ptyManager.onClipboard((sessionId, text) => {

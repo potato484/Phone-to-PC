@@ -14,8 +14,7 @@ import {
   readTokenFromHash,
   setActionButtonsEnabled,
   setSignalState,
-  shortenSessionId,
-  urlBase64ToUint8Array
+  shortenSessionId
 } from './state.js';
 
 const QUICK_KEY_ROWS = [
@@ -34,7 +33,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=13';
+const SERVICE_WORKER_URL = '/sw.js?v=17';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 
@@ -652,20 +651,21 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
       }
     },
 
-    spawn() {
+    spawn(options = {}) {
       const term = getTerm();
       const control = getControl();
       if (!term || !State.terminal) {
         Toast.show('终端尚未就绪', 'warn');
         return;
       }
+      const preferredCwd = typeof options.cwd === 'string' ? options.cwd.trim() : '';
       this.resetKillRequest();
       State.killRequested = false;
       const ok = control
         ? control.send({
             type: 'spawn',
             cli: 'shell',
-            cwd: State.cwd || undefined,
+            cwd: preferredCwd || State.cwd || undefined,
             cols: State.terminal.cols,
             rows: State.terminal.rows
           })
@@ -723,84 +723,9 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
         return;
       }
       try {
-        State.serviceWorkerRegistration = await navigator.serviceWorker.register(SERVICE_WORKER_URL);
+        await navigator.serviceWorker.register(SERVICE_WORKER_URL);
       } catch {
         StatusBar.setText('Service Worker 注册失败');
-      }
-    },
-
-    async requestPush(options = {}) {
-      const {
-        silentPermissionDenied = false,
-        silentFailure = false,
-        showSuccessToast = true
-      } = options;
-      if (State.pushRegistered) {
-        if (!silentFailure && showSuccessToast) {
-          Toast.show('通知已启用', 'info');
-        }
-        return;
-      }
-      if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
-        if (!silentFailure) {
-          Toast.show('当前浏览器不支持推送通知', 'warn');
-        }
-        return;
-      }
-      const keyResp = await authedFetch(apiUrl('/api/vapid-public-key'));
-      if (!keyResp.ok) {
-        if (!silentFailure) {
-          Toast.show('通知订阅失败', 'danger');
-        }
-        throw new Error('vapid key fetch failed');
-      }
-      const keyData = await keyResp.json();
-      if (!keyData.publicKey) {
-        if (!silentFailure) {
-          Toast.show('通知订阅失败', 'danger');
-        }
-        throw new Error('missing public key');
-      }
-
-      const permission = await Notification.requestPermission();
-      if (permission !== 'granted') {
-        if (!silentPermissionDenied && !silentFailure) {
-          Toast.show('通知权限未授予', 'warn');
-        }
-        return;
-      }
-
-      let registration = State.serviceWorkerRegistration;
-      if (!registration) {
-        registration = await navigator.serviceWorker.register(SERVICE_WORKER_URL);
-        State.serviceWorkerRegistration = registration;
-      }
-
-      const existing = await registration.pushManager.getSubscription();
-      const subscription =
-        existing ||
-        (await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(keyData.publicKey)
-        }));
-
-      const saveResp = await authedFetch(apiUrl('/api/push/subscribe'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(subscription)
-      });
-
-      if (!saveResp.ok) {
-        if (!silentFailure) {
-          Toast.show('通知订阅失败', 'danger');
-        }
-        throw new Error('subscribe save failed');
-      }
-      State.pushRegistered = true;
-      if (showSuccessToast && !silentFailure) {
-        Toast.show('通知订阅完成', 'success');
       }
     }
   };

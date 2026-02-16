@@ -1,18 +1,34 @@
 # C2P Controller
 
-移动优先的远程终端控制 Web 应用。通过浏览器远程操控计算机的终端、桌面和文件系统，支持 Tailscale / Cloudflare Tunnel 隧道穿透，手机扫码即连。
+移动优先的远程控制 Web 应用。你可以直接在手机浏览器里管理电脑的终端和文件。
 
-## 功能
+## 主要服务对象
 
-- 远程终端 — tmux 持久化会话，xterm.js + WebGL 渲染，OSC 52 剪贴板
-- 远程桌面 — noVNC 实时桌面控制
-- 文件管理 — 浏览、上传、下载
-- 系统监控 — CPU / 内存 / 网络实时采样
-- 连接质量评分（CQS）— RTT / 抖动 / 丢包实时评分与弱网档位联动
-- PWA — 离线缓存、可安装、Web Push 推送通知
-- 隧道穿透 — Tailscale（serve / funnel）、Cloudflare Tunnel、Quick Tunnel
-- 令牌认证 — bootstrap token 换取 24h access token，支持吊销与 WS 首帧鉴权
-- 匿名遥测（可选）— opt-in 事件上报与留存看板聚合接口
+- 主要面向有 Linux/WSL 主机的个人开发者、运维、实验室/家庭自托管用户。
+- 核心诉求是“手机随时接管电脑终端”，并且要求低延迟、稳定连接。
+
+## 连通方案（强烈推荐 Tailscale）
+
+`Tailscale` 是本项目推荐的默认连通方式。  
+原因：在手机远程交互场景下，Cloudflare Tunnel 常见高延迟和抖动，操作体验明显更差。
+
+结论：
+- 生产/日常使用：优先 `Tailscale`
+- `cloudflare`：仅作为兜底或临时排障
+
+## 功能概览
+
+- 远程终端：tmux 持久化会话，重连可恢复
+- 文件管理：浏览/上传/下载/重命名/删除/新建文件
+- 系统监控：CPU/内存/网络 + CQS（连接质量评分）
+- 认证与安全：bootstrap token -> access token，支持吊销
+
+## 平台支持
+
+- Linux：完整支持（推荐）
+- WSL2（Ubuntu 等）：可用，推荐
+- macOS：可运行部分能力，但不是主支持平台
+- Windows 原生：不建议（终端链路依赖 tmux 与 `/bin/bash`）
 
 ## 前置条件
 
@@ -20,181 +36,181 @@
 
 | 依赖 | 版本 | 说明 |
 |------|------|------|
-| Node.js | >= 18 | 运行时，需支持 ES2022 |
+| Node.js | >= 18 | 运行时 |
 | pnpm | >= 8 | 包管理器 |
-| 构建工具链 | — | `node-pty` 需要本地编译（`python3`、`make`、`gcc`/`g++`） |
-| tmux | >= 3 | 终端会话持久化与重启恢复 |
+| tmux | >= 3 | 终端会话持久化 |
+| 构建工具链 | - | `node-pty` 编译需要 `python3`/`make`/`gcc`/`g++` |
 
-Linux 上安装编译依赖：
+### 推荐
 
-```bash
-# Debian / Ubuntu
-sudo apt install -y python3 make gcc g++ tmux
-
-# Fedora
-sudo dnf install -y python3 make gcc gcc-c++ tmux
-```
-
-### 可选
-
-| 依赖 | 用途 |
+| 依赖 | 说明 |
 |------|------|
-| [Tailscale](https://tailscale.com/download) | 隧道穿透（推荐），需已登录并启用 HTTPS |
-| [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) | Cloudflare Tunnel 穿透 |
+| Tailscale | 用于手机与电脑之间的稳定连通 |
 
-## 快速开始
+## 一键配置（推荐，Ubuntu/Debian）
+
+下面命令会完成：安装依赖、拉代码、安装 Node 依赖、生成 `.env`、并强制配置为 `Tailscale` 模式。
 
 ```bash
-# 1. 克隆仓库
-git clone <repo-url> && cd computer-to-phone
+bash -lc '
+set -euo pipefail
 
-# 2. 安装依赖（自动复制 vendor 资源）
+sudo apt update
+sudo apt install -y curl git python3 make gcc g++ tmux
+curl -fsSL https://tailscale.com/install.sh | sh
+
+corepack enable
+corepack prepare pnpm@9 --activate
+
+if [ ! -d computer-to-phone ]; then
+  git clone https://github.com/potato484/Phone-to-PC.git computer-to-phone
+fi
+cd computer-to-phone
+
 pnpm install
+cp .env.example .env
 
-# 3. 生成 Web Push VAPID 密钥（写入 .env）
-pnpm setup
+upsert_env() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" .env; then
+    sed -i "s#^${key}=.*#${key}=${value}#" .env
+  else
+    echo "${key}=${value}" >> .env
+  fi
+}
 
-# 4. 启动开发服务器（热重载）
-pnpm dev
+upsert_env TUNNEL tailscale
+upsert_env TAILSCALE_FUNNEL false
+
+echo ""
+echo "[下一步1] 执行: sudo tailscale up"
+echo "[下一步2] 登录完成后执行: pnpm start -- --cwd=$HOME"
+'
 ```
 
-启动后终端会输出：
+注意：
+- `sudo tailscale up` 会要求你登录 Tailscale 账号，这是必做步骤。
 
-```
-[c2p] listening on 3000
-[c2p] local bootstrap: http://localhost:3000/#token=<bootstrap_token>
-[c2p] lan bootstrap: http://192.168.x.x:3000/#token=<bootstrap_token>
-[c2p] scan to connect:
-█████████████████
-█ QR Code here  █
-█████████████████
-```
+## 用户必须配置的部分
 
-手机扫描二维码或直接访问 URL 即可连接。
+### 必改项
 
-## 配置
+1. Tailscale 登录
+- 必须执行：`sudo tailscale up`
+- 电脑与手机都需登录到同一个 Tailnet
 
-复制 `.env.example` 为 `.env`，按需修改：
+2. 启动工作目录（建议）
+- 通过 `--cwd` 指定文件管理根目录，避免暴露不必要路径
+- 示例：`pnpm start -- --cwd=/home/your-user/workspace`
+
+### 按需配置
+
+1. `TAILSCALE_FUNNEL`
+- `false`：仅 Tailnet 内访问（推荐）
+- `true`：公网访问（需在 Tailscale 管理端启用 Funnel）
+
+2. `PORT`
+- 默认 `3000`，端口冲突时修改
+
+3. 安全白名单
+- `C2P_ALLOWED_ORIGINS`
+- `C2P_ALLOWED_HOSTS`
+- `C2P_ALLOW_EMPTY_ORIGIN`
+
+## 详细配置（.env）
+
+先准备配置文件：
 
 ```bash
 cp .env.example .env
 ```
 
-### 环境变量
+### 核心连接配置
+
+| 变量 | 代码默认值 | 推荐值 | 说明 |
+|------|------------|--------|------|
+| `PORT` | `3000` | `3000` | 服务监听端口 |
+| `TUNNEL` | `auto` | `tailscale` | 隧道模式：`tailscale` / `cloudflare` / `off` / `auto` |
+| `TAILSCALE_FUNNEL` | `false` | `false` | `true`=公网，`false`=仅 Tailnet 内 |
+| `TUNNEL_HOSTNAME` | 空 | 空 | Cloudflare 命名隧道域名（仅 cloudflare 模式） |
+
+### 认证配置
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PORT` | `3000` | 服务监听端口 |
-| `TUNNEL` | `auto` | 隧道模式：`tailscale` / `cloudflare` / `off` / `auto` |
-| `TAILSCALE_FUNNEL` | `false` | `true` = funnel（公网可访问），`false` = serve（仅 Tailnet 内） |
-| `TUNNEL_HOSTNAME` | — | Cloudflare 命名隧道的域名（留空则使用 Quick Tunnel） |
-| `VAPID_SUBJECT` | `mailto:you@example.com` | Web Push 联系邮箱 |
-| `VAPID_PUBLIC_KEY` | — | VAPID 公钥（`pnpm setup` 自动生成） |
-| `VAPID_PRIVATE_KEY` | — | VAPID 私钥（`pnpm setup` 自动生成） |
-| `C2P_DB_PATH` | `./.c2p-store.sqlite` | SQLite 存储文件路径 |
-| `C2P_TMUX_BIN` | `tmux` | tmux 可执行文件路径（可替换为自定义路径） |
-| `C2P_ACCESS_TOKEN_TTL_SECONDS` | `86400` | access token TTL（秒） |
+| `C2P_ACCESS_TOKEN_TTL_SECONDS` | `86400` | access token 过期秒数 |
+
+### 存储与审计
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `C2P_DB_PATH` | `./.c2p-store.sqlite` | SQLite 文件路径 |
 | `C2P_AUDIT_DIR` | `./.c2p-audit` | 审计日志目录 |
 | `C2P_AUDIT_RETENTION_DAYS` | `90` | 审计日志保留天数 |
+| `C2P_TMUX_BIN` | `tmux` | tmux 可执行路径 |
 
-### 隧道模式详解
+### 安全策略（可选）
 
-**auto**（默认）：优先尝试 Cloudflare 命名隧道 → Quick Tunnel，均失败则 LAN-only。
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `C2P_ALLOWED_ORIGINS` | 空 | 允许的 Origin 列表（逗号分隔） |
+| `C2P_ALLOWED_HOSTS` | 空 | 允许的 Host 列表（逗号分隔） |
+| `C2P_ALLOW_EMPTY_ORIGIN` | `true` | 是否允许无 Origin 请求 |
 
-**tailscale**：通过 Tailscale 暴露服务。
-- `TAILSCALE_FUNNEL=false`：仅 Tailnet 内设备可访问（`tailscale serve`）
-- `TAILSCALE_FUNNEL=true`：公网可访问（`tailscale funnel`），需在 Tailscale 管理面板启用 Funnel
+## 启动
 
-**cloudflare**：
-- 设置 `TUNNEL_HOSTNAME`：使用已配置的命名隧道（需提前 `cloudflared tunnel create`）
-- 不设置：使用 Quick Tunnel（`trycloudflare.com` 临时域名）
-
-**off**：禁用隧道，仅 LAN 访问。
-
-### 认证
-
-服务首次启动时自动生成 `.auth-token`（bootstrap token），用于换取 24h access token：
-
-- 首次访问：`http://host:port/#token=<bootstrap_token>`
-- 访问令牌：REST 仅支持 `Authorization: Bearer <access_token>`
-- WebSocket：连接后 2s 内发送首帧 `{\"type\":\"auth\",\"token\":\"<access_token>\"}`
-- 主动吊销：`POST /api/auth/revoke`（需带当前 access token）
-
-### CLI 参数
+开发模式：
 
 ```bash
-# 指定终端默认工作目录
+pnpm dev
+```
+
+生产模式：
+
+```bash
+pnpm build
 pnpm start -- --cwd=/path/to/workspace
 ```
 
-## 构建与部署
+启动后会输出：
+- 本地访问地址
+- 局域网地址
+- Tailscale 地址（若启用）
+- 可扫码连接的 URL（含 token）
+
+## 隧道模式说明
+
+### `tailscale`（推荐）
+
+- 程序会自动执行 `tailscale serve` 或 `tailscale funnel`（按 `TAILSCALE_FUNNEL` 决定）。
+- 你只需要确保：`tailscale up` 已登录且在线。
+
+### `cloudflare`（不推荐，兜底）
+
+- 仅在你明确接受更高延迟时使用。
+- 使用方式：
+  - 设置 `TUNNEL=cloudflare`
+  - 可选设置 `TUNNEL_HOSTNAME` 走命名隧道
+  - 不设置则走 Quick Tunnel
+
+### `off`
+
+- 关闭隧道，仅局域网访问。
+
+### `auto`
+
+- 按代码逻辑自动选择，不建议用于生产可控场景。
+
+## 常用命令
 
 ```bash
-# 编译 TypeScript
+pnpm install
+pnpm dev
 pnpm build
-
-# 自动化测试（单测 + 集成）
 pnpm test
-
-# 重连与并发基线脚本
-pnpm bench:reconnect -- --base-url=http://127.0.0.1:3000
-pnpm bench:session-load -- --base-url=http://127.0.0.1:3000 --concurrency=20
-pnpm bench:metrics-dump -- --base-url=http://127.0.0.1:3000 --duration-sec=120
-
-# 生产启动
-pnpm start
-
-# 或直接
-node dist/server.js --cwd=/home/user/projects
+pnpm start -- --cwd=/your/workspace
 ```
-
-## 项目结构
-
-```
-src/
-├── server.ts          # 入口，Express + WebSocket 初始化
-├── auth.ts            # 令牌认证
-├── pty-manager.ts     # tmux 会话管理与恢复
-├── vnc-manager.ts     # VNC 桌面控制
-├── tunnel.ts          # 隧道穿透（Tailscale / Cloudflare）
-├── push.ts            # Web Push 推送
-├── store.ts           # 持久化存储
-├── routes/api.ts      # REST API（系统监控、文件操作）
-└── ws/
-    ├── channel.ts     # WebSocket 通道基类
-    ├── control.ts     # 控制通道（会话生命周期）
-    ├── terminal.ts    # 终端通道（PTY 数据流）
-    ├── desktop.ts     # 桌面通道（VNC）
-    └── desktop-quality.ts # 桌面质量档位策略
-
-public/
-├── index.html         # 主页面
-├── app.js             # 前端逻辑
-├── style.css          # Catppuccin Mocha 主题
-├── sw.js              # Service Worker
-└── manifest.json      # PWA 清单
-
-scripts/benchmark/
-├── reconnect-latency.mjs
-├── session-load.mjs
-└── metrics-dump.mjs
-
-tests/
-├── unit/              # node:test 单测
-├── integration/       # node:test 集成测试
-└── helpers/           # 测试辅助（含 fake tmux）
-
-reports/
-├── lan-baseline.md
-├── wan-baseline.md
-└── acceptance-summary.md
-```
-
-## 技术栈
-
-**后端**：TypeScript · Express · node:sqlite · tmux · node-pty · ws · web-push
-
-**前端**：Vanilla JS · xterm.js (WebGL) · noVNC · PWA
 
 ## License
 

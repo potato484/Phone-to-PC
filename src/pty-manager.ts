@@ -71,14 +71,15 @@ interface TmuxSessionSnapshot {
   startedAt: string;
 }
 
-function resolveDirectory(rawPath: string | undefined): string | undefined {
+function resolveDirectory(rawPath: string | undefined, baseDir = process.cwd()): string | undefined {
   if (!rawPath) {
     return undefined;
   }
-  const candidate = rawPath.trim();
-  if (candidate.length === 0) {
+  const value = rawPath.trim();
+  if (value.length === 0) {
     return undefined;
   }
+  const candidate = path.isAbsolute(value) ? value : path.resolve(baseDir, value);
   try {
     if (fs.statSync(candidate).isDirectory()) {
       return candidate;
@@ -90,7 +91,7 @@ function resolveDirectory(rawPath: string | undefined): string | undefined {
 }
 
 function normalizeCwd(rawCwd: string | undefined, fallbackCwd: string): string {
-  return resolveDirectory(rawCwd) ?? resolveDirectory(fallbackCwd) ?? process.cwd();
+  return resolveDirectory(rawCwd, fallbackCwd) ?? resolveDirectory(fallbackCwd) ?? process.cwd();
 }
 
 function normalizeDimension(value: unknown, fallback: number): number {
