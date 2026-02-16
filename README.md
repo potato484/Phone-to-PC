@@ -10,7 +10,7 @@
 - 系统监控 — CPU / 内存 / 网络实时采样
 - PWA — 离线缓存、可安装、Web Push 推送通知
 - 隧道穿透 — Tailscale（serve / funnel）、Cloudflare Tunnel、Quick Tunnel
-- 令牌认证 — 自动生成 64 位 hex token，timing-safe 校验
+- 令牌认证 — bootstrap token 换取 24h access token，支持吊销与 WS 首帧鉴权
 
 ## 前置条件
 
@@ -27,10 +27,10 @@ Linux 上安装编译依赖：
 
 ```bash
 # Debian / Ubuntu
-sudo apt install -y python3 make gcc g++
+sudo apt install -y python3 make gcc g++ tmux
 
 # Fedora
-sudo dnf install -y python3 make gcc gcc-c++
+sudo dnf install -y python3 make gcc gcc-c++ tmux
 ```
 
 ### 可选
@@ -60,8 +60,8 @@ pnpm dev
 
 ```
 [c2p] listening on 3000
-[c2p] local: http://localhost:3000/#token=<token>
-[c2p] lan: http://192.168.x.x:3000/#token=<token>
+[c2p] local bootstrap: http://localhost:3000/#token=<bootstrap_token>
+[c2p] lan bootstrap: http://192.168.x.x:3000/#token=<bootstrap_token>
 [c2p] scan to connect:
 █████████████████
 █ QR Code here  █
@@ -89,6 +89,11 @@ cp .env.example .env
 | `VAPID_SUBJECT` | `mailto:you@example.com` | Web Push 联系邮箱 |
 | `VAPID_PUBLIC_KEY` | — | VAPID 公钥（`pnpm setup` 自动生成） |
 | `VAPID_PRIVATE_KEY` | — | VAPID 私钥（`pnpm setup` 自动生成） |
+| `C2P_DB_PATH` | `./.c2p-store.sqlite` | SQLite 存储文件路径 |
+| `C2P_TMUX_BIN` | `tmux` | tmux 可执行文件路径（可替换为自定义路径） |
+| `C2P_ACCESS_TOKEN_TTL_SECONDS` | `86400` | access token TTL（秒） |
+| `C2P_AUDIT_DIR` | `./.c2p-audit` | 审计日志目录 |
+| `C2P_AUDIT_RETENTION_DAYS` | `90` | 审计日志保留天数 |
 
 ### 隧道模式详解
 
@@ -111,6 +116,7 @@ cp .env.example .env
 - 首次访问：`http://host:port/#token=<bootstrap_token>`
 - 访问令牌：REST 仅支持 `Authorization: Bearer <access_token>`
 - WebSocket：连接后 2s 内发送首帧 `{\"type\":\"auth\",\"token\":\"<access_token>\"}`
+- 主动吊销：`POST /api/auth/revoke`（需带当前 access token）
 
 ### CLI 参数
 
@@ -131,6 +137,7 @@ pnpm test
 # 重连与并发基线脚本
 pnpm bench:reconnect -- --base-url=http://127.0.0.1:3000
 pnpm bench:session-load -- --base-url=http://127.0.0.1:3000 --concurrency=20
+pnpm bench:metrics-dump -- --base-url=http://127.0.0.1:3000 --duration-sec=120
 
 # 生产启动
 pnpm start
@@ -163,11 +170,26 @@ public/
 ├── style.css          # Catppuccin Mocha 主题
 ├── sw.js              # Service Worker
 └── manifest.json      # PWA 清单
+
+scripts/benchmark/
+├── reconnect-latency.mjs
+├── session-load.mjs
+└── metrics-dump.mjs
+
+tests/
+├── unit/              # node:test 单测
+├── integration/       # node:test 集成测试
+└── helpers/           # 测试辅助（含 fake tmux）
+
+reports/
+├── lan-baseline.md
+├── wan-baseline.md
+└── acceptance-summary.md
 ```
 
 ## 技术栈
 
-**后端**：TypeScript · Express · node-pty · ws · web-push
+**后端**：TypeScript · Express · node:sqlite · tmux · node-pty · ws · web-push
 
 **前端**：Vanilla JS · xterm.js (WebGL) · noVNC · PWA
 
