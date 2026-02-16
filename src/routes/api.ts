@@ -580,6 +580,7 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
           return {
             name: entry.name,
             path: toRelativePath(fsRoot, absolutePath),
+            absPath: toPortablePath(absolutePath),
             type,
             size,
             mtimeMs: Math.round(mtimeMs)
