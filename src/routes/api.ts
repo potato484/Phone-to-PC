@@ -4,13 +4,16 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Application, Request, Response } from 'express';
+import type { AuditLogger } from '../audit-log.js';
 import type { PtyManager } from '../pty-manager.js';
 import type { PushService } from '../push.js';
+import { getClientIp } from '../security.js';
 import type { C2PStore, PushSubscriptionRecord } from '../store.js';
 import type { VncManager } from '../vnc-manager.js';
 
 const FS_UPLOAD_LIMIT_BYTES = 100 * 1024 * 1024;
 const FS_READ_LIMIT_BYTES = 2 * 1024 * 1024;
+const FS_UPLOAD_MIN_FREE_BYTES = 1 * 1024 * 1024 * 1024;
 
 interface CpuSnapshot {
   idle: number;
@@ -33,6 +36,7 @@ interface ApiRouteDeps {
   pushService: PushService;
   defaultWorkingDirectory: string;
   vncManager: VncManager;
+  auditLogger: AuditLogger;
 }
 
 function isPushSubscriptionRecord(value: unknown): value is PushSubscriptionRecord {
@@ -152,6 +156,15 @@ function respondFsError(res: Response, error: unknown): void {
     return;
   }
   res.status(500).json({ error: 'filesystem operation failed' });
+}
+
+function resolveAuditActor(req: Request, res: Response): string {
+  const auth = res.locals.auth as { claims?: { jti?: string } } | undefined;
+  const tokenJti = auth?.claims?.jti;
+  if (typeof tokenJti === 'string' && tokenJti.length > 0) {
+    return `token:${tokenJti}`;
+  }
+  return `ip:${getClientIp(req)}`;
 }
 
 function readCpuSnapshot(): CpuSnapshot {
@@ -307,8 +320,25 @@ function collectNetworkStats(): {
 }
 
 export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
-  const { store, ptyManager, pushService, defaultWorkingDirectory, vncManager } = deps;
+  const { store, ptyManager, pushService, defaultWorkingDirectory, vncManager, auditLogger } = deps;
   const fsRoot = path.resolve(defaultWorkingDirectory);
+
+  const auditFsEvent = (
+    req: Request,
+    res: Response,
+    event: 'fs.read' | 'fs.upload' | 'fs.download' | 'fs.delete' | 'fs.write',
+    resource: string,
+    outcome: 'success' | 'failure',
+    metadata: Record<string, unknown> = {}
+  ): void => {
+    auditLogger.log({
+      event,
+      actor: resolveAuditActor(req, res),
+      resource,
+      outcome,
+      metadata
+    });
+  };
 
   app.get('/api/tasks', (_req: Request, res: Response) => {
     res.json({ tasks: store.listTasks() });
@@ -447,6 +477,7 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     const requestPath = readStringQuery(req.query.path);
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
     if (!targetPath) {
+      auditFsEvent(req, res, 'fs.read', String(requestPath ?? ''), 'failure', { reason: 'invalid path' });
       res.status(400).json({ error: 'invalid path' });
       return;
     }
@@ -462,12 +493,17 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
         return;
       }
       const content = await fs.promises.readFile(targetPath, 'utf8');
+      auditFsEvent(req, res, 'fs.read', toRelativePath(fsRoot, targetPath), 'success', {
+        bytes: stat.size
+      });
       res.json({
         path: toRelativePath(fsRoot, targetPath),
         size: stat.size,
         content
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      auditFsEvent(req, res, 'fs.read', toRelativePath(fsRoot, targetPath), 'failure', { reason: message });
       respondFsError(res, error);
     }
   });
@@ -477,10 +513,12 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     const content = readStringBodyField(req.body, 'content');
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
     if (!targetPath) {
+      auditFsEvent(req, res, 'fs.write', String(requestPath ?? ''), 'failure', { reason: 'invalid path' });
       res.status(400).json({ error: 'invalid path' });
       return;
     }
     if (typeof content !== 'string') {
+      auditFsEvent(req, res, 'fs.write', toRelativePath(fsRoot, targetPath), 'failure', { reason: 'invalid content' });
       res.status(400).json({ error: 'invalid content' });
       return;
     }
@@ -488,12 +526,17 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     try {
       await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.promises.writeFile(targetPath, content, 'utf8');
+      auditFsEvent(req, res, 'fs.write', toRelativePath(fsRoot, targetPath), 'success', {
+        bytes: Buffer.byteLength(content, 'utf8')
+      });
       res.status(201).json({
         ok: true,
         path: toRelativePath(fsRoot, targetPath),
         bytes: Buffer.byteLength(content, 'utf8')
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      auditFsEvent(req, res, 'fs.write', toRelativePath(fsRoot, targetPath), 'failure', { reason: message });
       respondFsError(res, error);
     }
   });
@@ -546,10 +589,12 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     const recursive = readBooleanBodyField(req.body, 'recursive', false);
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
     if (!targetPath) {
+      auditFsEvent(req, res, 'fs.delete', String(requestPath ?? ''), 'failure', { reason: 'invalid path' });
       res.status(400).json({ error: 'invalid path' });
       return;
     }
     if (targetPath === fsRoot) {
+      auditFsEvent(req, res, 'fs.delete', '.', 'failure', { reason: 'cannot remove root' });
       res.status(400).json({ error: 'cannot remove workspace root' });
       return;
     }
@@ -559,11 +604,16 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
         recursive,
         force: false
       });
+      auditFsEvent(req, res, 'fs.delete', toRelativePath(fsRoot, targetPath), 'success', {
+        recursive
+      });
       res.json({
         ok: true,
         path: toRelativePath(fsRoot, targetPath)
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      auditFsEvent(req, res, 'fs.delete', toRelativePath(fsRoot, targetPath), 'failure', { reason: message });
       respondFsError(res, error);
     }
   });
@@ -572,6 +622,7 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     const requestPath = readStringQuery(req.query.path);
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
     if (!targetPath) {
+      auditFsEvent(req, res, 'fs.download', String(requestPath ?? ''), 'failure', { reason: 'invalid path' });
       res.status(400).json({ error: 'invalid path' });
       return;
     }
@@ -584,6 +635,9 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
       }
 
       const filename = toSessionSafeFilename(path.basename(targetPath));
+      auditFsEvent(req, res, 'fs.download', toRelativePath(fsRoot, targetPath), 'success', {
+        bytes: stat.size
+      });
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Length', String(stat.size));
       res.setHeader('Cache-Control', 'no-store');
@@ -599,6 +653,8 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
       });
       stream.pipe(res);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      auditFsEvent(req, res, 'fs.download', toRelativePath(fsRoot, targetPath), 'failure', { reason: message });
       respondFsError(res, error);
     }
   });
@@ -607,13 +663,28 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     const requestPath = readStringQuery(req.query.path);
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
     if (!targetPath) {
+      auditFsEvent(req, res, 'fs.upload', String(requestPath ?? ''), 'failure', { reason: 'invalid path' });
       res.status(400).json({ error: 'invalid path' });
       return;
     }
 
     const declaredLength = Number.parseInt(String(req.headers['content-length'] ?? ''), 10);
     if (Number.isFinite(declaredLength) && declaredLength > FS_UPLOAD_LIMIT_BYTES) {
+      auditFsEvent(req, res, 'fs.upload', toRelativePath(fsRoot, targetPath), 'failure', {
+        reason: 'content-length too large',
+        contentLength: declaredLength
+      });
       res.status(413).json({ error: `upload too large (limit=${FS_UPLOAD_LIMIT_BYTES} bytes)` });
+      return;
+    }
+
+    const disk = collectDiskStats(fsRoot);
+    if (disk && disk.freeBytes < FS_UPLOAD_MIN_FREE_BYTES) {
+      auditFsEvent(req, res, 'fs.upload', toRelativePath(fsRoot, targetPath), 'failure', {
+        reason: 'insufficient disk space',
+        freeBytes: disk.freeBytes
+      });
+      res.status(507).json({ error: 'insufficient disk space for upload' });
       return;
     }
 
@@ -635,6 +706,9 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     try {
       await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
       await pipeline(req, limitTransform, fs.createWriteStream(targetPath, { flags: 'w' }));
+      auditFsEvent(req, res, 'fs.upload', toRelativePath(fsRoot, targetPath), 'success', {
+        bytes: writtenBytes
+      });
       res.status(201).json({
         ok: true,
         path: toRelativePath(fsRoot, targetPath),
@@ -642,6 +716,8 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
       });
     } catch (error) {
       await fs.promises.unlink(targetPath).catch(() => {});
+      const message = error instanceof Error ? error.message : String(error);
+      auditFsEvent(req, res, 'fs.upload', toRelativePath(fsRoot, targetPath), 'failure', { reason: message });
       respondFsError(res, error);
     }
   });

@@ -1,4 +1,4 @@
-import { DOM, apiUrl } from './state.js';
+import { DOM, apiUrl, authedFetch, buildAuthHeaders } from './state.js';
 
 const FILES_LONG_PRESS_MS = 520;
 
@@ -79,9 +79,9 @@ export function createFiles({ toast }) {
   }
 
   async function fetchJson(pathname, options = {}) {
-    const response = await fetch(buildApiUrl(pathname, options.query), {
+    const response = await authedFetch(buildApiUrl(pathname, options.query), {
       method: options.method || 'GET',
-      headers: options.headers,
+      headers: options.headers ? buildAuthHeaders(options.headers) : undefined,
       body: options.body
     });
     const payload = await response.json().catch(() => null);
@@ -370,9 +370,9 @@ export function createFiles({ toast }) {
       try {
         const response = await fetch(buildApiUrl('/api/fs/upload', { path: targetPath }), {
           method: 'POST',
-          headers: {
+          headers: buildAuthHeaders({
             'Content-Type': 'application/octet-stream'
-          },
+          }),
           body: file
         });
         if (!response.ok) {

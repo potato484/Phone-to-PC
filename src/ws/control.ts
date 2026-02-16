@@ -2,10 +2,16 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
+import type { AccessTokenService } from '../auth.js';
+import type { AuditLogger } from '../audit-log.js';
+import type { MetricsRegistry } from '../metrics.js';
 import type { PtyManager } from '../pty-manager.js';
 import type { PushService } from '../push.js';
+import { getClientIp, type MemoryRateLimiter } from '../security.js';
 import type { C2PStore, CliKind, TaskRecord, TaskStatus } from '../store.js';
+import { requireWsAuth } from './auth-gate.js';
 import type { WsChannel } from './channel.js';
+import { attachWsHeartbeat } from './heartbeat.js';
 import { WS_PER_MESSAGE_DEFLATE } from './ws-config.js';
 
 interface ControlHelloMessage {
@@ -41,6 +47,7 @@ type ControlMessage =
   | ControlKillMessage;
 
 type ControlOutbound =
+  | { type: 'auth.ok'; expiresAt: string }
   | { type: 'hello'; version: 1; capabilities: string[] }
   | { type: 'spawned'; sessionId: string; cli: CliKind; cwd: string }
   | { type: 'exited'; sessionId: string; exitCode: number }
@@ -52,6 +59,10 @@ interface ControlChannelDeps {
   ptyManager: PtyManager;
   store: C2PStore;
   pushService: PushService;
+  accessTokenService: AccessTokenService;
+  auditLogger: AuditLogger;
+  metrics: MetricsRegistry;
+  wsAuthFailureLimiter: MemoryRateLimiter;
 }
 
 const CONTROL_PROTOCOL_VERSION = 1;
@@ -186,8 +197,10 @@ function sendControlMessage(ws: WebSocket, payload: ControlOutbound): void {
 }
 
 export function createControlChannel(deps: ControlChannelDeps): WsChannel {
-  const { ptyManager, store, pushService } = deps;
+  const { ptyManager, store, pushService, accessTokenService, auditLogger, metrics, wsAuthFailureLimiter } = deps;
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: WS_PER_MESSAGE_DEFLATE });
+  attachWsHeartbeat(wss);
+
   const controlClients = new Set<WebSocket>();
   const killRequested = new Set<string>();
 
@@ -201,6 +214,7 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
   };
 
   const broadcastSessions = (): void => {
+    metrics.setTerminalSessionsActive(ptyManager.listSessions().length);
     broadcastControl({ type: 'sessions', list: ptyManager.listSessions() });
   };
 
@@ -214,6 +228,22 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
       status,
       finishedAt: now,
       exitCode
+    });
+
+    store.updateSession(sessionId, {
+      status: wasKilled ? 'killed' : 'detached',
+      updatedAt: now
+    });
+
+    auditLogger.log({
+      event: 'session.terminal_detach',
+      actor: 'system',
+      resource: sessionId,
+      outcome: 'success',
+      metadata: {
+        exitCode,
+        status
+      }
     });
 
     broadcastControl({ type: 'exited', sessionId, exitCode });
@@ -241,79 +271,150 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
     broadcastControl({ type: 'clipboard', sessionId, text });
   });
 
-  wss.on('connection', (ws) => {
-    controlClients.add(ws);
-    sendControlMessage(ws, createHelloPayload());
-    sendControlMessage(ws, { type: 'sessions', list: ptyManager.listSessions() });
-
-    ws.on('message', (raw, isBinary) => {
-      if (isBinary) {
-        sendControlMessage(ws, { type: 'error', message: 'control channel expects JSON text' });
-        return;
-      }
-
-      const message = parseControlMessage(raw);
-      if (!message) {
-        sendControlMessage(ws, { type: 'error', message: 'invalid control payload' });
-        return;
-      }
-
-      if (message.type === 'hello') {
-        const clientCapabilities = normalizeCapabilities(message.capabilities);
-        sendControlMessage(ws, createHelloPayload(negotiateCapabilities(clientCapabilities)));
-        return;
-      }
-
-      if (message.type === 'spawn') {
-        const sessionId = randomUUID();
-        const cols = normalizeDimension(message.cols, 100);
-        const rows = normalizeDimension(message.rows, 30);
-
-        try {
-          const info = ptyManager.spawn({
-            id: sessionId,
-            cli: message.cli,
-            cwd: message.cwd,
-            cols,
-            rows
-          });
-
-          const task: TaskRecord = {
-            id: sessionId,
-            cli: message.cli,
-            prompt: '',
-            cwd: info.cwd,
-            status: 'running',
-            createdAt: info.startedAt,
-            startedAt: info.startedAt,
-            updatedAt: info.startedAt
-          };
-
-          store.addTask(task);
-          sendControlMessage(ws, { type: 'spawned', sessionId, cli: message.cli, cwd: info.cwd });
-          broadcastSessions();
-        } catch (error) {
-          const text = error instanceof Error ? error.message : 'spawn failed';
-          sendControlMessage(ws, { type: 'error', message: text });
-        }
-        return;
-      }
-
-      if (message.type === 'resize') {
-        const cols = normalizeDimension(message.cols, 100);
-        const rows = normalizeDimension(message.rows, 30);
-        ptyManager.resize(message.sessionId, cols, rows);
-        return;
-      }
-
-      if (message.type === 'kill') {
-        killRequested.add(message.sessionId);
-        ptyManager.kill(message.sessionId);
-      }
-    });
+  wss.on('connection', (ws, request) => {
+    metrics.incWsConnection('control');
+    const remoteIp = getClientIp(request);
 
     ws.on('close', () => {
+      metrics.decWsConnection('control');
       controlClients.delete(ws);
+    });
+
+    void requireWsAuth(ws, {
+      channel: 'control',
+      request,
+      accessTokenService,
+      auditLogger,
+      metrics,
+      authFailureLimiter: wsAuthFailureLimiter,
+      timeoutMs: 2000
+    }).then((authContext) => {
+      if (!authContext || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      controlClients.add(ws);
+      sendControlMessage(ws, createHelloPayload());
+      sendControlMessage(ws, { type: 'sessions', list: ptyManager.listSessions() });
+
+      ws.on('message', (raw, isBinary) => {
+        if (isBinary) {
+          sendControlMessage(ws, { type: 'error', message: 'control channel expects JSON text' });
+          return;
+        }
+
+        const message = parseControlMessage(raw);
+        if (!message) {
+          sendControlMessage(ws, { type: 'error', message: 'invalid control payload' });
+          return;
+        }
+
+        if (message.type === 'hello') {
+          const clientCapabilities = normalizeCapabilities(message.capabilities);
+          sendControlMessage(ws, createHelloPayload(negotiateCapabilities(clientCapabilities)));
+          return;
+        }
+
+        if (message.type === 'spawn') {
+          const sessionId = randomUUID();
+          const cols = normalizeDimension(message.cols, 100);
+          const rows = normalizeDimension(message.rows, 30);
+
+          try {
+            const info = ptyManager.spawn({
+              id: sessionId,
+              cli: message.cli,
+              cwd: message.cwd,
+              cols,
+              rows
+            });
+
+            const task: TaskRecord = {
+              id: sessionId,
+              cli: message.cli,
+              prompt: '',
+              cwd: info.cwd,
+              status: 'running',
+              createdAt: info.startedAt,
+              startedAt: info.startedAt,
+              updatedAt: info.startedAt
+            };
+
+            store.addTask(task);
+            store.upsertSession({
+              id: sessionId,
+              cli: info.cli,
+              cwd: info.cwd,
+              cols: info.cols,
+              rows: info.rows,
+              startedAt: info.startedAt,
+              updatedAt: info.startedAt,
+              status: 'running'
+            });
+
+            auditLogger.log({
+              event: 'session.terminal_spawn',
+              actor: remoteIp,
+              resource: sessionId,
+              outcome: 'success',
+              metadata: {
+                cli: message.cli,
+                cwd: info.cwd,
+                tokenJti: authContext.claims.jti
+              }
+            });
+
+            sendControlMessage(ws, { type: 'spawned', sessionId, cli: message.cli, cwd: info.cwd });
+            broadcastSessions();
+          } catch (error) {
+            const text = error instanceof Error ? error.message : 'spawn failed';
+            auditLogger.log({
+              event: 'session.terminal_spawn',
+              actor: remoteIp,
+              resource: sessionId,
+              outcome: 'failure',
+              metadata: {
+                cli: message.cli,
+                error: text,
+                tokenJti: authContext.claims.jti
+              }
+            });
+            sendControlMessage(ws, { type: 'error', message: text });
+          }
+          return;
+        }
+
+        if (message.type === 'resize') {
+          const cols = normalizeDimension(message.cols, 100);
+          const rows = normalizeDimension(message.rows, 30);
+          ptyManager.resize(message.sessionId, cols, rows);
+          store.updateSession(message.sessionId, {
+            cols,
+            rows,
+            status: 'running',
+            updatedAt: new Date().toISOString()
+          });
+          return;
+        }
+
+        if (message.type === 'kill') {
+          killRequested.add(message.sessionId);
+          auditLogger.log({
+            event: 'session.terminal_kill',
+            actor: remoteIp,
+            resource: message.sessionId,
+            outcome: 'success',
+            metadata: {
+              tokenJti: authContext.claims.jti
+            }
+          });
+          ptyManager.kill(message.sessionId);
+          store.updateSession(message.sessionId, {
+            status: 'killed',
+            updatedAt: new Date().toISOString()
+          });
+        }
+      });
     });
   });
 

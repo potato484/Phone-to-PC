@@ -2,6 +2,8 @@ import {
   CONTROL_CLIENT_CAPABILITIES,
   CONTROL_PROTOCOL_VERSION,
   State,
+  TOKEN_STORAGE_KEY,
+  createWsAuthMessage,
   setActionButtonsEnabled,
   setSessionOffset,
   wsUrl
@@ -31,6 +33,22 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         State.serverCapabilities = Array.isArray(payload.capabilities)
           ? payload.capabilities.filter((entry) => typeof entry === 'string')
           : [];
+        return;
+      }
+
+      if (payload.type === 'auth.ok') {
+        State.controlConnected = true;
+        statusBar.setControl('online');
+        statusBar.setText('控制通道已鉴权');
+        if (State.controlSocket && State.controlSocket.readyState === WebSocket.OPEN) {
+          State.controlSocket.send(
+            JSON.stringify({
+              type: 'hello',
+              version: CONTROL_PROTOCOL_VERSION,
+              capabilities: CONTROL_CLIENT_CAPABILITIES
+            })
+          );
+        }
         return;
       }
 
@@ -211,29 +229,31 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
           return;
         }
         State.reconnectDelayMs = 1000;
-        State.controlConnected = true;
-        statusBar.setControl('online');
-        statusBar.setText('控制通道已连接');
-        socket.send(
-          JSON.stringify({
-            type: 'hello',
-            version: CONTROL_PROTOCOL_VERSION,
-            capabilities: CONTROL_CLIENT_CAPABILITIES
-          })
-        );
+        State.controlConnected = false;
+        statusBar.setControl('warn');
+        statusBar.setText('控制通道鉴权中...');
+        socket.send(createWsAuthMessage());
       };
 
       socket.onmessage = (event) => {
         this.handleMessage(event);
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (State.controlSocket !== socket) {
           return;
         }
         State.controlSocket = null;
         State.controlConnected = false;
         State.serverCapabilities = [];
+        if (event.code === 4401) {
+          window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+          State.token = '';
+          statusBar.setControl('offline');
+          statusBar.setText('访问令牌无效，请重新使用 #token 链接登录');
+          toast.show('认证已失效，请重新登录', 'danger');
+          return;
+        }
         statusBar.setControl('warn');
         statusBar.setText('连接断开，正在重连...');
         toast.show('连接断开，正在重连...', 'warn');

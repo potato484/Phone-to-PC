@@ -184,15 +184,12 @@ export function readTokenFromHash() {
 }
 
 export function apiUrl(path) {
-  const url = new URL(path, window.location.origin);
-  url.searchParams.set('token', State.token);
-  return url.toString();
+  return new URL(path, window.location.origin).toString();
 }
 
 export function wsUrl(path, extraParams) {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = new URL(path, `${protocol}//${window.location.host}`);
-  url.searchParams.set('token', State.token);
   if (extraParams) {
     Object.keys(extraParams).forEach((key) => {
       const value = extraParams[key];
@@ -202,6 +199,35 @@ export function wsUrl(path, extraParams) {
     });
   }
   return url.toString();
+}
+
+export function buildAuthHeaders(baseHeaders = {}) {
+  const headers = {
+    ...baseHeaders
+  };
+  if (State.token) {
+    headers.Authorization = `Bearer ${State.token}`;
+  }
+  return headers;
+}
+
+export async function authedFetch(input, init = {}) {
+  const requestInit = {
+    ...init,
+    headers: buildAuthHeaders(init.headers || {})
+  };
+  return fetch(input, requestInit);
+}
+
+export function createWsAuthMessage() {
+  return JSON.stringify({
+    type: 'auth',
+    token: State.token,
+    client: {
+      ua: navigator.userAgent,
+      version: 1
+    }
+  });
 }
 
 export function getSessionOffset(sessionId) {
@@ -286,7 +312,7 @@ export async function fetchSessionLogBytes(sessionId) {
     return 0;
   }
   try {
-    const response = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/log`), { method: 'HEAD' });
+    const response = await authedFetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/log`), { method: 'HEAD' });
     if (!response.ok) {
       return 0;
     }

@@ -4,6 +4,7 @@ import {
   FitAddonCtor,
   RESIZE_DEBOUNCE_MS,
   State,
+  TOKEN_STORAGE_KEY,
   TERMINAL_BINARY_CODEC,
   TERMINAL_FONT_SIZE_MAX,
   TERMINAL_FONT_SIZE_MIN,
@@ -18,6 +19,7 @@ import {
   TerminalCtor,
   WebglAddonCtor,
   addSessionOffset,
+  createWsAuthMessage,
   decodeTerminalFrame,
   encodeTerminalFrame,
   fetchSessionLogBytes,
@@ -277,7 +279,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
 
   function sendDataOnPane(pane, data) {
     const socket = pane.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN || !pane.sessionId) {
+    if (!socket || socket.readyState !== WebSocket.OPEN || !pane.sessionId || !pane.connected) {
       return false;
     }
     if (!data) {
@@ -396,6 +398,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
     pane.connected = false;
     pane.binaryEnabled = false;
+    pane.awaitingAuth = false;
 
     pane.sessionId = sessionId;
     if (typeof cwd === 'string' && cwd) {
@@ -430,6 +433,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       Array.isArray(State.serverCapabilities) &&
       State.serverCapabilities.includes(CAPABILITY_TERMINAL_BINARY_V1);
     pane.binaryEnabled = supportsBinaryCodec;
+    pane.awaitingAuth = true;
 
     const extraParams = { session: sessionId };
     if (effectiveReplayFrom > 0) {
@@ -452,21 +456,46 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       if (pane.socket !== socket || connectSeq !== pane.connectSeq) {
         return;
       }
-      pane.connected = true;
+      pane.connected = false;
       pane.reconnectDelayMs = 1000;
       pane.reconnectDelayActive = 0;
       pane.reconnectStartedAt = 0;
-      setPaneConnectionState(pane, 'online');
+      setPaneConnectionState(pane, 'connecting');
       if (pane.id === activePaneId) {
-        statusBar.setTerminal('online');
-        statusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
+        statusBar.setTerminal('warn');
+        statusBar.setText(`会话 ${shortenSessionId(sessionId)} 鉴权中...`);
         syncLegacyStateFromActivePane();
       }
-      sendResizeForPane(pane);
+      socket.send(createWsAuthMessage());
     };
 
     socket.onmessage = (event) => {
       if (pane.socket !== socket) {
+        return;
+      }
+      if (pane.awaitingAuth) {
+        if (typeof event.data !== 'string') {
+          return;
+        }
+        let authPayload = null;
+        try {
+          authPayload = JSON.parse(event.data);
+        } catch {
+          authPayload = null;
+        }
+        if (!authPayload || authPayload.type !== 'auth.ok') {
+          socket.close();
+          return;
+        }
+        pane.awaitingAuth = false;
+        pane.connected = true;
+        setPaneConnectionState(pane, 'online');
+        if (pane.id === activePaneId) {
+          statusBar.setTerminal('online');
+          statusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
+          syncLegacyStateFromActivePane();
+        }
+        sendResizeForPane(pane);
         return;
       }
       let data = '';
@@ -492,14 +521,26 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       }
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (pane.socket !== socket) {
         return;
       }
       pane.socket = null;
       pane.connected = false;
       pane.binaryEnabled = false;
+      pane.awaitingAuth = false;
       resetPaneIoBuffers(pane);
+      if (event.code === 4401) {
+        window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+        State.token = '';
+        setPaneConnectionState(pane, 'offline');
+        if (pane.id === activePaneId) {
+          statusBar.setTerminal('offline');
+          statusBar.setText('终端鉴权失败，请重新登录');
+          syncLegacyStateFromActivePane();
+        }
+        return;
+      }
       if (!pane.sessionId) {
         setPaneConnectionState(pane, 'idle');
         if (pane.id === activePaneId) {
@@ -574,6 +615,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
     pane.connected = false;
     pane.binaryEnabled = false;
+    pane.awaitingAuth = false;
     pane.lastResizeSessionId = '';
     pane.lastResizeCols = 0;
     pane.lastResizeRows = 0;
@@ -698,6 +740,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       writeBackpressured: false,
       connected: false,
       binaryEnabled: false,
+      awaitingAuth: false,
       reconnectDelayMs: 1000,
       reconnectDelayActive: 0,
       reconnectStartedAt: 0,

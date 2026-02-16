@@ -2,12 +2,22 @@ import fs from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
+import type { AccessTokenService } from '../auth.js';
+import type { AuditLogger } from '../audit-log.js';
+import type { MetricsRegistry } from '../metrics.js';
 import type { PtyManager } from '../pty-manager.js';
+import { getClientIp, type MemoryRateLimiter } from '../security.js';
+import { requireWsAuth } from './auth-gate.js';
 import type { WsChannel } from './channel.js';
+import { attachWsHeartbeat } from './heartbeat.js';
 import { WS_PER_MESSAGE_DEFLATE } from './ws-config.js';
 
 interface TerminalChannelDeps {
   ptyManager: PtyManager;
+  accessTokenService: AccessTokenService;
+  auditLogger: AuditLogger;
+  metrics: MetricsRegistry;
+  wsAuthFailureLimiter: MemoryRateLimiter;
 }
 
 const TERMINAL_SEND_BATCH_MS = 16;
@@ -137,234 +147,286 @@ function trimChunkToOffset(
 }
 
 export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
-  const { ptyManager } = deps;
+  const { ptyManager, accessTokenService, auditLogger, metrics, wsAuthFailureLimiter } = deps;
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: WS_PER_MESSAGE_DEFLATE });
+  attachWsHeartbeat(wss);
 
   wss.on('connection', (ws, request) => {
-    const host = request.headers.host ?? 'localhost';
-    const parsed = new URL(request.url ?? '/', `http://${host}`);
-    const sessionId = parsed.searchParams.get('session');
-    const replayFrom = parseReplayOffset(parsed.searchParams.get('replayFrom'));
-    const binaryCodec = useBinaryCodec(parsed.searchParams.get('codec'));
+    metrics.incWsConnection('terminal');
+    const remoteIp = getClientIp(request);
 
-    if (!sessionId || !ptyManager.hasSession(sessionId)) {
-      ws.close(1008, 'invalid session');
-      return;
-    }
+    ws.on('close', () => {
+      metrics.decWsConnection('terminal');
+    });
 
-    const sessionHash = hashSessionId(sessionId);
-    const sendQueue: Buffer[] = [];
-    let queuedBytes = 0;
-    let flushTimer: NodeJS.Timeout | null = null;
-    let drainTimer: NodeJS.Timeout | null = null;
-    let flowPaused = false;
-    let replayReady = false;
-    let replayCursor = Math.max(0, replayFrom);
-    const liveQueue: Array<{ data: string; startOffset: number; endOffset: number }> = [];
-
-    const releaseFlowControl = (): void => {
-      if (!flowPaused) {
+    void requireWsAuth(ws, {
+      channel: 'terminal',
+      request,
+      accessTokenService,
+      auditLogger,
+      metrics,
+      authFailureLimiter: wsAuthFailureLimiter,
+      timeoutMs: 2000
+    }).then((authContext) => {
+      if (!authContext || ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      flowPaused = false;
-      ptyManager.resumeOutput(sessionId);
-    };
 
-    const maybeReleaseFlowControl = (): void => {
-      if (
-        flowPaused &&
-        queuedBytes <= TERMINAL_SEND_LOW_WATER_BYTES &&
-        ws.bufferedAmount <= TERMINAL_SEND_LOW_WATER_BYTES
-      ) {
-        releaseFlowControl();
-      }
-    };
+      const host = request.headers.host ?? 'localhost';
+      const parsed = new URL(request.url ?? '/', `http://${host}`);
+      const sessionId = parsed.searchParams.get('session');
+      const replayFrom = parseReplayOffset(parsed.searchParams.get('replayFrom'));
+      const binaryCodec = useBinaryCodec(parsed.searchParams.get('codec'));
 
-    const applyFlowControl = (): void => {
-      if (flowPaused) {
+      if (!sessionId || !ptyManager.hasSession(sessionId)) {
+        ws.close(1008, 'invalid session');
         return;
       }
-      if (queuedBytes < TERMINAL_SEND_HIGH_WATER_BYTES && ws.bufferedAmount <= TERMINAL_SEND_HIGH_WATER_BYTES) {
-        return;
-      }
-      flowPaused = true;
-      ptyManager.pauseOutput(sessionId);
-    };
 
-    const clearTimers = (): void => {
-      if (flushTimer) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
-      if (drainTimer) {
-        clearTimeout(drainTimer);
-        drainTimer = null;
-      }
-    };
+      auditLogger.log({
+        event: 'session.terminal_attach',
+        actor: remoteIp,
+        resource: sessionId,
+        outcome: 'success',
+        metadata: {
+          tokenJti: authContext.claims.jti
+        }
+      });
 
-    const scheduleFlush = (): void => {
-      if (flushTimer || ws.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      flushTimer = setTimeout(() => {
-        flushTimer = null;
-        flushQueue();
-      }, TERMINAL_SEND_BATCH_MS);
-    };
+      const sessionHash = hashSessionId(sessionId);
+      const sendQueue: Buffer[] = [];
+      let queuedBytes = 0;
+      let flushTimer: NodeJS.Timeout | null = null;
+      let drainTimer: NodeJS.Timeout | null = null;
+      let flowPaused = false;
+      let replayReady = false;
+      let replayCursor = Math.max(0, replayFrom);
+      const liveQueue: Array<{ data: string; startOffset: number; endOffset: number }> = [];
 
-    const waitForDrain = (): void => {
-      if (drainTimer || ws.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      const checkDrain = (): void => {
-        drainTimer = null;
-        if (ws.readyState !== WebSocket.OPEN) {
+      const updateBufferedMetric = (): void => {
+        metrics.setTerminalSendBufferedBytes(queuedBytes + ws.bufferedAmount);
+      };
+
+      const releaseFlowControl = (): void => {
+        if (!flowPaused) {
           return;
         }
-        if (ws.bufferedAmount <= TERMINAL_SEND_LOW_WATER_BYTES) {
+        flowPaused = false;
+        ptyManager.resumeOutput(sessionId);
+      };
+
+      const maybeReleaseFlowControl = (): void => {
+        if (
+          flowPaused &&
+          queuedBytes <= TERMINAL_SEND_LOW_WATER_BYTES &&
+          ws.bufferedAmount <= TERMINAL_SEND_LOW_WATER_BYTES
+        ) {
+          releaseFlowControl();
+        }
+      };
+
+      const applyFlowControl = (): void => {
+        if (flowPaused) {
+          return;
+        }
+        if (queuedBytes < TERMINAL_SEND_HIGH_WATER_BYTES && ws.bufferedAmount <= TERMINAL_SEND_HIGH_WATER_BYTES) {
+          return;
+        }
+        flowPaused = true;
+        ptyManager.pauseOutput(sessionId);
+      };
+
+      const clearTimers = (): void => {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        if (drainTimer) {
+          clearTimeout(drainTimer);
+          drainTimer = null;
+        }
+      };
+
+      const scheduleFlush = (): void => {
+        if (flushTimer || ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          flushQueue();
+        }, TERMINAL_SEND_BATCH_MS);
+      };
+
+      const waitForDrain = (): void => {
+        if (drainTimer || ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        const checkDrain = (): void => {
+          drainTimer = null;
+          if (ws.readyState !== WebSocket.OPEN) {
+            return;
+          }
+          if (ws.bufferedAmount <= TERMINAL_SEND_LOW_WATER_BYTES) {
+            if (sendQueue.length > 0) {
+              scheduleFlush();
+            }
+            maybeReleaseFlowControl();
+            updateBufferedMetric();
+            return;
+          }
+          drainTimer = setTimeout(checkDrain, TERMINAL_SEND_BATCH_MS);
+        };
+        drainTimer = setTimeout(checkDrain, TERMINAL_SEND_BATCH_MS);
+      };
+
+      const flushQueue = (): void => {
+        if (ws.readyState !== WebSocket.OPEN || sendQueue.length === 0) {
+          return;
+        }
+        if (ws.bufferedAmount > TERMINAL_SEND_HIGH_WATER_BYTES) {
+          waitForDrain();
+          updateBufferedMetric();
+          return;
+        }
+
+        const payload = Buffer.concat(sendQueue, queuedBytes);
+        sendQueue.length = 0;
+        queuedBytes = 0;
+        const outbound = binaryCodec
+          ? encodeTerminalFrame(TERMINAL_FRAME_TYPE_OUTPUT, sessionHash, payload)
+          : payload.toString('utf8');
+
+        ws.send(outbound, (error) => {
+          if (error && ws.readyState === WebSocket.OPEN) {
+            ws.close(1011, 'terminal send failed');
+            return;
+          }
           if (sendQueue.length > 0) {
             scheduleFlush();
           }
           maybeReleaseFlowControl();
+          updateBufferedMetric();
+        });
+
+        if (ws.bufferedAmount > TERMINAL_SEND_HIGH_WATER_BYTES) {
+          waitForDrain();
+          applyFlowControl();
+          updateBufferedMetric();
           return;
-        }
-        drainTimer = setTimeout(checkDrain, TERMINAL_SEND_BATCH_MS);
-      };
-      drainTimer = setTimeout(checkDrain, TERMINAL_SEND_BATCH_MS);
-    };
-
-    const flushQueue = (): void => {
-      if (ws.readyState !== WebSocket.OPEN || sendQueue.length === 0) {
-        return;
-      }
-      if (ws.bufferedAmount > TERMINAL_SEND_HIGH_WATER_BYTES) {
-        waitForDrain();
-        return;
-      }
-
-      const payload = Buffer.concat(sendQueue, queuedBytes);
-      sendQueue.length = 0;
-      queuedBytes = 0;
-      const outbound = binaryCodec
-        ? encodeTerminalFrame(TERMINAL_FRAME_TYPE_OUTPUT, sessionHash, payload)
-        : payload.toString('utf8');
-
-      ws.send(outbound, (error) => {
-        if (error && ws.readyState === WebSocket.OPEN) {
-          ws.close(1011, 'terminal send failed');
-          return;
-        }
-        if (sendQueue.length > 0) {
-          scheduleFlush();
         }
         maybeReleaseFlowControl();
-      });
+        updateBufferedMetric();
+      };
 
-      if (ws.bufferedAmount > TERMINAL_SEND_HIGH_WATER_BYTES) {
-        waitForDrain();
+      const enqueueOutput = (data: string): void => {
+        if (!data || ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        const chunk = Buffer.from(data, 'utf8');
+        if (chunk.byteLength === 0) {
+          return;
+        }
+        sendQueue.push(chunk);
+        queuedBytes += chunk.byteLength;
+        updateBufferedMetric();
+        if (queuedBytes >= TERMINAL_SEND_HIGH_WATER_BYTES) {
+          applyFlowControl();
+          flushQueue();
+          return;
+        }
         applyFlowControl();
-        return;
-      }
-      maybeReleaseFlowControl();
-    };
+        scheduleFlush();
+      };
 
-    const enqueueOutput = (data: string): void => {
-      if (!data || ws.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      const chunk = Buffer.from(data, 'utf8');
-      if (chunk.byteLength === 0) {
-        return;
-      }
-      sendQueue.push(chunk);
-      queuedBytes += chunk.byteLength;
-      if (queuedBytes >= TERMINAL_SEND_HIGH_WATER_BYTES) {
-        applyFlowControl();
-        flushQueue();
-        return;
-      }
-      applyFlowControl();
-      scheduleFlush();
-    };
+      const flushLiveQueue = (): void => {
+        while (liveQueue.length > 0) {
+          const chunk = liveQueue.shift();
+          if (!chunk || chunk.endOffset <= replayCursor) {
+            continue;
+          }
+          const text = trimChunkToOffset(chunk, replayCursor);
+          replayCursor = chunk.endOffset;
+          if (text.length > 0) {
+            enqueueOutput(text);
+          }
+        }
+      };
 
-    const flushLiveQueue = (): void => {
-      while (liveQueue.length > 0) {
-        const chunk = liveQueue.shift();
-        if (!chunk || chunk.endOffset <= replayCursor) {
-          continue;
+      const offDataChunk = ptyManager.onDataChunk((id, chunk) => {
+        if (id !== sessionId) {
+          return;
+        }
+        if (!replayReady) {
+          liveQueue.push(chunk);
+          return;
+        }
+        if (chunk.endOffset <= replayCursor) {
+          return;
         }
         const text = trimChunkToOffset(chunk, replayCursor);
         replayCursor = chunk.endOffset;
         if (text.length > 0) {
           enqueueOutput(text);
         }
-      }
-    };
+      });
 
-    const offDataChunk = ptyManager.onDataChunk((id, chunk) => {
-      if (id !== sessionId) {
-        return;
-      }
-      if (!replayReady) {
-        liveQueue.push(chunk);
-        return;
-      }
-      if (chunk.endOffset <= replayCursor) {
-        return;
-      }
-      const text = trimChunkToOffset(chunk, replayCursor);
-      replayCursor = chunk.endOffset;
-      if (text.length > 0) {
-        enqueueOutput(text);
-      }
-    });
-
-    const offExit = ptyManager.onExit((id) => {
-      if (id === sessionId && ws.readyState === WebSocket.OPEN) {
-        ws.close(1000, 'session exited');
-      }
-    });
-
-    void (async () => {
-      const logPath = ptyManager.getLogPath(sessionId);
-      const snapshotEnd = ptyManager.getLogBytes(sessionId);
-      const replayStart = Math.min(replayCursor, snapshotEnd);
-      replayCursor = replayStart;
-      if (logPath && replayStart < snapshotEnd) {
-        try {
-          await streamLogRange(logPath, replayStart, snapshotEnd, enqueueOutput);
-        } catch {
-          // skip replay on read failure and continue with live data
+      const offExit = ptyManager.onExit((id) => {
+        if (id === sessionId && ws.readyState === WebSocket.OPEN) {
+          ws.close(1000, 'session exited');
         }
-      }
-      replayCursor = Math.max(replayCursor, snapshotEnd);
-      replayReady = true;
-      flushLiveQueue();
-    })();
+      });
 
-    ws.on('message', (raw, isBinary) => {
-      if (!ptyManager.hasSession(sessionId)) {
-        return;
-      }
-      if (isBinary) {
-        const frame = decodeTerminalFrame(raw, sessionHash);
-        if (!frame || frame.frameType !== TERMINAL_FRAME_TYPE_INPUT) {
-          ws.close(1003, 'invalid terminal frame');
+      void (async () => {
+        const logPath = ptyManager.getLogPath(sessionId);
+        const snapshotEnd = ptyManager.getLogBytes(sessionId);
+        const replayStart = Math.min(replayCursor, snapshotEnd);
+        replayCursor = replayStart;
+        if (logPath && replayStart < snapshotEnd) {
+          try {
+            await streamLogRange(logPath, replayStart, snapshotEnd, enqueueOutput);
+          } catch {
+            // skip replay on read failure and continue with live data
+          }
+        }
+        replayCursor = Math.max(replayCursor, snapshotEnd);
+        replayReady = true;
+        flushLiveQueue();
+      })();
+
+      ws.on('message', (raw, isBinary) => {
+        if (!ptyManager.hasSession(sessionId)) {
           return;
         }
-        if (frame.payload.byteLength > 0) {
-          ptyManager.write(sessionId, frame.payload.toString('utf8'));
+        if (isBinary) {
+          const frame = decodeTerminalFrame(raw, sessionHash);
+          if (!frame || frame.frameType !== TERMINAL_FRAME_TYPE_INPUT) {
+            ws.close(1003, 'invalid terminal frame');
+            return;
+          }
+          if (frame.payload.byteLength > 0) {
+            ptyManager.write(sessionId, frame.payload.toString('utf8'));
+          }
+          return;
         }
-        return;
-      }
-      ptyManager.write(sessionId, rawDataToString(raw));
-    });
+        ptyManager.write(sessionId, rawDataToString(raw));
+      });
 
-    ws.on('close', () => {
-      clearTimers();
-      releaseFlowControl();
-      offDataChunk();
-      offExit();
+      ws.on('close', () => {
+        clearTimers();
+        releaseFlowControl();
+        offDataChunk();
+        offExit();
+        updateBufferedMetric();
+        auditLogger.log({
+          event: 'session.terminal_detach',
+          actor: remoteIp,
+          resource: sessionId,
+          outcome: 'success',
+          metadata: {
+            tokenJti: authContext.claims.jti
+          }
+        });
+      });
     });
   });
 

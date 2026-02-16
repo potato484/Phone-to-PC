@@ -1,4 +1,4 @@
-import { DOM, apiUrl } from './state.js';
+import { DOM, apiUrl, authedFetch } from './state.js';
 
 const MONITOR_POLL_INTERVAL_MS = 5_000;
 
@@ -67,7 +67,7 @@ export function createMonitor({ toast }) {
   let firstLoad = true;
 
   async function fetchStats() {
-    const response = await fetch(apiUrl('/api/system/stats'));
+    const response = await authedFetch(apiUrl('/api/system/stats'));
     if (!response.ok) {
       throw new Error(`stats failed (${response.status})`);
     }

@@ -8,6 +8,7 @@ import {
   ZOOM_SCALE_EPSILON,
   ZOOM_SETTLE_MS,
   apiUrl,
+  authedFetch,
   normalizeSessionEntry,
   pruneSessionOffsets,
   readTokenFromHash,
@@ -745,7 +746,7 @@ export function createUi({ getControl, getTerm }) {
         }
         return;
       }
-      const keyResp = await fetch(apiUrl('/api/vapid-public-key'));
+      const keyResp = await authedFetch(apiUrl('/api/vapid-public-key'));
       if (!keyResp.ok) {
         if (!silentFailure) {
           Toast.show('通知订阅失败', 'danger');
@@ -782,7 +783,7 @@ export function createUi({ getControl, getTerm }) {
           applicationServerKey: urlBase64ToUint8Array(keyData.publicKey)
         }));
 
-      const saveResp = await fetch(apiUrl('/api/push/subscribe'), {
+      const saveResp = await authedFetch(apiUrl('/api/push/subscribe'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -1013,15 +1014,41 @@ export function createUi({ getControl, getTerm }) {
   };
 
   const Auth = {
-    init() {
+    async exchangeBootstrapToken(bootstrapToken) {
+      const response = await fetch(apiUrl('/api/auth/exchange'), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${bootstrapToken}`
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`auth exchange failed (${response.status})`);
+      }
+      const payload = await response.json();
+      if (!payload || typeof payload.accessToken !== 'string' || !payload.accessToken) {
+        throw new Error('invalid exchange response');
+      }
+      return payload.accessToken;
+    },
+
+    async init() {
       const hashToken = readTokenFromHash();
       if (hashToken) {
-        localStorage.setItem(TOKEN_STORAGE_KEY, hashToken);
-        State.token = hashToken;
+        try {
+          const accessToken = await this.exchangeBootstrapToken(hashToken);
+          window.sessionStorage.setItem(TOKEN_STORAGE_KEY, accessToken);
+          State.token = accessToken;
+          Toast.show('认证成功，已建立访问会话', 'success');
+        } catch (error) {
+          window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+          State.token = '';
+          const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : 'unknown';
+          Toast.show(`认证失败: ${message}`, 'danger');
+        }
         history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
         return;
       }
-      State.token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+      State.token = window.sessionStorage.getItem(TOKEN_STORAGE_KEY) || '';
     }
   };
 
@@ -1032,7 +1059,7 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
       try {
-        const response = await fetch(apiUrl('/api/runtime'));
+        const response = await authedFetch(apiUrl('/api/runtime'));
         if (!response.ok) {
           throw new Error('runtime fetch failed');
         }
@@ -1105,16 +1132,17 @@ export function createUi({ getControl, getTerm }) {
     QuickKeys.bind();
     bindSessionCopy();
     Actions.bind();
-    Auth.init();
-    term.init();
-    window.requestAnimationFrame(() => {
-      term.focusActivePane();
-    });
-    Network.bind();
-    Viewport.bind();
-    Actions.initServiceWorker().catch(() => {});
-    Runtime.load().finally(() => {
-      control.connect();
+    Auth.init().finally(() => {
+      term.init();
+      window.requestAnimationFrame(() => {
+        term.focusActivePane();
+      });
+      Network.bind();
+      Viewport.bind();
+      Actions.initServiceWorker().catch(() => {});
+      Runtime.load().finally(() => {
+        control.connect();
+      });
     });
     window.setTimeout(() => {
       Dock.updateHeight();

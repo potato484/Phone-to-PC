@@ -6,10 +6,27 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import qrcode from 'qrcode-terminal';
-import { createAuthMiddleware, ensureAuthToken, validateUpgradeToken } from './auth.js';
+import {
+  AccessTokenService,
+  createAccessAuthMiddleware,
+  ensureAccessSigningSecret,
+  ensureAuthToken,
+  readBootstrapTokenFromRequest,
+  validateBootstrapToken
+} from './auth.js';
+import { AuditLogger } from './audit-log.js';
+import { MetricsRegistry } from './metrics.js';
 import { PtyManager } from './pty-manager.js';
 import { PushService } from './push.js';
 import { registerApiRoutes } from './routes/api.js';
+import {
+  checkOriginAndHost,
+  createOriginHostMiddleware,
+  createOriginHostPolicyFromEnv,
+  createRateLimitMiddleware,
+  getClientIp,
+  MemoryRateLimiter
+} from './security.js';
 import { C2PStore } from './store.js';
 import { getLanAddress, isEnabledEnvFlag, resolveTunnelMode, startTunnel } from './tunnel.js';
 import { VncManager } from './vnc-manager.js';
@@ -59,15 +76,43 @@ function resolveDefaultWorkingDirectory(rawCwd: string | undefined): string {
   return process.cwd();
 }
 
+function parseIntEnv(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return parsed;
+}
+
 const cliOptions = parseServerCliOptions(process.argv.slice(2));
 const defaultWorkingDirectory = resolveDefaultWorkingDirectory(cliOptions.cwd);
 const port = Number(process.env.PORT ?? 3000);
+
 const store = new C2PStore();
-const token = ensureAuthToken();
-const authMiddleware = createAuthMiddleware(token);
+const bootstrapToken = ensureAuthToken();
+const signingSecret = ensureAccessSigningSecret();
+const accessTokenService = new AccessTokenService({
+  store,
+  signingSecret,
+  ttlSeconds: parseIntEnv('C2P_ACCESS_TOKEN_TTL_SECONDS', 24 * 60 * 60)
+});
+
+const auditLogger = new AuditLogger({
+  dir: process.env.C2P_AUDIT_DIR,
+  retentionDays: parseIntEnv('C2P_AUDIT_RETENTION_DAYS', 90)
+});
+const metrics = new MetricsRegistry();
+
 const ptyManager = new PtyManager(defaultWorkingDirectory);
 const pushService = new PushService(store);
 const vncManager = new VncManager();
+
+const originPolicy = createOriginHostPolicyFromEnv();
+const generalApiLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 100 });
+const uploadApiLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 10 });
+const exchangeFailureLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 5, lockMs: 15 * 60_000 });
+const wsUpgradeLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 60 });
+const wsAuthFailureLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 5, lockMs: 15 * 60_000 });
 
 pushService.init({
   subject: process.env.VAPID_SUBJECT,
@@ -98,26 +143,201 @@ app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(publicDir));
 app.use('/vendor/novnc', express.static(noVncDir));
-app.use('/api', authMiddleware);
+
+app.get('/healthz', (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    ...metrics.getHealthSnapshot()
+  });
+});
+
+app.get('/readyz', async (_req, res) => {
+  const checks = {
+    sqlitePing: store.ping(),
+    sqliteWritable: store.isWritable(),
+    ptyReady: true,
+    vncAvailable: false
+  };
+
+  try {
+    checks.ptyReady = Array.isArray(ptyManager.listSessions());
+  } catch {
+    checks.ptyReady = false;
+  }
+
+  try {
+    const vnc = await vncManager.getStatusSnapshot();
+    checks.vncAvailable = vnc.available;
+  } catch {
+    checks.vncAvailable = false;
+  }
+
+  const ready = checks.sqlitePing && checks.sqliteWritable && checks.ptyReady;
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'not_ready',
+    checks,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/metrics', (_req, res) => {
+  res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.status(200).send(metrics.renderPrometheus());
+});
+
+app.use('/api', createOriginHostMiddleware(originPolicy));
+
+app.post('/api/auth/exchange', (req, res) => {
+  const remoteIp = getClientIp(req);
+  const lockState = exchangeFailureLimiter.peek(remoteIp);
+  if (!lockState.allowed) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil(lockState.retryAfterMs / 1000))));
+    res.status(429).json({
+      error: 'too many auth failures',
+      retryAfterSec: Math.max(1, Math.ceil(lockState.retryAfterMs / 1000))
+    });
+    return;
+  }
+
+  const candidate = readBootstrapTokenFromRequest(req);
+  if (!validateBootstrapToken(candidate, bootstrapToken)) {
+    exchangeFailureLimiter.hit(remoteIp);
+    auditLogger.log({
+      event: 'auth.failed',
+      actor: remoteIp,
+      resource: 'bootstrap',
+      outcome: 'failure',
+      metadata: {
+        reason: 'invalid bootstrap token'
+      }
+    });
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+
+  const issued = accessTokenService.issueAccessToken(remoteIp);
+  auditLogger.log({
+    event: 'auth.token_issued',
+    actor: remoteIp,
+    resource: issued.claims.jti,
+    outcome: 'success',
+    metadata: {
+      expiresAt: issued.expiresAt,
+      ttlSeconds: accessTokenService.getAccessTokenTtlSeconds()
+    }
+  });
+
+  res.status(200).json({
+    tokenType: 'Bearer',
+    accessToken: issued.token,
+    expiresAt: issued.expiresAt,
+    ttlSeconds: accessTokenService.getAccessTokenTtlSeconds()
+  });
+});
+
+app.use(
+  '/api/fs/upload',
+  createRateLimitMiddleware(uploadApiLimiter, {
+    message: 'too many upload requests'
+  })
+);
+app.use(
+  '/api',
+  createRateLimitMiddleware(generalApiLimiter, {
+    message: 'too many requests'
+  })
+);
+
+const accessAuthMiddleware = createAccessAuthMiddleware(accessTokenService, {
+  onFailure: (req, reason) => {
+    auditLogger.log({
+      event: 'auth.failed',
+      actor: getClientIp(req),
+      resource: 'access-token',
+      outcome: 'failure',
+      metadata: {
+        reason
+      }
+    });
+  }
+});
+app.use('/api', accessAuthMiddleware);
+
+app.post('/api/auth/revoke', (req, res) => {
+  const auth = res.locals.auth as { token: string; claims: { jti: string } } | undefined;
+  if (!auth) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+
+  const revoked = accessTokenService.revokeAccessToken(auth.token, 'self-revoke');
+  if (!revoked.ok) {
+    res.status(400).json({ error: 'revoke failed', reason: revoked.code });
+    return;
+  }
+
+  auditLogger.log({
+    event: 'auth.token_revoked',
+    actor: getClientIp(req),
+    resource: revoked.claims.jti,
+    outcome: 'success',
+    metadata: {
+      reason: 'self-revoke'
+    }
+  });
+
+  res.status(200).json({ ok: true, jti: revoked.claims.jti });
+});
+
 registerApiRoutes(app, {
   store,
   ptyManager,
   pushService,
   defaultWorkingDirectory,
-  vncManager
+  vncManager,
+  auditLogger
 });
 
 const server = http.createServer(app);
 const channels: WsChannel[] = [
-  createControlChannel({ ptyManager, store, pushService }),
-  createTerminalChannel({ ptyManager }),
-  createDesktopChannel({ vncManager })
+  createControlChannel({
+    ptyManager,
+    store,
+    pushService,
+    accessTokenService,
+    auditLogger,
+    metrics,
+    wsAuthFailureLimiter
+  }),
+  createTerminalChannel({
+    ptyManager,
+    accessTokenService,
+    auditLogger,
+    metrics,
+    wsAuthFailureLimiter
+  }),
+  createDesktopChannel({
+    vncManager,
+    accessTokenService,
+    auditLogger,
+    metrics,
+    wsAuthFailureLimiter
+  })
 ];
 const channelMap = new Map(channels.map((channel) => [channel.pathname, channel]));
 
 server.on('upgrade', (request, socket, head) => {
-  if (!validateUpgradeToken(request, token)) {
-    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+  const originCheck = checkOriginAndHost(request, originPolicy);
+  if (!originCheck.ok) {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  const remoteIp = getClientIp(request);
+  const upgradeLimit = wsUpgradeLimiter.hit(remoteIp);
+  if (!upgradeLimit.allowed) {
+    socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
     socket.destroy();
     return;
   }
@@ -135,20 +355,24 @@ server.on('upgrade', (request, socket, head) => {
 
 server.on('close', () => {
   vncManager.dispose();
+  metrics.dispose();
+  store.close();
 });
 
 server.listen(port, async () => {
-  const localUrl = `http://localhost:${port}/#token=${token}`;
+  const localUrl = `http://localhost:${port}/#token=${bootstrapToken}`;
   const lan = getLanAddress();
 
   console.log(`[c2p] listening on ${port}`);
   console.log(`[c2p] default cwd: ${defaultWorkingDirectory}`);
-  console.log(`[c2p] local: ${localUrl}`);
+  console.log(`[c2p] sqlite: ${store.getDbPath()}`);
+  console.log(`[c2p] audit dir: ${auditLogger.getDir()}`);
+  console.log(`[c2p] local bootstrap: ${localUrl}`);
   if (lan) {
-    console.log(`[c2p] lan: http://${lan}:${port}/#token=${token}`);
+    console.log(`[c2p] lan bootstrap: http://${lan}:${port}/#token=${bootstrapToken}`);
   }
 
-  const tunnelUrl = await startTunnel(port, token);
+  const tunnelUrl = await startTunnel(port, bootstrapToken);
   if (tunnelUrl) {
     if (resolveTunnelMode() === 'tailscale') {
       const tunnelCommand = isEnabledEnvFlag(process.env.TAILSCALE_FUNNEL) ? 'funnel' : 'serve';
