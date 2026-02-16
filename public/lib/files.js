@@ -56,12 +56,14 @@ function clampMenuPosition(x, y, width, height) {
   };
 }
 
-export function createFiles({ toast }) {
+export function createFiles({ toast, openTerminalAtPath }) {
   let currentPath = '.';
   let parentPath = null;
   let entries = [];
+  let showHiddenEntries = true;
   let contextTarget = null;
   let contextMenuEl = null;
+  let contextBackdropEl = null;
   let longPressTimer = 0;
   let dragDepth = 0;
   let suppressClick = false;
@@ -96,58 +98,106 @@ export function createFiles({ toast }) {
     if (contextMenuEl) {
       return contextMenuEl;
     }
+    contextBackdropEl = document.createElement('div');
+    contextBackdropEl.className = 'touch-context-backdrop files-context-backdrop';
+    contextBackdropEl.hidden = true;
+    contextBackdropEl.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      hideContextMenu();
+    });
+    contextBackdropEl.addEventListener('click', (event) => {
+      event.preventDefault();
+      hideContextMenu();
+    });
+    document.body.appendChild(contextBackdropEl);
+
     contextMenuEl = document.createElement('div');
     contextMenuEl.className = 'touch-context-menu files-context-menu';
     contextMenuEl.hidden = true;
     contextMenuEl.innerHTML = `
       <button type="button" class="touch-context-btn" data-action="open">打开</button>
+      <button type="button" class="touch-context-btn" data-action="copy-path-rel">复制相对路径</button>
+      <button type="button" class="touch-context-btn" data-action="copy-path-abs">复制绝对路径</button>
+      <button type="button" class="touch-context-btn" data-action="open-terminal">在此打开终端</button>
       <button type="button" class="touch-context-btn" data-action="download">下载</button>
       <button type="button" class="touch-context-btn" data-action="rename">重命名</button>
       <button type="button" class="touch-context-btn" data-action="remove">删除</button>
     `;
     document.body.appendChild(contextMenuEl);
 
-    contextMenuEl.addEventListener('click', async (event) => {
-      const button = event.target.closest('[data-action]');
-      if (!button || !contextTarget) {
+    const resolveActionButton = (event) => {
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      for (const node of path) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+        const buttonFromPath = node.closest('[data-action]');
+        if (buttonFromPath && contextMenuEl && contextMenuEl.contains(buttonFromPath)) {
+          return buttonFromPath;
+        }
+      }
+      const target = event.target;
+      const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+      if (!element) {
+        return;
+      }
+      const button = element.closest('[data-action]');
+      if (!button || (contextMenuEl && !contextMenuEl.contains(button))) {
+        return;
+      }
+      return button;
+    };
+
+    const runContextAction = async (event) => {
+      const button = resolveActionButton(event);
+      const targetEntry = contextTarget;
+      if (!button || !targetEntry) {
         return;
       }
       const action = button.dataset.action;
       hideContextMenu();
       if (action === 'open') {
-        await openEntry(contextTarget);
+        await openEntry(targetEntry);
+        return;
+      }
+      if (action === 'copy-path-rel') {
+        await copyEntryPath(targetEntry, 'relative');
+        return;
+      }
+      if (action === 'copy-path-abs') {
+        await copyEntryPath(targetEntry, 'absolute');
         return;
       }
       if (action === 'download') {
-        if (contextTarget.type !== 'file') {
+        if (targetEntry.type !== 'file') {
           toast.show('目录不支持下载', 'warn');
           return;
         }
-        downloadEntry(contextTarget.path);
+        await downloadEntry(targetEntry.path);
+        return;
+      }
+      if (action === 'open-terminal') {
+        openTerminalForEntry(targetEntry);
         return;
       }
       if (action === 'rename') {
-        await renameEntry(contextTarget);
+        await renameEntry(targetEntry);
         return;
       }
       if (action === 'remove') {
-        await removeEntry(contextTarget);
+        await removeEntry(targetEntry);
+      }
+    };
+    contextMenuEl.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      void runContextAction(event);
+    });
+    contextMenuEl.addEventListener('click', (event) => {
+      // Keyboard-initiated click has detail=0 and may not emit pointer events.
+      if ((event.detail || 0) === 0) {
+        void runContextAction(event);
       }
     });
-
-    document.addEventListener(
-      'pointerdown',
-      (event) => {
-        if (!contextMenuEl || contextMenuEl.hidden) {
-          return;
-        }
-        if (contextMenuEl.contains(event.target)) {
-          return;
-        }
-        hideContextMenu();
-      },
-      { passive: true }
-    );
 
     return contextMenuEl;
   }
@@ -157,11 +207,17 @@ export function createFiles({ toast }) {
       return;
     }
     contextMenuEl.hidden = true;
+    if (contextBackdropEl) {
+      contextBackdropEl.hidden = true;
+    }
     contextTarget = null;
   }
 
   function showContextMenu(entry, x, y) {
     const menu = ensureContextMenu();
+    if (contextBackdropEl) {
+      contextBackdropEl.hidden = false;
+    }
     contextTarget = entry;
     menu.hidden = false;
 
@@ -169,11 +225,19 @@ export function createFiles({ toast }) {
     if (downloadBtn) {
       downloadBtn.hidden = entry.type !== 'file';
     }
+    const openTerminalBtn = menu.querySelector('[data-action="open-terminal"]');
+    if (openTerminalBtn) {
+      openTerminalBtn.hidden = entry.type !== 'dir' && entry.type !== 'file';
+    }
+    const copyAbsBtn = menu.querySelector('[data-action="copy-path-abs"]');
+    if (copyAbsBtn) {
+      copyAbsBtn.hidden = typeof entry.absPath !== 'string' || !entry.absPath;
+    }
 
     menu.style.left = '0px';
     menu.style.top = '0px';
     const rect = menu.getBoundingClientRect();
-    const next = clampMenuPosition(x, y, rect.width || 168, rect.height || 180);
+    const next = clampMenuPosition(x, y, rect.width || 168, rect.height || 220);
     menu.style.left = `${Math.round(next.x)}px`;
     menu.style.top = `${Math.round(next.y)}px`;
   }
@@ -183,6 +247,7 @@ export function createFiles({ toast }) {
       return;
     }
     DOM.filesPath.textContent = currentPath || '.';
+    syncHiddenButton();
 
     DOM.filesList.textContent = '';
     if (loading) {
@@ -201,8 +266,17 @@ export function createFiles({ toast }) {
       return;
     }
 
+    const visibleEntries = showHiddenEntries ? entries : entries.filter((entry) => !isHiddenEntry(entry));
+    if (visibleEntries.length === 0) {
+      const emptyEl = document.createElement('p');
+      emptyEl.className = 'files-empty';
+      emptyEl.textContent = '隐藏文件已关闭显示';
+      DOM.filesList.appendChild(emptyEl);
+      return;
+    }
+
     const fragment = document.createDocumentFragment();
-    entries.forEach((entry) => {
+    visibleEntries.forEach((entry) => {
       const row = document.createElement('button');
       row.type = 'button';
       row.className = 'files-item';
@@ -227,6 +301,32 @@ export function createFiles({ toast }) {
       fragment.appendChild(row);
     });
     DOM.filesList.appendChild(fragment);
+  }
+
+  function isHiddenEntry(entry) {
+    if (!entry || typeof entry.name !== 'string') {
+      return false;
+    }
+    return entry.name.startsWith('.');
+  }
+
+  function syncHiddenButton() {
+    const button = DOM.filesHiddenBtn;
+    if (!button) {
+      return;
+    }
+    const icon = button.querySelector('.files-tool-icon');
+    const label = button.querySelector('.files-tool-label');
+    const actionText = showHiddenEntries ? '隐藏隐藏文件' : '显示隐藏文件';
+    if (icon) {
+      icon.textContent = showHiddenEntries ? 'H-' : 'H+';
+    }
+    if (label) {
+      label.textContent = showHiddenEntries ? '隐藏' : '显示';
+    }
+    button.classList.toggle('is-active', !showHiddenEntries);
+    button.title = actionText;
+    button.setAttribute('aria-label', actionText);
   }
 
   async function refresh(nextPath = currentPath) {
@@ -267,11 +367,59 @@ export function createFiles({ toast }) {
     }
   }
 
-  function downloadEntry(filePath) {
+  async function downloadEntry(filePath) {
     const url = buildApiUrl('/api/fs/download', {
       path: filePath
     });
-    window.open(url, '_blank', 'noopener');
+    try {
+      const response = await authedFetch(url);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        const message = payload && payload.error ? payload.error : `download failed (${response.status})`;
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const { base } = splitPath(filePath);
+      const filename = base || 'download';
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => {
+        URL.revokeObjectURL(blobUrl);
+      }, 1000);
+    } catch (error) {
+      toast.show(`下载失败: ${error.message}`, 'danger');
+    }
+  }
+
+  async function copyText(text, successText) {
+    if (!text) {
+      toast.show('路径为空，无法复制', 'warn');
+      return;
+    }
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      toast.show('当前环境不支持复制', 'warn');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.show(successText, 'success');
+    } catch {
+      toast.show('复制失败', 'danger');
+    }
+  }
+
+  async function copyEntryPath(entry, mode) {
+    if (mode === 'absolute') {
+      const absolutePath = typeof entry.absPath === 'string' ? entry.absPath : '';
+      await copyText(absolutePath, '绝对路径已复制');
+      return;
+    }
+    await copyText(entry.path, '相对路径已复制');
   }
 
   async function renameEntry(entry) {
@@ -338,6 +486,32 @@ export function createFiles({ toast }) {
     toast.show('当前条目不支持打开', 'warn');
   }
 
+  function resolveTerminalCwd(entry) {
+    if (!entry || typeof entry.path !== 'string' || !entry.path.trim()) {
+      return '';
+    }
+    if (entry.type === 'dir') {
+      return entry.path;
+    }
+    if (entry.type === 'file') {
+      return splitPath(entry.path).dir;
+    }
+    return '';
+  }
+
+  function openTerminalForEntry(entry) {
+    const cwd = resolveTerminalCwd(entry);
+    if (!cwd) {
+      toast.show('当前条目不支持在此打开终端', 'warn');
+      return;
+    }
+    if (typeof openTerminalAtPath !== 'function') {
+      toast.show('终端模块未就绪', 'warn');
+      return;
+    }
+    openTerminalAtPath(cwd);
+  }
+
   async function saveEditorFile() {
     if (!DOM.filesEditorWrap || DOM.filesEditorWrap.hidden || !DOM.filesEditor || !DOM.filesEditorPath) {
       return;
@@ -358,6 +532,47 @@ export function createFiles({ toast }) {
       await refresh();
     } catch (error) {
       toast.show(`保存失败: ${error.message}`, 'danger');
+    }
+  }
+
+  async function createFile() {
+    const fileNameRaw = window.prompt('新文件名称', 'new-file.txt');
+    if (fileNameRaw === null) {
+      return;
+    }
+    const fileName = fileNameRaw.trim();
+    if (!fileName) {
+      return;
+    }
+
+    const targetPath = joinPath(currentPath, fileName);
+    const existing = entries.find((entry) => entry.path === targetPath);
+    if (existing) {
+      if (existing.type !== 'file') {
+        toast.show('同名目录已存在，无法创建文件', 'warn');
+        return;
+      }
+      const overwrite = window.confirm(`文件 ${fileName} 已存在，是否覆盖为空文件？`);
+      if (!overwrite) {
+        return;
+      }
+    }
+
+    try {
+      await fetchJson('/api/fs/write', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          path: targetPath,
+          content: ''
+        })
+      });
+      toast.show(existing ? '文件已覆盖' : '文件创建成功', 'success');
+      await refresh();
+    } catch (error) {
+      toast.show(`创建文件失败: ${error.message}`, 'danger');
     }
   }
 
@@ -499,6 +714,17 @@ export function createFiles({ toast }) {
   }
 
   function bindToolbar() {
+    if (DOM.filesHiddenBtn) {
+      DOM.filesHiddenBtn.addEventListener('click', () => {
+        showHiddenEntries = !showHiddenEntries;
+        render();
+      });
+    }
+    if (DOM.filesRootBtn) {
+      DOM.filesRootBtn.addEventListener('click', () => {
+        void refresh('/');
+      });
+    }
     if (DOM.filesRefreshBtn) {
       DOM.filesRefreshBtn.addEventListener('click', () => {
         void refresh();
@@ -538,6 +764,11 @@ export function createFiles({ toast }) {
         } catch (error) {
           toast.show(`创建目录失败: ${error.message}`, 'danger');
         }
+      });
+    }
+    if (DOM.filesNewfileBtn) {
+      DOM.filesNewfileBtn.addEventListener('click', () => {
+        void createFile();
       });
     }
     if (DOM.filesUploadBtn && DOM.filesUploadInput) {

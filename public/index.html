@@ -38,7 +38,6 @@
               <span id="terminal-reconnect-fill" class="terminal-reconnect-fill"></span>
             </div>
           </div>
-          <p class="terminal-input-hint">提示：新版直接在终端面板内输入，手机先点终端区域再调出键盘。</p>
           <div id="terminal-grid" class="terminal-grid" aria-live="polite"></div>
         </section>
       </main>
@@ -59,10 +58,34 @@
               <code id="files-path" class="files-path">.</code>
             </header>
             <div class="files-toolbar">
-              <button id="files-up-btn" class="btn" type="button">上级</button>
-              <button id="files-refresh-btn" class="btn" type="button">刷新</button>
-              <button id="files-mkdir-btn" class="btn" type="button">新建目录</button>
-              <button id="files-upload-btn" class="btn" type="button">上传</button>
+              <button id="files-up-btn" class="btn" type="button" title="上级目录" aria-label="上级目录">
+                <span class="files-tool-icon">↑</span>
+                <span class="files-tool-label">上级</span>
+              </button>
+              <button id="files-root-btn" class="btn" type="button" title="根目录" aria-label="根目录">
+                <span class="files-tool-icon">⌂</span>
+                <span class="files-tool-label">根目录</span>
+              </button>
+              <button id="files-refresh-btn" class="btn" type="button" title="刷新" aria-label="刷新">
+                <span class="files-tool-icon">⟳</span>
+                <span class="files-tool-label">刷新</span>
+              </button>
+              <button id="files-hidden-btn" class="btn" type="button" title="隐藏隐藏文件" aria-label="隐藏隐藏文件">
+                <span class="files-tool-icon">H-</span>
+                <span class="files-tool-label">隐藏</span>
+              </button>
+              <button id="files-newfile-btn" class="btn" type="button" title="新建文件" aria-label="新建文件">
+                <span class="files-tool-icon">F+</span>
+                <span class="files-tool-label">文件</span>
+              </button>
+              <button id="files-mkdir-btn" class="btn" type="button" title="新建目录" aria-label="新建目录">
+                <span class="files-tool-icon">D+</span>
+                <span class="files-tool-label">目录</span>
+              </button>
+              <button id="files-upload-btn" class="btn" type="button" title="上传文件" aria-label="上传文件">
+                <span class="files-tool-icon">⇪</span>
+                <span class="files-tool-label">上传</span>
+              </button>
               <input id="files-upload-input" type="file" multiple hidden />
             </div>
             <div id="files-list" class="files-list" aria-live="polite"></div>
@@ -105,7 +128,10 @@
               <span id="monitor-vnc-text">离线</span>
             </div>
             <div class="monitor-item monitor-quality-item">
-              <span class="monitor-label">CQS</span>
+              <span class="monitor-label">
+                CQS
+                <span class="monitor-label-note">连接质量</span>
+              </span>
               <span id="monitor-cqs-text" class="monitor-value monitor-quality-pill">离线</span>
             </div>
             <div class="monitor-inline">

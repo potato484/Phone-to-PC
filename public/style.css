@@ -154,7 +154,6 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 .terminal-reconnect-text { margin: 0 0 6px; font-size: 12px; color: var(--warning); }
 .terminal-reconnect-track { width: 100%; height: 5px; border-radius: 14px; overflow: hidden; background: var(--surface-high); }
 .terminal-reconnect-fill { display: block; width: 0%; height: 100%; background: var(--warning); transition: width 90ms linear; }
-.terminal-input-hint { margin: 0; font-size: 12px; color: var(--text-muted); }
 
 .terminal-grid { min-height: 120px; display: grid; gap: 8px; }
 .terminal-grid[data-pane-count="1"] { grid-template-columns: 1fr; grid-template-rows: 1fr; }
@@ -245,7 +244,7 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 
 .session-tabs {
   display: grid;
-  grid-auto-rows: minmax(40px, auto);
+  grid-auto-rows: minmax(36px, auto);
   gap: 8px;
   max-height: var(--session-tabs-max-height);
   min-height: 0;
@@ -264,16 +263,16 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 /* 3.3 微交互：Session Tab */
 .session-tab {
   width: 100%;
-  min-height: 40px;
+  min-height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
-  padding: 0 10px;
-  border-radius: 9px;
+  padding: 0 8px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -287,7 +286,7 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 .session-tab:focus-visible { outline: 2px solid var(--accent); }
 .session-tab.is-active { border-color: var(--accent); background: var(--accent-dim); color: var(--text); }
 
-.session-tab-item { position: relative; border-radius: 9px; overflow: hidden; --swipe-offset: 0px; }
+.session-tab-item { position: relative; border-radius: 8px; overflow: hidden; --swipe-offset: 0px; }
 .session-tab-item.is-swiping .session-tab, .session-tab-item.is-swiping .session-tab-delete { transition: none; }
 .session-tab-item.is-swipe-open { --swipe-offset: calc(var(--session-tab-delete-width) * -1); }
 
@@ -295,13 +294,13 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
   position: absolute;
   top: 0; right: 0; bottom: 0;
   width: var(--session-tab-delete-width);
-  min-height: 40px;
+  min-height: 36px;
   border: 1px solid var(--danger);
   border-left: 0;
   border-radius: 0;
   background: var(--danger-dim);
   color: var(--danger);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   transform: translateX(calc(100% + var(--swipe-offset, 0px)));
   transition: transform 180ms var(--ease-out), opacity 160ms ease;
@@ -315,21 +314,24 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
   text-align: center;
   border-style: dashed;
   color: var(--text);
+  font-size: 11px;
   font-weight: 600;
 }
 
-.quick-keys { display: grid; gap: 6px; }
-.quick-key-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.quick-keys { display: grid; gap: 5px; }
+.quick-key-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
 .quick-key-row[data-row="nav"] { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 
 .quick-key-btn {
-  min-height: 40px;
-  border-radius: 9px;
+  min-height: 34px;
+  border-radius: 8px;
   border-color: var(--border);
   background: var(--surface);
   color: var(--text);
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.05;
+  padding: 0 4px;
   user-select: none;
 }
 .quick-key-btn:active { border-color: var(--accent); background: var(--surface-high); transform: scale(0.92); }
@@ -379,7 +381,33 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 .dock-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .dock-card-title { margin: 0; font-size: 13px; }
 .files-path { font-size: 11px; color: var(--text-muted); max-width: 56%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.files-toolbar { margin-top: 8px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.files-toolbar { margin-top: 8px; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.files-toolbar .btn {
+  min-height: 40px;
+  padding: 2px 0;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+.files-toolbar .btn.is-active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.files-toolbar .btn.is-active .files-tool-label {
+  color: var(--text);
+}
+.files-tool-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.files-tool-label {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-muted);
+}
 
 .files-list {
   margin-top: 8px;
@@ -435,6 +463,11 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 .monitor-updated-at { font-size: 11px; color: var(--text-muted); font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; }
 .monitor-item { margin-top: 8px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
 .monitor-label { font-size: 12px; color: var(--text-muted); }
+.monitor-label-note {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--text-subtle);
+}
 .monitor-meter { position: relative; height: 8px; border-radius: 999px; overflow: hidden; background: var(--surface-high); }
 .monitor-meter-fill { display: block; width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), var(--success)); transition: width 400ms var(--ease-out); }
 .monitor-value { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
@@ -501,6 +534,7 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
   z-index: 40;
   display: grid;
   gap: 6px;
+  pointer-events: auto;
   min-width: 148px;
   padding: 8px;
   border-radius: 12px;
@@ -509,6 +543,17 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2), 0 16px 30px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--border-subtle);
+}
+.touch-context-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: transparent;
+  pointer-events: auto;
+}
+.touch-context-menu[hidden],
+.touch-context-backdrop[hidden] {
+  display: none !important;
 }
 .touch-context-btn {
   min-height: 40px;
@@ -567,7 +612,7 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
     --session-tabs-max-height: clamp(92px, 20vh, 168px);
   }
   .session-tabs { gap: 6px; }
-  .files-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .files-toolbar { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .quick-key-row[data-row="nav"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
