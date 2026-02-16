@@ -1,4 +1,8 @@
 import { DOM } from './state.js';
+import {
+  computeHorizontalScrollUpdate,
+  resolveDirectionLock
+} from './gesture-scroll-policy.js';
 
 const DIRECTION_LOCK_THRESHOLD_PX = 8;
 const LONG_PRESS_MS = 560;
@@ -152,6 +156,19 @@ export function createGestures({ getTerm, toast }) {
     longPressPoint = null;
   }
 
+  function resetSwipeTracking() {
+    swipeStart = null;
+    directionLock = '';
+  }
+
+  function resetGestureState() {
+    clearLongPress();
+    suppressTouchEnd = false;
+    resetSwipeTracking();
+    pinchState = null;
+    hideMenu();
+  }
+
   function resolveHorizontalScrollTarget(target) {
     if (!(target instanceof Element)) {
       return null;
@@ -177,8 +194,7 @@ export function createGestures({ getTerm, toast }) {
         if (touches.length === 2) {
           clearLongPress();
           suppressTouchEnd = false;
-          swipeStart = null;
-          directionLock = '';
+          resetSwipeTracking();
           const term = getTerm();
           pinchState = {
             baseDistance: touchDistance(touches[0], touches[1]),
@@ -188,8 +204,7 @@ export function createGestures({ getTerm, toast }) {
         }
         if (touches.length !== 1) {
           clearLongPress();
-          swipeStart = null;
-          directionLock = '';
+          resetSwipeTracking();
           pinchState = null;
           return;
         }
@@ -197,13 +212,13 @@ export function createGestures({ getTerm, toast }) {
         pinchState = null;
         const touch = touches[0];
         const horizontalScrollTarget = resolveHorizontalScrollTarget(event.target);
+        resetSwipeTracking();
         swipeStart = {
           x: touch.clientX,
           y: touch.clientY,
           horizontalScrollTarget,
           horizontalScrollLeft: horizontalScrollTarget ? horizontalScrollTarget.scrollLeft : 0
         };
-        directionLock = '';
         longPressPoint = {
           x: touch.clientX,
           y: touch.clientY
@@ -249,32 +264,33 @@ export function createGestures({ getTerm, toast }) {
         const dy = touch.clientY - swipeStart.y;
         const absDx = Math.abs(dx);
         const absDy = Math.abs(dy);
+        const horizontalScrollUpdate = swipeStart.horizontalScrollTarget
+          ? computeHorizontalScrollUpdate(
+              swipeStart.horizontalScrollTarget,
+              swipeStart.horizontalScrollLeft,
+              dx
+            )
+          : null;
+
+        directionLock = resolveDirectionLock({
+          currentLock: directionLock,
+          absDx,
+          absDy,
+          thresholdPx: DIRECTION_LOCK_THRESHOLD_PX,
+          hasHorizontalTarget: !!swipeStart.horizontalScrollTarget,
+          canConsumeHorizontal: !!horizontalScrollUpdate && horizontalScrollUpdate.shouldConsume,
+          horizontalIntentRatio: HORIZONTAL_INTENT_RATIO,
+          verticalRecoverRatio: VERTICAL_RECOVER_RATIO
+        });
+
         if (
-          !directionLock &&
-          (absDx >= DIRECTION_LOCK_THRESHOLD_PX || absDy >= DIRECTION_LOCK_THRESHOLD_PX)
+          directionLock === 'x' &&
+          swipeStart.horizontalScrollTarget &&
+          horizontalScrollUpdate &&
+          horizontalScrollUpdate.shouldConsume
         ) {
-          const preferHorizontal =
-            !!swipeStart.horizontalScrollTarget && absDx >= absDy * HORIZONTAL_INTENT_RATIO;
-          directionLock = preferHorizontal ? 'x' : 'y';
-        }
-        if (directionLock === 'x' && swipeStart.horizontalScrollTarget) {
-          if (absDy > absDx * VERTICAL_RECOVER_RATIO) {
-            directionLock = 'y';
-          }
-        }
-        if (directionLock === 'x' && swipeStart.horizontalScrollTarget) {
-          const scroller = swipeStart.horizontalScrollTarget;
-          const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-          if (maxScrollLeft > 0) {
-            const nextScrollLeft = Math.max(
-              0,
-              Math.min(maxScrollLeft, swipeStart.horizontalScrollLeft - dx)
-            );
-            if (Math.abs(nextScrollLeft - scroller.scrollLeft) > 0.5) {
-              scroller.scrollLeft = nextScrollLeft;
-            }
-            event.preventDefault();
-          }
+          swipeStart.horizontalScrollTarget.scrollLeft = horizontalScrollUpdate.nextScrollLeft;
+          event.preventDefault();
         }
         if (!longPressTimer) {
           return;
@@ -302,20 +318,17 @@ export function createGestures({ getTerm, toast }) {
           if (term && typeof term.scheduleResize === 'function') {
             term.scheduleResize(true);
           }
-          swipeStart = null;
-          directionLock = '';
+          resetSwipeTracking();
           return;
         }
 
         if (suppressTouchEnd) {
           suppressTouchEnd = false;
-          swipeStart = null;
-          directionLock = '';
+          resetSwipeTracking();
           return;
         }
 
-        swipeStart = null;
-        directionLock = '';
+        resetSwipeTracking();
       },
       { passive: true }
     );
@@ -324,12 +337,24 @@ export function createGestures({ getTerm, toast }) {
       'touchcancel',
       () => {
         clearLongPress();
-        swipeStart = null;
-        directionLock = '';
+        resetSwipeTracking();
         pinchState = null;
       },
       { passive: true }
     );
+
+    window.addEventListener(
+      'blur',
+      () => {
+        resetGestureState();
+      },
+      { passive: true }
+    );
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        resetGestureState();
+      }
+    });
   }
 
   return {

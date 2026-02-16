@@ -631,6 +631,7 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
       DOM.sessionTabs.appendChild(fragment);
       DOM.sessionTabs.hidden = false;
       this.renderActiveState();
+      Dock.scheduleMeasure();
       return sessions;
     }
   };

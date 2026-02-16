@@ -28,6 +28,7 @@
   --dock-bottom-offset: 0px;
   --dock-height: 180px;
   --session-tab-delete-width: 84px;
+  --session-tabs-max-height: clamp(112px, 24vh, 220px);
 
   /* Animation Easings */
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -246,16 +247,17 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
   display: grid;
   grid-auto-rows: minmax(40px, auto);
   gap: 8px;
-  height: clamp(112px, 24vh, 220px);
-  min-height: 112px;
-  max-height: 220px;
+  max-height: var(--session-tabs-max-height);
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   padding: 2px 0 6px;
   -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
   touch-action: pan-y;
   scrollbar-width: thin;
+  align-content: start;
   contain: layout style;
 }
 
@@ -306,10 +308,9 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 }
 .session-tab-item.is-delete-pending .session-tab-delete, .session-tab-delete:disabled { opacity: 0.58; cursor: not-allowed; }
 .session-tab-add {
-  width: auto;
-  min-width: 88px;
-  max-width: 100%;
-  justify-self: center;
+  width: 100%;
+  min-width: 0;
+  justify-self: stretch;
   justify-content: center;
   text-align: center;
   border-style: dashed;
@@ -562,11 +563,18 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 }
 
 @media (max-width: 640px) {
+  :root {
+    --session-tabs-max-height: clamp(92px, 20vh, 168px);
+  }
+  .session-tabs { gap: 6px; }
   .files-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .quick-key-row[data-row="nav"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 460px) {
+  :root {
+    --session-tabs-max-height: clamp(84px, 18vh, 144px);
+  }
   .status-bar { grid-template-columns: 1fr; gap: 6px; text-align: center; }
   .status-indicators { justify-content: center; }
   .session-pill { justify-self: center; }
