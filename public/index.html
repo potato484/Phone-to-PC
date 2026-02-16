@@ -104,9 +104,24 @@
               <span id="monitor-uptime-text">-</span>
               <span id="monitor-vnc-text">离线</span>
             </div>
+            <div class="monitor-item monitor-quality-item">
+              <span class="monitor-label">CQS</span>
+              <span id="monitor-cqs-text" class="monitor-value monitor-quality-pill">离线</span>
+            </div>
+            <div class="monitor-inline">
+              <span id="monitor-rtt-text">RTT -</span>
+              <span id="monitor-jitter-text">抖动 -</span>
+              <span id="monitor-loss-text">丢包 -</span>
+              <span id="monitor-profile-text">桌面档位 balanced</span>
+            </div>
+            <label class="telemetry-toggle">
+              <input id="telemetry-opt-in" type="checkbox" />
+              启用匿名遥测（可选）
+            </label>
           </section>
         </div>
       </section>
+
     </div>
 
     <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>

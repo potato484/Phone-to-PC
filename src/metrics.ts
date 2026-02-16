@@ -1,4 +1,5 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import type { DesktopQualityProfile } from './ws/desktop-quality.js';
 
 export type WsChannelName = 'control' | 'terminal' | 'desktop';
 
@@ -30,9 +31,15 @@ export class MetricsRegistry {
     terminal: 0,
     desktop: 0
   };
+  private desktopQualityProfileConnections: Record<DesktopQualityProfile, number> = {
+    low: 0,
+    balanced: 0,
+    high: 0
+  };
   private wsAuthFailTotal = 0;
   private terminalSessionsActive = 0;
   private desktopUpstreamBufferedBytes = 0;
+  private desktopBackpressurePauseTotal = 0;
   private terminalSendBufferedBytes = 0;
   private readonly startedAt = Date.now();
 
@@ -62,6 +69,18 @@ export class MetricsRegistry {
 
   setDesktopUpstreamBufferedBytes(value: number): void {
     this.desktopUpstreamBufferedBytes = Math.max(0, Math.floor(toFiniteNumber(value)));
+  }
+
+  incDesktopQualityProfileConnection(profile: DesktopQualityProfile): void {
+    this.desktopQualityProfileConnections[profile] = Math.max(0, this.desktopQualityProfileConnections[profile] + 1);
+  }
+
+  incDesktopBackpressurePauseTotal(increment = 1): void {
+    const delta = Math.max(0, Math.floor(toFiniteNumber(increment, 1)));
+    if (delta === 0) {
+      return;
+    }
+    this.desktopBackpressurePauseTotal += delta;
   }
 
   setTerminalSendBufferedBytes(value: number): void {
@@ -138,6 +157,34 @@ export class MetricsRegistry {
     lines.push('# HELP c2p_desktop_upstream_buffered_bytes Buffered bytes on desktop upstream path');
     lines.push('# TYPE c2p_desktop_upstream_buffered_bytes gauge');
     lines.push(`c2p_desktop_upstream_buffered_bytes ${this.desktopUpstreamBufferedBytes}`);
+
+    lines.push('# HELP c2p_desktop_quality_connections_total Desktop connections by quality profile');
+    lines.push('# TYPE c2p_desktop_quality_connections_total counter');
+    lines.push(
+      formatMetricLine(
+        'c2p_desktop_quality_connections_total',
+        { profile: 'low' },
+        this.desktopQualityProfileConnections.low
+      )
+    );
+    lines.push(
+      formatMetricLine(
+        'c2p_desktop_quality_connections_total',
+        { profile: 'balanced' },
+        this.desktopQualityProfileConnections.balanced
+      )
+    );
+    lines.push(
+      formatMetricLine(
+        'c2p_desktop_quality_connections_total',
+        { profile: 'high' },
+        this.desktopQualityProfileConnections.high
+      )
+    );
+
+    lines.push('# HELP c2p_desktop_backpressure_pause_total Desktop upstream pauses due to websocket backpressure');
+    lines.push('# TYPE c2p_desktop_backpressure_pause_total counter');
+    lines.push(`c2p_desktop_backpressure_pause_total ${this.desktopBackpressurePauseTotal}`);
 
     lines.push('# HELP c2p_terminal_send_buffered_bytes Buffered bytes pending terminal send');
     lines.push('# TYPE c2p_terminal_send_buffered_bytes gauge');

@@ -8,9 +8,11 @@
 - 远程桌面 — noVNC 实时桌面控制
 - 文件管理 — 浏览、上传、下载
 - 系统监控 — CPU / 内存 / 网络实时采样
+- 连接质量评分（CQS）— RTT / 抖动 / 丢包实时评分与弱网档位联动
 - PWA — 离线缓存、可安装、Web Push 推送通知
 - 隧道穿透 — Tailscale（serve / funnel）、Cloudflare Tunnel、Quick Tunnel
 - 令牌认证 — bootstrap token 换取 24h access token，支持吊销与 WS 首帧鉴权
+- 匿名遥测（可选）— opt-in 事件上报与留存看板聚合接口
 
 ## 前置条件
 
@@ -162,7 +164,8 @@ src/
     ├── channel.ts     # WebSocket 通道基类
     ├── control.ts     # 控制通道（会话生命周期）
     ├── terminal.ts    # 终端通道（PTY 数据流）
-    └── desktop.ts     # 桌面通道（VNC）
+    ├── desktop.ts     # 桌面通道（VNC）
+    └── desktop-quality.ts # 桌面质量档位策略
 
 public/
 ├── index.html         # 主页面

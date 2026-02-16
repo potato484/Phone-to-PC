@@ -40,11 +40,18 @@ interface ControlKillMessage {
   sessionId: string;
 }
 
+interface ControlHeartbeatPingMessage {
+  type: 'heartbeat.ping';
+  seq?: number;
+  sentAt?: number;
+}
+
 type ControlMessage =
   | ControlHelloMessage
   | ControlSpawnMessage
   | ControlResizeMessage
-  | ControlKillMessage;
+  | ControlKillMessage
+  | ControlHeartbeatPingMessage;
 
 type ControlOutbound =
   | { type: 'auth.ok'; expiresAt: string }
@@ -53,6 +60,7 @@ type ControlOutbound =
   | { type: 'exited'; sessionId: string; exitCode: number }
   | { type: 'clipboard'; sessionId: string; text: string }
   | { type: 'sessions'; list: unknown[] }
+  | { type: 'heartbeat.pong'; seq: number; sentAt: number; serverAt: number }
   | { type: 'error'; message: string };
 
 interface ControlChannelDeps {
@@ -90,6 +98,14 @@ function shortenSessionId(sessionId: string): string {
     return sessionId;
   }
   return `${sessionId.slice(0, 6)}...${sessionId.slice(-4)}`;
+}
+
+function normalizeHeartbeatNumber(value: unknown): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(num));
 }
 
 function normalizeCapabilities(value: unknown): string[] {
@@ -184,6 +200,14 @@ function parseControlMessage(raw: RawData): ControlMessage | undefined {
     return {
       type: 'kill',
       sessionId: candidate.sessionId
+    };
+  }
+
+  if (candidate.type === 'heartbeat.ping') {
+    return {
+      type: 'heartbeat.ping',
+      seq: normalizeHeartbeatNumber(candidate.seq),
+      sentAt: normalizeHeartbeatNumber(candidate.sentAt)
     };
   }
 
@@ -312,6 +336,16 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
         if (message.type === 'hello') {
           const clientCapabilities = normalizeCapabilities(message.capabilities);
           sendControlMessage(ws, createHelloPayload(negotiateCapabilities(clientCapabilities)));
+          return;
+        }
+
+        if (message.type === 'heartbeat.ping') {
+          sendControlMessage(ws, {
+            type: 'heartbeat.pong',
+            seq: normalizeHeartbeatNumber(message.seq),
+            sentAt: normalizeHeartbeatNumber(message.sentAt),
+            serverAt: Date.now()
+          });
           return;
         }
 

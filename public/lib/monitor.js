@@ -62,9 +62,26 @@ function setText(node, text) {
   node.textContent = text;
 }
 
+function gradeLabel(grade) {
+  if (grade === 'excellent') {
+    return '优秀';
+  }
+  if (grade === 'good') {
+    return '良好';
+  }
+  if (grade === 'fair') {
+    return '一般';
+  }
+  if (grade === 'poor') {
+    return '较差';
+  }
+  return '离线';
+}
+
 export function createMonitor({ toast }) {
   let pollTimer = 0;
   let firstLoad = true;
+  let qualitySnapshot = null;
 
   async function fetchStats() {
     const response = await authedFetch(apiUrl('/api/system/stats'));
@@ -118,6 +135,31 @@ export function createMonitor({ toast }) {
     const mm = String(updatedAt.getMinutes()).padStart(2, '0');
     const ss = String(updatedAt.getSeconds()).padStart(2, '0');
     setText(DOM.monitorUpdatedAt, `${hh}:${mm}:${ss}`);
+
+    renderQuality();
+  }
+
+  function renderQuality() {
+    const snapshot = qualitySnapshot;
+    if (!snapshot || !snapshot.connected) {
+      setText(DOM.monitorCqsText, '离线');
+      setText(DOM.monitorRttText, 'RTT -');
+      setText(DOM.monitorJitterText, '抖动 -');
+      setText(DOM.monitorLossText, '丢包 -');
+      setText(DOM.monitorProfileText, `桌面档位 ${snapshot && snapshot.desktopProfile ? snapshot.desktopProfile : 'balanced'}`);
+      return;
+    }
+
+    const score = Number.isFinite(snapshot.score) ? Math.max(0, Math.min(100, Math.round(snapshot.score))) : 0;
+    const rttMs = Number.isFinite(snapshot.rttMs) ? Number(snapshot.rttMs).toFixed(1) : '-';
+    const jitterMs = Number.isFinite(snapshot.jitterMs) ? Number(snapshot.jitterMs).toFixed(1) : '-';
+    const lossPercent = Number.isFinite(snapshot.lossPercent) ? Number(snapshot.lossPercent).toFixed(1) : '-';
+
+    setText(DOM.monitorCqsText, `${score}/100 · ${gradeLabel(snapshot.grade)}`);
+    setText(DOM.monitorRttText, `RTT ${rttMs}ms`);
+    setText(DOM.monitorJitterText, `抖动 ${jitterMs}ms`);
+    setText(DOM.monitorLossText, `丢包 ${lossPercent}%`);
+    setText(DOM.monitorProfileText, `桌面档位 ${snapshot.desktopProfile || 'balanced'}`);
   }
 
   async function pollOnce() {
@@ -154,6 +196,10 @@ export function createMonitor({ toast }) {
     },
     refresh() {
       void pollOnce();
+    },
+    setConnectionQuality(snapshot) {
+      qualitySnapshot = snapshot || null;
+      renderQuality();
     }
   };
 }

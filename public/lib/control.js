@@ -15,7 +15,7 @@ function withReconnectJitter(baseDelayMs) {
   return Math.max(300, safeBase + jitter);
 }
 
-export function createControl({ term, sessionTabs, statusBar, toast, actions }) {
+export function createControl({ term, sessionTabs, statusBar, toast, actions, qualityMonitor, telemetry }) {
   return {
     send(payload) {
       if (!State.controlSocket || State.controlSocket.readyState !== WebSocket.OPEN) {
@@ -46,6 +46,14 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         State.controlConnected = true;
         statusBar.setControl('online');
         statusBar.setText('控制通道已鉴权');
+        if (qualityMonitor && typeof qualityMonitor.onControlReady === 'function') {
+          qualityMonitor.onControlReady();
+        }
+        if (telemetry && typeof telemetry.track === 'function') {
+          telemetry.track('control_authenticated', {
+            reconnectDelayMs: State.reconnectDelayMs
+          });
+        }
         if (State.controlSocket && State.controlSocket.readyState === WebSocket.OPEN) {
           State.controlSocket.send(
             JSON.stringify({
@@ -54,6 +62,13 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
               capabilities: CONTROL_CLIENT_CAPABILITIES
             })
           );
+        }
+        return;
+      }
+
+      if (payload.type === 'heartbeat.pong') {
+        if (qualityMonitor && typeof qualityMonitor.onPong === 'function') {
+          qualityMonitor.onPong(payload);
         }
         return;
       }
@@ -254,6 +269,9 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
         State.controlSocket = null;
         State.controlConnected = false;
         State.serverCapabilities = [];
+        if (qualityMonitor && typeof qualityMonitor.onControlClosed === 'function') {
+          qualityMonitor.onControlClosed();
+        }
         if (event.code === 4401) {
           window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
           State.token = '';

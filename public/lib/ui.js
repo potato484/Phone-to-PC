@@ -38,7 +38,7 @@ const SERVICE_WORKER_URL = '/sw.js?v=13';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 
-export function createUi({ getControl, getTerm }) {
+export function createUi({ getControl, getTerm, getTelemetry }) {
   let sessionCache = [];
 
   const Toast = {
@@ -867,6 +867,37 @@ export function createUi({ getControl, getTerm }) {
     }
   };
 
+  const TelemetryControls = {
+    sync() {
+      if (!DOM.telemetryOptIn) {
+        return;
+      }
+      const telemetry = typeof getTelemetry === 'function' ? getTelemetry() : null;
+      if (!telemetry || typeof telemetry.isEnabled !== 'function') {
+        DOM.telemetryOptIn.checked = false;
+        DOM.telemetryOptIn.disabled = true;
+        return;
+      }
+      DOM.telemetryOptIn.disabled = false;
+      DOM.telemetryOptIn.checked = telemetry.isEnabled();
+    },
+
+    bind() {
+      this.sync();
+      if (!DOM.telemetryOptIn) {
+        return;
+      }
+      DOM.telemetryOptIn.addEventListener('change', () => {
+        const telemetry = typeof getTelemetry === 'function' ? getTelemetry() : null;
+        if (!telemetry || typeof telemetry.setEnabled !== 'function') {
+          DOM.telemetryOptIn.checked = false;
+          return;
+        }
+        telemetry.setEnabled(DOM.telemetryOptIn.checked);
+      });
+    }
+  };
+
   const Network = {
     bind() {
       window.addEventListener(
@@ -1130,6 +1161,7 @@ export function createUi({ getControl, getTerm }) {
     Dock.bind();
     Dock.updateHeight();
     QuickKeys.bind();
+    TelemetryControls.bind();
     bindSessionCopy();
     Actions.bind();
     Auth.init().finally(() => {
@@ -1157,6 +1189,7 @@ export function createUi({ getControl, getTerm }) {
     SessionTabs,
     Actions,
     QuickKeys,
+    TelemetryControls,
     Network,
     Viewport,
     Auth,

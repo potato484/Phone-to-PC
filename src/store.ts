@@ -47,6 +47,30 @@ export interface SessionRecord {
   status: SessionStatus;
 }
 
+export interface TelemetryEventInput {
+  deviceId: string;
+  eventName: string;
+  sessionId?: string;
+  happenedAt: string;
+  payload: Record<string, unknown>;
+}
+
+export interface TelemetryEventRecord extends TelemetryEventInput {
+  id: number;
+}
+
+export interface TelemetryListOptions {
+  limit?: number;
+  since?: string;
+  eventName?: string;
+}
+
+export interface TelemetrySummary {
+  totalEvents: number;
+  uniqueDevices: number;
+  eventCounts: Array<{ eventName: string; count: number }>;
+}
+
 interface LegacyStoreData {
   tasks?: unknown;
   subscriptions?: unknown;
@@ -94,6 +118,21 @@ function normalizeIsoDate(value: unknown, fallback: string): string {
     return value;
   }
   return fallback;
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'string' || value.length === 0) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
 }
 
 function ensureDirectoryFor(filePath: string): void {
@@ -211,11 +250,23 @@ export class C2PStore {
         status TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS telemetry_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        session_id TEXT,
+        happened_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
       CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
       CREATE INDEX IF NOT EXISTS idx_tokens_expires_at ON tokens(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_telemetry_events_happened_at ON telemetry_events(happened_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_telemetry_events_name ON telemetry_events(event_name);
+      CREATE INDEX IF NOT EXISTS idx_telemetry_events_device_id ON telemetry_events(device_id);
     `);
   }
 
@@ -544,6 +595,89 @@ export class C2PStore {
       updatedAt: toStringValue(row.updated_at),
       status: normalizeSessionStatus(row.status)
     }));
+  }
+
+  addTelemetryEvent(event: TelemetryEventInput): void {
+    const payloadJson = JSON.stringify(event.payload || {});
+    this.db
+      .prepare(
+        `INSERT INTO telemetry_events (
+          device_id, event_name, session_id, happened_at, payload_json
+        ) VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(event.deviceId, event.eventName, event.sessionId ?? null, event.happenedAt, payloadJson);
+  }
+
+  listTelemetryEvents(options: TelemetryListOptions = {}): TelemetryEventRecord[] {
+    const rawLimit = Number(options.limit);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, Math.floor(rawLimit))) : 100;
+    const since = typeof options.since === 'string' && options.since.length > 0 ? options.since : '';
+    const eventName = typeof options.eventName === 'string' && options.eventName.length > 0 ? options.eventName : '';
+
+    const whereClauses: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (since) {
+      whereClauses.push('happened_at >= ?');
+      params.push(since);
+    }
+    if (eventName) {
+      whereClauses.push('event_name = ?');
+      params.push(eventName);
+    }
+
+    let sql =
+      'SELECT id, device_id, event_name, session_id, happened_at, payload_json FROM telemetry_events';
+    if (whereClauses.length > 0) {
+      sql += ` WHERE ${whereClauses.join(' AND ')}`;
+    }
+    sql += ' ORDER BY happened_at DESC, id DESC LIMIT ?';
+    params.push(limit);
+
+    const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: toInt(row.id, 0),
+      deviceId: toStringValue(row.device_id),
+      eventName: toStringValue(row.event_name),
+      sessionId: optionalString(row.session_id),
+      happenedAt: toStringValue(row.happened_at),
+      payload: parseJsonObject(row.payload_json)
+    }));
+  }
+
+  getTelemetrySummary(options: Omit<TelemetryListOptions, 'limit'> = {}): TelemetrySummary {
+    const since = typeof options.since === 'string' && options.since.length > 0 ? options.since : '';
+    const eventName = typeof options.eventName === 'string' && options.eventName.length > 0 ? options.eventName : '';
+
+    const whereClauses: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (since) {
+      whereClauses.push('happened_at >= ?');
+      params.push(since);
+    }
+    if (eventName) {
+      whereClauses.push('event_name = ?');
+      params.push(eventName);
+    }
+
+    const whereSql = whereClauses.length > 0 ? ` WHERE ${whereClauses.join(' AND ')}` : '';
+    const countSql = `SELECT COUNT(*) AS total, COUNT(DISTINCT device_id) AS devices FROM telemetry_events${whereSql}`;
+    const countRow = this.db.prepare(countSql).get(...params) as Record<string, unknown> | undefined;
+
+    const groupSql =
+      `SELECT event_name, COUNT(*) AS count FROM telemetry_events${whereSql}` +
+      ' GROUP BY event_name ORDER BY count DESC, event_name ASC';
+    const eventRows = this.db.prepare(groupSql).all(...params) as Array<Record<string, unknown>>;
+
+    return {
+      totalEvents: toInt(countRow?.total, 0),
+      uniqueDevices: toInt(countRow?.devices, 0),
+      eventCounts: eventRows.map((row) => ({
+        eventName: toStringValue(row.event_name),
+        count: toInt(row.count, 0)
+      }))
+    };
   }
 
   close(): void {

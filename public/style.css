@@ -219,7 +219,15 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
   font-size: 16px;
 }
 
-.terminal-pane-body { min-height: 0; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-x pan-y; }
+.terminal-pane-body {
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
+  touch-action: pan-x pan-y;
+}
 .terminal-pane-terminal { width: 100%; min-width: 960px; min-height: 96px; height: 100%; }
 
 .dock {
@@ -310,7 +318,6 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 }
 
 .quick-keys { display: grid; gap: 6px; }
-.quick-actions { margin-top: 8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .quick-key-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
 .quick-key-row[data-row="nav"] { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 
@@ -431,6 +438,30 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 .monitor-meter-fill { display: block; width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), var(--success)); transition: width 400ms var(--ease-out); }
 .monitor-value { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
 .monitor-inline { margin-top: 8px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; font-size: 11px; color: var(--text-muted); font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; }
+.monitor-quality-item { grid-template-columns: auto 1fr; }
+.monitor-quality-pill {
+  justify-self: end;
+  border: 1px solid var(--accent-glow);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--text);
+  background: var(--accent-dim);
+  font-weight: 600;
+}
+
+.telemetry-toggle {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.telemetry-toggle input {
+  min-height: 16px;
+  width: 16px;
+  margin: 0;
+}
 
 /* 2.4 视觉精修：Toast */
 .toast-root {
@@ -533,7 +564,6 @@ button:active { transform: scale(0.95); transition: transform 100ms var(--ease-s
 @media (max-width: 640px) {
   .files-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .quick-key-row[data-row="nav"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .quick-actions { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 460px) {

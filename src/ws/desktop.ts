@@ -9,6 +9,7 @@ import { getClientIp, type MemoryRateLimiter } from '../security.js';
 import type { VncManager } from '../vnc-manager.js';
 import { requireWsAuth } from './auth-gate.js';
 import type { WsChannel } from './channel.js';
+import { resolveDesktopQualityPolicy } from './desktop-quality.js';
 import { attachWsHeartbeat } from './heartbeat.js';
 import { WS_PER_MESSAGE_DEFLATE } from './ws-config.js';
 
@@ -19,11 +20,6 @@ interface DesktopChannelDeps {
   metrics: MetricsRegistry;
   wsAuthFailureLimiter: MemoryRateLimiter;
 }
-
-const DESKTOP_UPSTREAM_TIMEOUT_MS = 6_000;
-const DESKTOP_BACKPRESSURE_HIGH_BYTES = 1024 * 1024;
-const DESKTOP_BACKPRESSURE_LOW_BYTES = 256 * 1024;
-const DESKTOP_DRAIN_CHECK_MS = 16;
 
 function rawDataToBuffer(raw: RawData): Buffer {
   if (Buffer.isBuffer(raw)) {
@@ -52,7 +48,12 @@ export function createDesktopChannel(deps: DesktopChannelDeps): WsChannel {
   attachWsHeartbeat(wss);
 
   wss.on('connection', (ws, request) => {
+    const host = request.headers.host ?? 'localhost';
+    const parsed = new URL(request.url ?? '/', `http://${host}`);
+    const qualityPolicy = resolveDesktopQualityPolicy(parsed.searchParams.get('quality'));
+
     metrics.incWsConnection('desktop');
+    metrics.incDesktopQualityProfileConnection(qualityPolicy.profile);
     const remoteIp = getClientIp(request);
 
     ws.on('close', () => {
@@ -106,7 +107,7 @@ export function createDesktopChannel(deps: DesktopChannelDeps): WsChannel {
         if (!upstream || upstream.destroyed || !upstreamPaused) {
           return;
         }
-        if (ws.bufferedAmount <= DESKTOP_BACKPRESSURE_LOW_BYTES) {
+        if (ws.bufferedAmount <= qualityPolicy.backpressureLowBytes) {
           upstreamPaused = false;
           upstream.resume();
           clearDrainTimer();
@@ -116,7 +117,7 @@ export function createDesktopChannel(deps: DesktopChannelDeps): WsChannel {
           drainTimer = setTimeout(() => {
             drainTimer = null;
             maybeResumeUpstream();
-          }, DESKTOP_DRAIN_CHECK_MS);
+          }, qualityPolicy.drainCheckMs);
         }
       };
 
@@ -136,7 +137,7 @@ export function createDesktopChannel(deps: DesktopChannelDeps): WsChannel {
 
         const connectTimer = setTimeout(() => {
           closePair(1011, 'desktop upstream connect timeout');
-        }, DESKTOP_UPSTREAM_TIMEOUT_MS);
+        }, qualityPolicy.connectTimeoutMs);
 
         socket.once('connect', () => {
           clearTimeout(connectTimer);
@@ -156,9 +157,10 @@ export function createDesktopChannel(deps: DesktopChannelDeps): WsChannel {
             return;
           }
 
-          if (!upstreamPaused && ws.bufferedAmount > DESKTOP_BACKPRESSURE_HIGH_BYTES) {
+          if (!upstreamPaused && ws.bufferedAmount > qualityPolicy.backpressureHighBytes) {
             upstreamPaused = true;
             socket.pause();
+            metrics.incDesktopBackpressurePauseTotal();
           }
 
           ws.send(chunk, { binary: true }, (error) => {

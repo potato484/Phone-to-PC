@@ -38,6 +38,12 @@ export const DOM = {
   monitorNetTxText: document.getElementById('monitor-net-tx-text'),
   monitorUptimeText: document.getElementById('monitor-uptime-text'),
   monitorVncText: document.getElementById('monitor-vnc-text'),
+  monitorCqsText: document.getElementById('monitor-cqs-text'),
+  monitorRttText: document.getElementById('monitor-rtt-text'),
+  monitorJitterText: document.getElementById('monitor-jitter-text'),
+  monitorLossText: document.getElementById('monitor-loss-text'),
+  monitorProfileText: document.getElementById('monitor-profile-text'),
+  telemetryOptIn: document.getElementById('telemetry-opt-in'),
   toastRoot: document.getElementById('toast-root')
 };
 
@@ -131,7 +137,9 @@ export const State = {
   sessionOffsets: {},
   killRequestTimer: 0,
   killInFlight: false,
-  killRequested: false
+  killRequested: false,
+  desktopQualityProfile: 'balanced',
+  connectionQualitySnapshot: null
 };
 
 export function setSignalState(signalEl, stateClass) {

@@ -23,6 +23,8 @@ dist/
 .auth-token
 .c2p-store.json
 .c2p-sessions/
-方案初级版本
-方案进阶版本
+POC方案设计
+MVP方案设计
+PMF方案设计
 .pnpm-store
+GEMINI.md

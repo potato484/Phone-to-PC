@@ -3,6 +3,8 @@ import { DOM } from './state.js';
 const DIRECTION_LOCK_THRESHOLD_PX = 8;
 const LONG_PRESS_MS = 560;
 const LONG_PRESS_MOVE_CANCEL_PX = 12;
+const HORIZONTAL_INTENT_RATIO = 1.35;
+const VERTICAL_RECOVER_RATIO = 1.15;
 
 function touchDistance(touchA, touchB) {
   const dx = touchA.clientX - touchB.clientX;
@@ -171,6 +173,7 @@ export function createGestures({ getTerm, toast }) {
       (event) => {
         hideMenu();
         const touches = event.touches;
+
         if (touches.length === 2) {
           clearLongPress();
           suppressTouchEnd = false;
@@ -244,11 +247,20 @@ export function createGestures({ getTerm, toast }) {
         const touch = touches[0];
         const dx = touch.clientX - swipeStart.x;
         const dy = touch.clientY - swipeStart.y;
+        const absDx = Math.abs(dx);
+        const absDy = Math.abs(dy);
         if (
           !directionLock &&
-          (Math.abs(dx) >= DIRECTION_LOCK_THRESHOLD_PX || Math.abs(dy) >= DIRECTION_LOCK_THRESHOLD_PX)
+          (absDx >= DIRECTION_LOCK_THRESHOLD_PX || absDy >= DIRECTION_LOCK_THRESHOLD_PX)
         ) {
-          directionLock = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+          const preferHorizontal =
+            !!swipeStart.horizontalScrollTarget && absDx >= absDy * HORIZONTAL_INTENT_RATIO;
+          directionLock = preferHorizontal ? 'x' : 'y';
+        }
+        if (directionLock === 'x' && swipeStart.horizontalScrollTarget) {
+          if (absDy > absDx * VERTICAL_RECOVER_RATIO) {
+            directionLock = 'y';
+          }
         }
         if (directionLock === 'x' && swipeStart.horizontalScrollTarget) {
           const scroller = swipeStart.horizontalScrollTarget;
