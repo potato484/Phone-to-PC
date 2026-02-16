@@ -13,7 +13,6 @@ import {
   TERMINAL_FRAME_TYPE_INPUT,
   TERMINAL_FRAME_TYPE_OUTPUT,
   TERMINAL_MAX_PANES,
-  TERMINAL_REPLAY_TAIL_BYTES,
   TERMINAL_WRITE_HIGH_WATER_BYTES,
   TERMINAL_WRITE_LOW_WATER_BYTES,
   TerminalCtor,
@@ -22,8 +21,6 @@ import {
   createWsAuthMessage,
   decodeTerminalFrame,
   encodeTerminalFrame,
-  fetchSessionLogBytes,
-  getSessionOffset,
   setSessionOffset,
   shortenSessionId,
   textDecoder,
@@ -39,6 +36,12 @@ function clampFontSize(size) {
     return DEFAULT_FONT_SIZE;
   }
   return Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(size)));
+}
+
+function withReconnectJitter(baseDelayMs) {
+  const safeBase = Math.max(300, Math.floor(baseDelayMs));
+  const jitter = Math.round(safeBase * ((Math.random() * 0.4) - 0.2));
+  return Math.max(300, safeBase + jitter);
 }
 
 export function createTerm({ getControl, statusBar, toast, onActiveSessionChange }) {
@@ -415,13 +418,8 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
 
     let effectiveReplayFrom = 0;
-    if (Number.isFinite(replayFrom) && replayFrom >= 0) {
+    if (Number.isFinite(replayFrom) && replayFrom > 0) {
       effectiveReplayFrom = Math.floor(replayFrom);
-    } else if (!clearTerminal) {
-      effectiveReplayFrom = getSessionOffset(sessionId);
-    } else {
-      const logBytes = await fetchSessionLogBytes(sessionId);
-      effectiveReplayFrom = Math.max(0, logBytes - TERMINAL_REPLAY_TAIL_BYTES);
     }
     setSessionOffset(sessionId, effectiveReplayFrom);
 
@@ -439,6 +437,8 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (effectiveReplayFrom > 0) {
       extraParams.replayFrom = effectiveReplayFrom;
     }
+    extraParams.cols = pane.terminal.cols;
+    extraParams.rows = pane.terminal.rows;
     if (supportsBinaryCodec) {
       extraParams.codec = TERMINAL_BINARY_CODEC;
     }
@@ -566,10 +566,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (!pane || !pane.sessionId || !panes.has(pane.id)) {
       return;
     }
-    const replayFrom = getSessionOffset(pane.sessionId);
     await connectPane(pane, pane.sessionId, {
-      clearTerminal: false,
-      replayFrom: replayFrom >= 0 ? replayFrom : 0,
+      clearTerminal: true,
+      replayFrom: 0,
       keepReconnectDelay: true,
       cwd: pane.cwd
     });
@@ -580,7 +579,8 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       return;
     }
     clearPaneReconnectTimer(pane);
-    const delay = pane.reconnectDelayMs;
+    const baseDelay = Math.max(1000, pane.reconnectDelayMs);
+    const delay = withReconnectJitter(baseDelay);
     pane.reconnectDelayActive = delay;
     pane.reconnectStartedAt = Date.now();
     pane.reconnectTimer = window.setTimeout(() => {
@@ -590,7 +590,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       if (!pane.sessionId || !panes.has(pane.id)) {
         return;
       }
-      pane.reconnectDelayMs = Math.min(pane.reconnectDelayMs * 2, 20000);
+      pane.reconnectDelayMs = Math.min(baseDelay * 2, 30000);
       void reconnectPane(pane);
     }, delay);
 
@@ -963,10 +963,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         return;
       }
       if (pane.sessionId !== sessionId) {
-        const replayFrom = getSessionOffset(sessionId);
         await connectPane(pane, sessionId, {
-          clearTerminal: false,
-          replayFrom: replayFrom >= 0 ? replayFrom : 0,
+          clearTerminal: true,
+          replayFrom: 0,
           keepReconnectDelay: true
         });
       } else {

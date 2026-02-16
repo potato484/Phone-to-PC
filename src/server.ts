@@ -107,6 +107,48 @@ const ptyManager = new PtyManager(defaultWorkingDirectory);
 const pushService = new PushService(store);
 const vncManager = new VncManager();
 
+if (!ptyManager.isReady()) {
+  console.warn('[c2p] warn: tmux not available, terminal sessions will not be ready');
+} else {
+  const persistedSessions = store.listSessions().filter((session) => session.status !== 'killed');
+  const recovery = ptyManager.recoverSessions(persistedSessions);
+  const now = new Date().toISOString();
+
+  for (const session of [...recovery.recovered, ...recovery.discovered]) {
+    store.upsertSession({
+      id: session.id,
+      cli: session.cli,
+      cwd: session.cwd,
+      cols: session.cols,
+      rows: session.rows,
+      startedAt: session.startedAt,
+      updatedAt: now,
+      status: 'detached'
+    });
+  }
+
+  for (const missingId of recovery.missing) {
+    store.updateSession(missingId, {
+      status: 'killed',
+      updatedAt: now
+    });
+
+    const task = store.getTask(missingId);
+    if (task && task.status === 'running') {
+      store.updateTask(missingId, {
+        status: 'error',
+        finishedAt: now,
+        exitCode: 1
+      });
+    }
+  }
+
+  console.log(
+    `[c2p] tmux recovery: recovered=${recovery.recovered.length} discovered=${recovery.discovered.length} missing=${recovery.missing.length}`
+  );
+}
+metrics.setTerminalSessionsActive(ptyManager.listSessions().length);
+
 const originPolicy = createOriginHostPolicyFromEnv();
 const generalApiLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 100 });
 const uploadApiLimiter = new MemoryRateLimiter({ windowMs: 60_000, max: 10 });
@@ -155,14 +197,16 @@ app.get('/readyz', async (_req, res) => {
   const checks = {
     sqlitePing: store.ping(),
     sqliteWritable: store.isWritable(),
-    ptyReady: true,
+    ptyReady: ptyManager.isReady(),
     vncAvailable: false
   };
 
-  try {
-    checks.ptyReady = Array.isArray(ptyManager.listSessions());
-  } catch {
-    checks.ptyReady = false;
+  if (checks.ptyReady) {
+    try {
+      checks.ptyReady = Array.isArray(ptyManager.listSessions());
+    } catch {
+      checks.ptyReady = false;
+    }
   }
 
   try {
@@ -355,6 +399,7 @@ server.on('upgrade', (request, socket, head) => {
 
 server.on('close', () => {
   vncManager.dispose();
+  ptyManager.dispose();
   metrics.dispose();
   store.close();
 });

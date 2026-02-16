@@ -5,7 +5,7 @@ import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import type { AccessTokenService } from '../auth.js';
 import type { AuditLogger } from '../audit-log.js';
 import type { MetricsRegistry } from '../metrics.js';
-import type { PtyManager } from '../pty-manager.js';
+import type { PtyManager, TerminalAttachment } from '../pty-manager.js';
 import { getClientIp, type MemoryRateLimiter } from '../security.js';
 import { requireWsAuth } from './auth-gate.js';
 import type { WsChannel } from './channel.js';
@@ -38,6 +38,21 @@ function parseReplayOffset(value: string | null): number {
     return 0;
   }
   return parsed;
+}
+
+function parseDimension(value: string | null, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  const rounded = Math.floor(parsed);
+  if (rounded < 10 || rounded > 500) {
+    return fallback;
+  }
+  return rounded;
 }
 
 function useBinaryCodec(value: string | null): boolean {
@@ -132,20 +147,6 @@ async function streamLogRange(
   });
 }
 
-function trimChunkToOffset(
-  chunk: { data: string; startOffset: number; endOffset: number },
-  offset: number
-): string {
-  if (offset <= chunk.startOffset) {
-    return chunk.data;
-  }
-  if (offset >= chunk.endOffset) {
-    return '';
-  }
-  const skipBytes = offset - chunk.startOffset;
-  return Buffer.from(chunk.data, 'utf8').subarray(skipBytes).toString('utf8');
-}
-
 export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
   const { ptyManager, accessTokenService, auditLogger, metrics, wsAuthFailureLimiter } = deps;
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: WS_PER_MESSAGE_DEFLATE });
@@ -177,9 +178,23 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
       const sessionId = parsed.searchParams.get('session');
       const replayFrom = parseReplayOffset(parsed.searchParams.get('replayFrom'));
       const binaryCodec = useBinaryCodec(parsed.searchParams.get('codec'));
+      const attachCols = parseDimension(parsed.searchParams.get('cols'), 100);
+      const attachRows = parseDimension(parsed.searchParams.get('rows'), 30);
 
       if (!sessionId || !ptyManager.hasSession(sessionId)) {
         ws.close(1008, 'invalid session');
+        return;
+      }
+
+      let attachment: TerminalAttachment;
+      try {
+        attachment = ptyManager.attach(sessionId, {
+          cols: attachCols,
+          rows: attachRows
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'attach failed';
+        ws.close(1011, message.slice(0, 120));
         return;
       }
 
@@ -199,9 +214,9 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
       let flushTimer: NodeJS.Timeout | null = null;
       let drainTimer: NodeJS.Timeout | null = null;
       let flowPaused = false;
-      let replayReady = false;
-      let replayCursor = Math.max(0, replayFrom);
-      const liveQueue: Array<{ data: string; startOffset: number; endOffset: number }> = [];
+      let replayReady = replayFrom <= 0;
+      const liveQueue: string[] = [];
+      let closedByClient = false;
 
       const updateBufferedMetric = (): void => {
         metrics.setTerminalSendBufferedBytes(queuedBytes + ws.bufferedAmount);
@@ -212,7 +227,7 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
           return;
         }
         flowPaused = false;
-        ptyManager.resumeOutput(sessionId);
+        attachment.resumeOutput();
       };
 
       const maybeReleaseFlowControl = (): void => {
@@ -233,7 +248,7 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
           return;
         }
         flowPaused = true;
-        ptyManager.pauseOutput(sessionId);
+        attachment.pauseOutput();
       };
 
       const clearTimers = (): void => {
@@ -341,62 +356,48 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
       const flushLiveQueue = (): void => {
         while (liveQueue.length > 0) {
           const chunk = liveQueue.shift();
-          if (!chunk || chunk.endOffset <= replayCursor) {
+          if (!chunk) {
             continue;
           }
-          const text = trimChunkToOffset(chunk, replayCursor);
-          replayCursor = chunk.endOffset;
-          if (text.length > 0) {
-            enqueueOutput(text);
-          }
+          enqueueOutput(chunk);
         }
       };
 
-      const offDataChunk = ptyManager.onDataChunk((id, chunk) => {
-        if (id !== sessionId) {
-          return;
-        }
+      const offData = attachment.onData((chunk) => {
         if (!replayReady) {
-          liveQueue.push(chunk);
+          liveQueue.push(chunk.data);
           return;
         }
-        if (chunk.endOffset <= replayCursor) {
+        enqueueOutput(chunk.data);
+      });
+
+      const offAttachExit = attachment.onExit(() => {
+        if (closedByClient) {
           return;
         }
-        const text = trimChunkToOffset(chunk, replayCursor);
-        replayCursor = chunk.endOffset;
-        if (text.length > 0) {
-          enqueueOutput(text);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close(1000, ptyManager.hasSession(sessionId) ? 'terminal detached' : 'session exited');
         }
       });
 
-      const offExit = ptyManager.onExit((id) => {
-        if (id === sessionId && ws.readyState === WebSocket.OPEN) {
-          ws.close(1000, 'session exited');
-        }
-      });
-
-      void (async () => {
-        const logPath = ptyManager.getLogPath(sessionId);
-        const snapshotEnd = ptyManager.getLogBytes(sessionId);
-        const replayStart = Math.min(replayCursor, snapshotEnd);
-        replayCursor = replayStart;
-        if (logPath && replayStart < snapshotEnd) {
-          try {
-            await streamLogRange(logPath, replayStart, snapshotEnd, enqueueOutput);
-          } catch {
-            // skip replay on read failure and continue with live data
+      if (replayFrom > 0) {
+        void (async () => {
+          const logPath = ptyManager.getLogPath(sessionId);
+          const snapshotEnd = ptyManager.getLogBytes(sessionId);
+          const replayStart = Math.min(replayFrom, snapshotEnd);
+          if (logPath && replayStart < snapshotEnd) {
+            try {
+              await streamLogRange(logPath, replayStart, snapshotEnd, enqueueOutput);
+            } catch {
+              // replay is optional and should not block the attach stream.
+            }
           }
-        }
-        replayCursor = Math.max(replayCursor, snapshotEnd);
-        replayReady = true;
-        flushLiveQueue();
-      })();
+          replayReady = true;
+          flushLiveQueue();
+        })();
+      }
 
       ws.on('message', (raw, isBinary) => {
-        if (!ptyManager.hasSession(sessionId)) {
-          return;
-        }
         if (isBinary) {
           const frame = decodeTerminalFrame(raw, sessionHash);
           if (!frame || frame.frameType !== TERMINAL_FRAME_TYPE_INPUT) {
@@ -404,18 +405,20 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
             return;
           }
           if (frame.payload.byteLength > 0) {
-            ptyManager.write(sessionId, frame.payload.toString('utf8'));
+            attachment.write(frame.payload.toString('utf8'));
           }
           return;
         }
-        ptyManager.write(sessionId, rawDataToString(raw));
+        attachment.write(rawDataToString(raw));
       });
 
       ws.on('close', () => {
+        closedByClient = true;
         clearTimers();
         releaseFlowControl();
-        offDataChunk();
-        offExit();
+        offData();
+        offAttachExit();
+        attachment.close();
         updateBufferedMetric();
         auditLogger.log({
           event: 'session.terminal_detach',

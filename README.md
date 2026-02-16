@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 远程终端 — 多会话 PTY，xterm.js + WebGL 渲染，OSC 52 剪贴板
+- 远程终端 — tmux 持久化会话，xterm.js + WebGL 渲染，OSC 52 剪贴板
 - 远程桌面 — noVNC 实时桌面控制
 - 文件管理 — 浏览、上传、下载
 - 系统监控 — CPU / 内存 / 网络实时采样
@@ -21,6 +21,7 @@
 | Node.js | >= 18 | 运行时，需支持 ES2022 |
 | pnpm | >= 8 | 包管理器 |
 | 构建工具链 | — | `node-pty` 需要本地编译（`python3`、`make`、`gcc`/`g++`） |
+| tmux | >= 3 | 终端会话持久化与重启恢复 |
 
 Linux 上安装编译依赖：
 
@@ -105,11 +106,11 @@ cp .env.example .env
 
 ### 认证
 
-服务首次启动时自动生成 `.auth-token` 文件（64 位 hex），后续启动复用。Token 通过以下方式传递：
+服务首次启动时自动生成 `.auth-token`（bootstrap token），用于换取 24h access token：
 
-- URL hash：`http://host:port/#token=<token>`
-- Query 参数：`?token=<token>`
-- Header：`X-Auth-Token: <token>` 或 `Authorization: Bearer <token>`
+- 首次访问：`http://host:port/#token=<bootstrap_token>`
+- 访问令牌：REST 仅支持 `Authorization: Bearer <access_token>`
+- WebSocket：连接后 2s 内发送首帧 `{\"type\":\"auth\",\"token\":\"<access_token>\"}`
 
 ### CLI 参数
 
@@ -124,6 +125,13 @@ pnpm start -- --cwd=/path/to/workspace
 # 编译 TypeScript
 pnpm build
 
+# 自动化测试（单测 + 集成）
+pnpm test
+
+# 重连与并发基线脚本
+pnpm bench:reconnect -- --base-url=http://127.0.0.1:3000
+pnpm bench:session-load -- --base-url=http://127.0.0.1:3000 --concurrency=20
+
 # 生产启动
 pnpm start
 
@@ -137,7 +145,7 @@ node dist/server.js --cwd=/home/user/projects
 src/
 ├── server.ts          # 入口，Express + WebSocket 初始化
 ├── auth.ts            # 令牌认证
-├── pty-manager.ts     # PTY 多会话管理
+├── pty-manager.ts     # tmux 会话管理与恢复
 ├── vnc-manager.ts     # VNC 桌面控制
 ├── tunnel.ts          # 隧道穿透（Tailscale / Cloudflare）
 ├── push.ts            # Web Push 推送

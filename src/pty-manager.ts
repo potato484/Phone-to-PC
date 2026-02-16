@@ -1,21 +1,22 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, type IPty } from 'node-pty';
-import type { CliKind } from './store.js';
+import type { CliKind, SessionRecord as StoreSessionRecord } from './store.js';
 
-const BUFFER_LIMIT_BYTES = 50 * 1024;
-const BUFFER_FLUSH_INTERVAL_MS = 4;
-const RING_INITIAL_CAPACITY = 16;
 const SESSION_LOG_DIR = path.join(process.cwd(), '.c2p-sessions');
 const SESSION_LOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const TMUX_SESSION_PREFIX = 'c2p-';
+const TMUX_POLL_INTERVAL_MS = 1500;
+const ATTACH_KILL_ESCALATION_DELAY_MS = 1200;
 const FLOW_CONTROL_PAUSE = '\u0013';
 const FLOW_CONTROL_RESUME = '\u0011';
-const KILL_ESCALATION_DELAY_MS = 1500;
 const OSC52_START = '\u001b]52;';
 const OSC52_BEL = '\u0007';
 const OSC52_ST = '\u001b\\';
 const OSC52_MAX_CARRY_CHARS = 8192;
 const OSC52_MAX_TEXT_BYTES = 128 * 1024;
+const SESSION_ID_PATTERN = /^[a-zA-Z0-9-]+$/;
 
 export interface SpawnOptions {
   id: string;
@@ -34,43 +35,40 @@ export interface SessionInfo {
   startedAt: string;
 }
 
-interface SessionRecord {
+export interface RecoverSessionsResult {
+  recovered: SessionInfo[];
+  discovered: SessionInfo[];
+  missing: string[];
+}
+
+export interface AttachmentChunk {
+  data: string;
+  startOffset: number;
+  endOffset: number;
+  byteLength: number;
+}
+
+export interface TerminalAttachment {
+  write(data: string | Buffer): void;
+  resize(cols: number, rows: number): void;
+  pauseOutput(): void;
+  resumeOutput(): void;
+  close(): void;
+  onData(listener: (chunk: AttachmentChunk) => void): () => void;
+  onExit(listener: (exitCode: number) => void): () => void;
+}
+
+interface SessionRuntime {
   info: SessionInfo;
-  pty: IPty;
-  buffer: BufferRing;
-  pendingData: PendingChunk[];
-  flushTimer: NodeJS.Timeout | null;
-  killTimer: NodeJS.Timeout | null;
-  logStream: fs.WriteStream | null;
   logPath: string;
-  logBytes: number;
-  outputPaused: boolean;
-  osc52Carry: string;
 }
 
-type DataListener = (sessionId: string, data: string) => void;
-export interface DataChunk {
-  data: string;
-  startOffset: number;
-  endOffset: number;
-  byteLength: number;
-}
-type DataChunkListener = (sessionId: string, chunk: DataChunk) => void;
-type ExitListener = (sessionId: string, exitCode: number) => void;
-type ClipboardListener = (sessionId: string, text: string) => void;
-
-interface PendingChunk {
-  data: string;
-  startOffset: number;
-  endOffset: number;
-  byteLength: number;
-}
-
-interface BufferRing {
-  chunks: Array<Buffer | undefined>;
-  head: number;
-  length: number;
-  totalBytes: number;
+interface TmuxSessionSnapshot {
+  id: string;
+  cwd: string;
+  cols: number;
+  rows: number;
+  startedAt: string;
 }
 
 function resolveDirectory(rawPath: string | undefined): string | undefined {
@@ -95,63 +93,62 @@ function normalizeCwd(rawCwd: string | undefined, fallbackCwd: string): string {
   return resolveDirectory(rawCwd) ?? resolveDirectory(fallbackCwd) ?? process.cwd();
 }
 
-function createBufferRing(capacity = RING_INITIAL_CAPACITY): BufferRing {
-  return {
-    chunks: new Array<Buffer | undefined>(capacity),
-    head: 0,
-    length: 0,
-    totalBytes: 0
-  };
+function normalizeDimension(value: unknown, fallback: number): number {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  const rounded = Math.floor(parsed);
+  if (rounded < 10 || rounded > 500) {
+    return fallback;
+  }
+  return rounded;
 }
 
-function ensureRingCapacity(ring: BufferRing): void {
-  if (ring.length < ring.chunks.length) {
-    return;
+function normalizeStartedAt(value: unknown, fallback: string): string {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value;
   }
-  const nextChunks = new Array<Buffer | undefined>(ring.chunks.length * 2);
-  for (let i = 0; i < ring.length; i += 1) {
-    const sourceIndex = (ring.head + i) % ring.chunks.length;
-    nextChunks[i] = ring.chunks[sourceIndex];
-  }
-  ring.chunks = nextChunks;
-  ring.head = 0;
+  return fallback;
 }
 
-function pushRingChunk(ring: BufferRing, chunk: Buffer): void {
-  ensureRingCapacity(ring);
-  const tail = (ring.head + ring.length) % ring.chunks.length;
-  ring.chunks[tail] = chunk;
-  ring.length += 1;
-  ring.totalBytes += chunk.byteLength;
+function toIsoFromEpochSeconds(value: unknown, fallback: string): string {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return new Date(parsed * 1000).toISOString();
 }
 
-function shiftRingChunk(ring: BufferRing): Buffer | undefined {
-  if (ring.length === 0) {
-    return undefined;
+function toSessionId(tmuxSessionName: string): string | null {
+  if (!tmuxSessionName.startsWith(TMUX_SESSION_PREFIX)) {
+    return null;
   }
-  const chunk = ring.chunks[ring.head];
-  ring.chunks[ring.head] = undefined;
-  ring.head = (ring.head + 1) % ring.chunks.length;
-  ring.length -= 1;
-  if (chunk) {
-    ring.totalBytes -= chunk.byteLength;
+  const sessionId = tmuxSessionName.slice(TMUX_SESSION_PREFIX.length).trim();
+  if (!sessionId || !SESSION_ID_PATTERN.test(sessionId)) {
+    return null;
   }
-  return chunk;
+  return sessionId;
 }
 
-function ringToBufferArray(ring: BufferRing): Buffer[] {
-  const result: Buffer[] = [];
-  for (let i = 0; i < ring.length; i += 1) {
-    const chunk = ring.chunks[(ring.head + i) % ring.chunks.length];
-    if (chunk) {
-      result.push(chunk);
-    }
-  }
-  return result;
+function toTmuxSessionName(sessionId: string): string {
+  return `${TMUX_SESSION_PREFIX}${sessionId}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function buildCliCommand(_cli: CliKind): string | null {
   return null;
+}
+
+function buildTmuxShellCommand(cli: CliKind): string {
+  const command = buildCliCommand(cli);
+  if (!command) {
+    return '/bin/bash -l';
+  }
+  return `/bin/bash -lc ${shellQuote(command)}`;
 }
 
 function parseOsc52Clipboard(data: string, carry: string): { clipboardTexts: string[]; carry: string } {
@@ -213,23 +210,136 @@ function parseOsc52Clipboard(data: string, carry: string): { clipboardTexts: str
   };
 }
 
+function readExecErrorMessage(error: unknown): string {
+  if (!error || typeof error !== 'object') {
+    return String(error);
+  }
+  const err = error as NodeJS.ErrnoException & {
+    stderr?: Buffer | string;
+    output?: Array<Buffer | string | null>;
+  };
+
+  if (typeof err.stderr === 'string' && err.stderr.trim().length > 0) {
+    return err.stderr.trim();
+  }
+  if (Buffer.isBuffer(err.stderr) && err.stderr.length > 0) {
+    return err.stderr.toString('utf8').trim();
+  }
+  if (Array.isArray(err.output)) {
+    for (const item of err.output) {
+      if (!item) {
+        continue;
+      }
+      if (typeof item === 'string' && item.trim().length > 0) {
+        return item.trim();
+      }
+      if (Buffer.isBuffer(item) && item.length > 0) {
+        return item.toString('utf8').trim();
+      }
+    }
+  }
+  return err.message || 'unknown error';
+}
+
+function isTmuxNoServerError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('failed to connect to server') ||
+    lower.includes('no server running on') ||
+    lower.includes('no such file or directory')
+  );
+}
+
 export class PtyManager {
   private readonly defaultCwd: string;
-  private readonly sessions = new Map<string, SessionRecord>();
-  private readonly dataListeners = new Set<DataListener>();
-  private readonly dataChunkListeners = new Set<DataChunkListener>();
-  private readonly exitListeners = new Set<ExitListener>();
-  private readonly clipboardListeners = new Set<ClipboardListener>();
+  private readonly tmuxBin: string;
+  private readonly sessions = new Map<string, SessionRuntime>();
+  private readonly exitListeners = new Set<(sessionId: string, exitCode: number) => void>();
+  private readonly clipboardListeners = new Set<(sessionId: string, text: string) => void>();
+  private pollTimer: NodeJS.Timeout | null = null;
+  private readonly tmuxReady: boolean;
 
   constructor(defaultCwd = process.cwd()) {
     this.defaultCwd = normalizeCwd(defaultCwd, process.cwd());
+    this.tmuxBin = (process.env.C2P_TMUX_BIN ?? 'tmux').trim() || 'tmux';
+
     fs.mkdirSync(SESSION_LOG_DIR, { recursive: true });
     this.cleanStaleLogFiles();
+
+    this.tmuxReady = this.detectTmuxAvailability();
+    if (this.tmuxReady) {
+      this.startSessionPoll();
+    }
+  }
+
+  isReady(): boolean {
+    return this.tmuxReady;
+  }
+
+  dispose(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  private detectTmuxAvailability(): boolean {
+    try {
+      execFileSync(this.tmuxBin, ['-V'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private ensureTmuxAvailable(): void {
+    if (!this.tmuxReady) {
+      throw new Error('tmux is required but not available; install tmux or set C2P_TMUX_BIN');
+    }
+  }
+
+  private runTmux(
+    args: string[],
+    options: {
+      allowNoServer?: boolean;
+      allowFailure?: boolean;
+    } = {}
+  ): string {
+    this.ensureTmuxAvailable();
+    try {
+      const output = execFileSync(this.tmuxBin, args, {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      return typeof output === 'string' ? output : String(output);
+    } catch (error) {
+      const message = readExecErrorMessage(error);
+      if (options.allowNoServer && isTmuxNoServerError(message)) {
+        return '';
+      }
+      if (options.allowFailure) {
+        return '';
+      }
+      throw new Error(`tmux ${args.join(' ')} failed: ${message}`);
+    }
+  }
+
+  private startSessionPoll(): void {
+    if (this.pollTimer) {
+      return;
+    }
+    this.pollTimer = setInterval(() => {
+      this.syncWithTmux();
+    }, TMUX_POLL_INTERVAL_MS);
+    this.pollTimer.unref();
   }
 
   private resolveSessionLogPath(sessionId: string): string | null {
     const normalized = sessionId.trim();
-    if (!normalized || !/^[a-zA-Z0-9-]+$/.test(normalized)) {
+    if (!normalized || !SESSION_ID_PATTERN.test(normalized)) {
       return null;
     }
     return path.join(SESSION_LOG_DIR, `${normalized}.log`);
@@ -260,248 +370,430 @@ export class PtyManager {
     }
   }
 
-  private flushData(sessionId: string, record: SessionRecord): void {
-    record.flushTimer = null;
-    if (record.pendingData.length === 0) {
+  private listTmuxSessionSnapshots(): Map<string, TmuxSessionSnapshot> {
+    const output = this.runTmux(
+      ['list-panes', '-a', '-F', '#{session_name}\t#{pane_current_path}\t#{window_width}\t#{window_height}\t#{session_created}'],
+      {
+        allowNoServer: true
+      }
+    );
+
+    const snapshots = new Map<string, TmuxSessionSnapshot>();
+    const nowIso = new Date().toISOString();
+
+    for (const line of output.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const [rawSessionName, rawCwd, rawCols, rawRows, rawCreated] = trimmed.split('\t');
+      if (!rawSessionName) {
+        continue;
+      }
+      const sessionId = toSessionId(rawSessionName);
+      if (!sessionId || snapshots.has(sessionId)) {
+        continue;
+      }
+
+      snapshots.set(sessionId, {
+        id: sessionId,
+        cwd: normalizeCwd(rawCwd, this.defaultCwd),
+        cols: normalizeDimension(rawCols, 100),
+        rows: normalizeDimension(rawRows, 30),
+        startedAt: toIsoFromEpochSeconds(rawCreated, nowIso)
+      });
+    }
+
+    return snapshots;
+  }
+
+  private resolvePrimaryPaneTarget(sessionId: string): string | null {
+    const output = this.runTmux(['list-panes', '-t', toTmuxSessionName(sessionId), '-F', '#{pane_id}'], {
+      allowFailure: true,
+      allowNoServer: true
+    });
+    const paneId = output
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    return paneId ?? null;
+  }
+
+  private ensureSessionLogPipe(sessionId: string, logPath: string): void {
+    const paneTarget = this.resolvePrimaryPaneTarget(sessionId);
+    if (!paneTarget) {
       return;
     }
-    const chunks = record.pendingData.slice();
-    const merged = chunks.map((chunk) => chunk.data).join('');
-    record.pendingData.length = 0;
-    for (const listener of this.dataListeners) {
-      listener(sessionId, merged);
+
+    try {
+      fs.closeSync(fs.openSync(logPath, 'a', 0o600));
+    } catch {
+      // ignore log pre-create errors and rely on pipe command.
     }
-    if (this.dataChunkListeners.size > 0) {
-      for (const chunk of chunks) {
-        const payload: DataChunk = {
-          data: chunk.data,
-          startOffset: chunk.startOffset,
-          endOffset: chunk.endOffset,
-          byteLength: chunk.byteLength
-        };
-        for (const listener of this.dataChunkListeners) {
-          listener(sessionId, payload);
-        }
+
+    const pipeCommand = `cat >> ${shellQuote(logPath)}`;
+    this.runTmux(['pipe-pane', '-o', '-t', paneTarget, pipeCommand], {
+      allowFailure: true,
+      allowNoServer: true
+    });
+  }
+
+  private addOrUpdateSession(info: SessionInfo): void {
+    const logPath = this.resolveSessionLogPath(info.id);
+    if (!logPath) {
+      return;
+    }
+    this.sessions.set(info.id, {
+      info: {
+        ...info
+      },
+      logPath
+    });
+    this.ensureSessionLogPipe(info.id, logPath);
+  }
+
+  private removeSession(sessionId: string, exitCode: number): void {
+    const removed = this.sessions.delete(sessionId);
+    if (!removed) {
+      return;
+    }
+    for (const listener of this.exitListeners) {
+      listener(sessionId, exitCode);
+    }
+  }
+
+  private syncWithTmux(): void {
+    if (!this.tmuxReady) {
+      return;
+    }
+
+    const snapshots = this.listTmuxSessionSnapshots();
+    const nowIso = new Date().toISOString();
+
+    for (const existing of this.sessions.values()) {
+      const snapshot = snapshots.get(existing.info.id);
+      if (!snapshot) {
+        continue;
+      }
+      existing.info.cwd = snapshot.cwd;
+      existing.info.cols = snapshot.cols;
+      existing.info.rows = snapshot.rows;
+    }
+
+    for (const sessionId of Array.from(this.sessions.keys())) {
+      if (!snapshots.has(sessionId)) {
+        this.removeSession(sessionId, 0);
       }
     }
-  }
 
-  private scheduleDataFlush(sessionId: string, record: SessionRecord): void {
-    if (record.flushTimer) {
-      return;
+    for (const snapshot of snapshots.values()) {
+      if (this.sessions.has(snapshot.id)) {
+        continue;
+      }
+      this.addOrUpdateSession({
+        id: snapshot.id,
+        cli: 'shell',
+        cwd: normalizeCwd(snapshot.cwd, this.defaultCwd),
+        cols: normalizeDimension(snapshot.cols, 100),
+        rows: normalizeDimension(snapshot.rows, 30),
+        startedAt: normalizeStartedAt(snapshot.startedAt, nowIso)
+      });
     }
-    record.flushTimer = setTimeout(() => {
-      this.flushData(sessionId, record);
-    }, BUFFER_FLUSH_INTERVAL_MS);
   }
 
-  onData(listener: DataListener): () => void {
-    this.dataListeners.add(listener);
-    return () => this.dataListeners.delete(listener);
-  }
-
-  onDataChunk(listener: DataChunkListener): () => void {
-    this.dataChunkListeners.add(listener);
-    return () => this.dataChunkListeners.delete(listener);
-  }
-
-  onExit(listener: ExitListener): () => void {
+  onExit(listener: (sessionId: string, exitCode: number) => void): () => void {
     this.exitListeners.add(listener);
     return () => this.exitListeners.delete(listener);
   }
 
-  onClipboard(listener: ClipboardListener): () => void {
+  onClipboard(listener: (sessionId: string, text: string) => void): () => void {
     this.clipboardListeners.add(listener);
     return () => this.clipboardListeners.delete(listener);
   }
 
-  spawn(options: SpawnOptions): SessionInfo {
-    if (this.sessions.has(options.id)) {
-      throw new Error(`Session already exists: ${options.id}`);
+  recoverSessions(records: StoreSessionRecord[]): RecoverSessionsResult {
+    if (!this.tmuxReady) {
+      return {
+        recovered: [],
+        discovered: [],
+        missing: records.map((record) => record.id)
+      };
     }
-    const logPath = this.resolveSessionLogPath(options.id);
-    if (!logPath) {
+
+    const snapshots = this.listTmuxSessionSnapshots();
+    const nowIso = new Date().toISOString();
+    const recovered: SessionInfo[] = [];
+    const discovered: SessionInfo[] = [];
+    const missing: string[] = [];
+
+    for (const record of records) {
+      if (!record || typeof record.id !== 'string' || !SESSION_ID_PATTERN.test(record.id)) {
+        continue;
+      }
+
+      const snapshot = snapshots.get(record.id);
+      if (!snapshot) {
+        missing.push(record.id);
+        continue;
+      }
+
+      const info: SessionInfo = {
+        id: record.id,
+        cli: record.cli === 'shell' ? 'shell' : 'shell',
+        cwd: normalizeCwd(snapshot.cwd || record.cwd, this.defaultCwd),
+        cols: normalizeDimension(snapshot.cols, normalizeDimension(record.cols, 100)),
+        rows: normalizeDimension(snapshot.rows, normalizeDimension(record.rows, 30)),
+        startedAt: normalizeStartedAt(record.startedAt, snapshot.startedAt || nowIso)
+      };
+
+      this.addOrUpdateSession(info);
+      recovered.push({ ...info });
+      snapshots.delete(record.id);
+    }
+
+    for (const snapshot of snapshots.values()) {
+      const info: SessionInfo = {
+        id: snapshot.id,
+        cli: 'shell',
+        cwd: normalizeCwd(snapshot.cwd, this.defaultCwd),
+        cols: normalizeDimension(snapshot.cols, 100),
+        rows: normalizeDimension(snapshot.rows, 30),
+        startedAt: normalizeStartedAt(snapshot.startedAt, nowIso)
+      };
+      this.addOrUpdateSession(info);
+      discovered.push({ ...info });
+    }
+
+    return {
+      recovered,
+      discovered,
+      missing
+    };
+  }
+
+  spawn(options: SpawnOptions): SessionInfo {
+    this.ensureTmuxAvailable();
+
+    const sessionId = options.id.trim();
+    if (!sessionId || !SESSION_ID_PATTERN.test(sessionId)) {
       throw new Error(`Invalid session id: ${options.id}`);
+    }
+    if (this.sessions.has(sessionId)) {
+      throw new Error(`Session already exists: ${sessionId}`);
     }
 
     const cwd = normalizeCwd(options.cwd, this.defaultCwd);
-    const command = buildCliCommand(options.cli);
+    const cols = normalizeDimension(options.cols, 100);
+    const rows = normalizeDimension(options.rows, 30);
+    const shellCommand = buildTmuxShellCommand(options.cli);
 
-    const pty = command
-      ? spawn('/bin/bash', ['-lc', command], {
-          name: 'xterm-256color',
-          cols: options.cols,
-          rows: options.rows,
-          handleFlowControl: true,
-          cwd,
-          env: {
-            ...process.env,
-            TERM: 'xterm-256color'
-          }
-        })
-      : spawn('/bin/bash', ['-l'], {
-          name: 'xterm-256color',
-          cols: options.cols,
-          rows: options.rows,
-          handleFlowControl: true,
-          cwd,
-          env: {
-            ...process.env,
-            TERM: 'xterm-256color'
-          }
-        });
+    this.runTmux([
+      'new-session',
+      '-d',
+      '-s',
+      toTmuxSessionName(sessionId),
+      '-x',
+      String(cols),
+      '-y',
+      String(rows),
+      '-c',
+      cwd,
+      shellCommand
+    ]);
 
     const info: SessionInfo = {
-      id: options.id,
+      id: sessionId,
       cli: options.cli,
       cwd,
-      cols: options.cols,
-      rows: options.rows,
+      cols,
+      rows,
       startedAt: new Date().toISOString()
     };
 
-    let existingLogBytes = 0;
-    try {
-      existingLogBytes = fs.statSync(logPath).size;
-    } catch {
-      existingLogBytes = 0;
-    }
-
-    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-    logStream.on('error', (error) => {
-      console.warn(`[c2p] session log write failed (${options.id}): ${error.message}`);
-    });
-
-    const record: SessionRecord = {
-      info,
-      pty,
-      buffer: createBufferRing(),
-      pendingData: [],
-      flushTimer: null,
-      killTimer: null,
-      logStream,
-      logPath,
-      logBytes: existingLogBytes,
-      outputPaused: false,
-      osc52Carry: ''
-    };
-
-    pty.onData((data) => {
-      const chunk = Buffer.from(data, 'utf8');
-      pushRingChunk(record.buffer, chunk);
-
-      while (record.buffer.totalBytes > BUFFER_LIMIT_BYTES && record.buffer.length > 0) {
-        shiftRingChunk(record.buffer);
-      }
-      if (record.logStream && !record.logStream.destroyed) {
-        record.logStream.write(chunk);
-      }
-      const startOffset = record.logBytes;
-      record.logBytes += chunk.byteLength;
-      record.pendingData.push({
-        data,
-        startOffset,
-        endOffset: record.logBytes,
-        byteLength: chunk.byteLength
-      });
-      const osc52 = parseOsc52Clipboard(data, record.osc52Carry);
-      record.osc52Carry = osc52.carry;
-      if (osc52.clipboardTexts.length > 0 && this.clipboardListeners.size > 0) {
-        for (const text of osc52.clipboardTexts) {
-          for (const listener of this.clipboardListeners) {
-            listener(options.id, text);
-          }
-        }
-      }
-      this.scheduleDataFlush(options.id, record);
-    });
-
-    pty.onExit(({ exitCode }) => {
-      if (record.flushTimer) {
-        clearTimeout(record.flushTimer);
-        record.flushTimer = null;
-      }
-      if (record.killTimer) {
-        clearTimeout(record.killTimer);
-        record.killTimer = null;
-      }
-      this.flushData(options.id, record);
-      if (record.logStream) {
-        record.logStream.end();
-        record.logStream = null;
-      }
-      this.sessions.delete(options.id);
-      for (const listener of this.exitListeners) {
-        listener(options.id, exitCode);
-      }
-    });
-
-    this.sessions.set(options.id, record);
+    this.addOrUpdateSession(info);
     return info;
   }
 
-  write(sessionId: string, data: string | Buffer): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
-      return;
+  attach(sessionId: string, options: { cols: number; rows: number }): TerminalAttachment {
+    this.ensureTmuxAvailable();
+
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime) {
+      throw new Error(`Session not found: ${sessionId}`);
     }
-    session.pty.write(data);
+
+    const cols = normalizeDimension(options.cols, runtime.info.cols);
+    const rows = normalizeDimension(options.rows, runtime.info.rows);
+    const pty = spawn(this.tmuxBin, ['attach-session', '-t', toTmuxSessionName(sessionId)], {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      handleFlowControl: true,
+      cwd: runtime.info.cwd,
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color'
+      }
+    });
+
+    runtime.info.cols = cols;
+    runtime.info.rows = rows;
+
+    const dataListeners = new Set<(chunk: AttachmentChunk) => void>();
+    const exitListeners = new Set<(exitCode: number) => void>();
+    const manager = this;
+    let outputPaused = false;
+    let killTimer: NodeJS.Timeout | null = null;
+    let closed = false;
+    let osc52Carry = '';
+    let logCursor = this.getLogBytes(sessionId);
+
+    const cleanupKillTimer = (): void => {
+      if (!killTimer) {
+        return;
+      }
+      clearTimeout(killTimer);
+      killTimer = null;
+    };
+
+    const terminate = (): void => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      cleanupKillTimer();
+      pty.kill('SIGTERM');
+      killTimer = setTimeout(() => {
+        killTimer = null;
+        pty.kill('SIGKILL');
+      }, ATTACH_KILL_ESCALATION_DELAY_MS);
+    };
+
+    pty.onData((data) => {
+      const payload = Buffer.from(data, 'utf8');
+      const startOffset = logCursor;
+      logCursor += payload.byteLength;
+
+      const osc52 = parseOsc52Clipboard(data, osc52Carry);
+      osc52Carry = osc52.carry;
+      if (osc52.clipboardTexts.length > 0 && this.clipboardListeners.size > 0) {
+        for (const text of osc52.clipboardTexts) {
+          for (const listener of this.clipboardListeners) {
+            listener(sessionId, text);
+          }
+        }
+      }
+
+      const chunk: AttachmentChunk = {
+        data,
+        startOffset,
+        endOffset: logCursor,
+        byteLength: payload.byteLength
+      };
+
+      for (const listener of dataListeners) {
+        listener(chunk);
+      }
+    });
+
+    pty.onExit(({ exitCode }) => {
+      closed = true;
+      cleanupKillTimer();
+      for (const listener of exitListeners) {
+        listener(typeof exitCode === 'number' ? exitCode : 0);
+      }
+    });
+
+    return {
+      write(data: string | Buffer): void {
+        if (closed) {
+          return;
+        }
+        pty.write(data);
+      },
+      resize(nextCols: number, nextRows: number): void {
+        if (closed) {
+          return;
+        }
+        const colsSafe = normalizeDimension(nextCols, runtime.info.cols);
+        const rowsSafe = normalizeDimension(nextRows, runtime.info.rows);
+        runtime.info.cols = colsSafe;
+        runtime.info.rows = rowsSafe;
+        pty.resize(colsSafe, rowsSafe);
+        manager.resize(sessionId, colsSafe, rowsSafe);
+      },
+      pauseOutput(): void {
+        if (closed || outputPaused) {
+          return;
+        }
+        outputPaused = true;
+        pty.write(FLOW_CONTROL_PAUSE);
+      },
+      resumeOutput(): void {
+        if (closed || !outputPaused) {
+          return;
+        }
+        outputPaused = false;
+        pty.write(FLOW_CONTROL_RESUME);
+      },
+      close(): void {
+        terminate();
+      },
+      onData(listener: (chunk: AttachmentChunk) => void): () => void {
+        dataListeners.add(listener);
+        return () => dataListeners.delete(listener);
+      },
+      onExit(listener: (exitCode: number) => void): () => void {
+        exitListeners.add(listener);
+        return () => exitListeners.delete(listener);
+      }
+    };
+  }
+
+  write(_sessionId: string, _data: string | Buffer): void {
+    // no-op: tmux input is bound to per-connection attachment clients.
   }
 
   resize(sessionId: string, cols: number, rows: number): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime) {
       return;
     }
-    session.info.cols = cols;
-    session.info.rows = rows;
-    session.pty.resize(cols, rows);
+
+    const nextCols = normalizeDimension(cols, runtime.info.cols);
+    const nextRows = normalizeDimension(rows, runtime.info.rows);
+    runtime.info.cols = nextCols;
+    runtime.info.rows = nextRows;
+
+    this.runTmux(
+      ['resize-window', '-t', toTmuxSessionName(sessionId), '-x', String(nextCols), '-y', String(nextRows)],
+      {
+        allowFailure: true,
+        allowNoServer: true
+      }
+    );
   }
 
-  pauseOutput(sessionId: string): void {
-    const session = this.sessions.get(sessionId);
-    if (!session || session.outputPaused) {
-      return;
-    }
-    session.outputPaused = true;
-    session.pty.write(FLOW_CONTROL_PAUSE);
+  pauseOutput(_sessionId: string): void {
+    // no-op: flow control is handled per attachment.
   }
 
-  resumeOutput(sessionId: string): void {
-    const session = this.sessions.get(sessionId);
-    if (!session || !session.outputPaused) {
-      return;
-    }
-    session.outputPaused = false;
-    session.pty.write(FLOW_CONTROL_RESUME);
+  resumeOutput(_sessionId: string): void {
+    // no-op: flow control is handled per attachment.
   }
 
   kill(sessionId: string): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime) {
       return;
     }
-    if (session.killTimer) {
-      clearTimeout(session.killTimer);
-      session.killTimer = null;
-    }
-    session.pty.kill('SIGTERM');
-    session.killTimer = setTimeout(() => {
-      const active = this.sessions.get(sessionId);
-      if (!active) {
-        return;
-      }
-      active.killTimer = null;
-      active.pty.kill('SIGKILL');
-    }, KILL_ESCALATION_DELAY_MS);
-  }
 
-  getBuffer(sessionId: string): string {
-    const session = this.sessions.get(sessionId);
-    if (!session || session.buffer.length === 0) {
-      return '';
-    }
-    return Buffer.concat(ringToBufferArray(session.buffer)).toString('utf8');
+    this.runTmux(['kill-session', '-t', toTmuxSessionName(sessionId)], {
+      allowFailure: true,
+      allowNoServer: true
+    });
+
+    this.removeSession(runtime.info.id, 0);
   }
 
   getLogPath(sessionId: string): string | null {
@@ -524,19 +816,21 @@ export class PtyManager {
   }
 
   getLogBytes(sessionId: string): number {
-    const active = this.sessions.get(sessionId);
-    const logPath = active ? active.logPath : this.getLogPath(sessionId);
+    const logPath = this.getLogPath(sessionId);
     if (!logPath) {
       return 0;
     }
     try {
       return fs.statSync(logPath).size;
     } catch {
-      return active ? active.logBytes : 0;
+      return 0;
     }
   }
 
   hasSession(sessionId: string): boolean {
+    if (!this.sessions.has(sessionId) && this.tmuxReady) {
+      this.syncWithTmux();
+    }
     return this.sessions.has(sessionId);
   }
 

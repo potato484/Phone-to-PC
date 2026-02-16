@@ -231,7 +231,7 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
     });
 
     store.updateSession(sessionId, {
-      status: wasKilled ? 'killed' : 'detached',
+      status: 'killed',
       updatedAt: now
     });
 

@@ -9,6 +9,12 @@ import {
   wsUrl
 } from './state.js';
 
+function withReconnectJitter(baseDelayMs) {
+  const safeBase = Math.max(300, Math.floor(baseDelayMs));
+  const jitter = Math.round(safeBase * ((Math.random() * 0.4) - 0.2));
+  return Math.max(300, safeBase + jitter);
+}
+
 export function createControl({ term, sessionTabs, statusBar, toast, actions }) {
   return {
     send(payload) {
@@ -191,11 +197,13 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions }) 
       if (State.reconnectTimer) {
         window.clearTimeout(State.reconnectTimer);
       }
+      const baseDelay = Math.max(1000, State.reconnectDelayMs);
+      const delay = withReconnectJitter(baseDelay);
       State.reconnectTimer = window.setTimeout(() => {
         State.reconnectTimer = 0;
         this.connect();
-        State.reconnectDelayMs = Math.min(State.reconnectDelayMs * 2, 20000);
-      }, State.reconnectDelayMs);
+        State.reconnectDelayMs = Math.min(baseDelay * 2, 30000);
+      }, delay);
     },
 
     reconnectNow() {
