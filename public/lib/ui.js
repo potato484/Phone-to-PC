@@ -23,8 +23,7 @@ const QUICK_KEY_ROWS = [
   [
     { id: 'ctrl-c', label: '^C' },
     { id: 'tab', label: 'Tab' },
-    { id: 'shift-tab', label: '⇤' },
-    { id: 'esc', label: 'Esc' }
+    { id: 'shift-tab', label: '⇤' }
   ],
   [
     { id: 'up', label: '↑' },
@@ -35,11 +34,17 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=21';
+const SERVICE_WORKER_URL = '/sw.js?v=28';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const AUTH_TOKEN_WARN_LEAD_MS = 5 * 60 * 1000;
 const AUTH_TOKEN_REFRESH_LEAD_MS = 2 * 60 * 1000;
+const QUICK_KEYS_TOGGLE_TEXT_SHOW = '显示快捷键';
+const QUICK_KEYS_TOGGLE_TEXT_HIDE = '隐藏快捷键';
+const TERMINAL_CONTEXT_LINES = 8;
+const TERMINAL_VISUAL_BUFFER_PX = 96;
+const TERMINAL_VISUAL_BUFFER_WITH_KEYBOARD_PX = 132;
+const TERMINAL_VIEWPORT_BUFFER_RATIO = 0.18;
 const KEYBOARD_INSET_APPLY_DELAY_MS = 120;
 const NON_TEXT_INPUT_TYPES = new Set([
   'button',
@@ -157,6 +162,26 @@ export function createUi({ getControl, getTerm }) {
       }
       const height = Math.ceil(DOM.dock.getBoundingClientRect().height);
       document.documentElement.style.setProperty('--dock-height', `${height}px`);
+      this.syncTerminalScrollReserve();
+    },
+
+    syncTerminalScrollReserve() {
+      if (!DOM.dock || !DOM.quickKeys || !DOM.dock.classList.contains('is-quick-keys-visible')) {
+        document.documentElement.style.setProperty('--terminal-scroll-reserve', '0px');
+        return 0;
+      }
+      const quickKeysRect = DOM.quickKeys.getBoundingClientRect();
+      const viewportHeight = Math.max(0, window.visualViewport ? window.visualViewport.height : window.innerHeight);
+      const viewportBuffer = Math.max(
+        TERMINAL_VISUAL_BUFFER_PX,
+        Math.round(viewportHeight * TERMINAL_VIEWPORT_BUFFER_RATIO)
+      );
+      const extraBuffer = State.keyboardVisible
+        ? Math.max(viewportBuffer, TERMINAL_VISUAL_BUFFER_WITH_KEYBOARD_PX)
+        : viewportBuffer;
+      const reserve = Math.max(0, Math.ceil(quickKeysRect.height + extraBuffer));
+      document.documentElement.style.setProperty('--terminal-scroll-reserve', `${reserve}px`);
+      return reserve;
     },
 
     scheduleMeasure() {
@@ -187,7 +212,12 @@ export function createUi({ getControl, getTerm }) {
     },
 
     ensureQuickKeysVisible() {
-      if (!DOM.quickKeys || !State.keyboardVisible) {
+      if (
+        !DOM.quickKeys ||
+        !State.keyboardVisible ||
+        !DOM.dock ||
+        !DOM.dock.classList.contains('is-quick-keys-visible')
+      ) {
         return;
       }
       const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
@@ -197,6 +227,19 @@ export function createUi({ getControl, getTerm }) {
           block: 'nearest',
           inline: 'nearest'
         });
+      }
+    },
+
+    ensureTerminalVisible() {
+      if (DOM.terminalWrap) {
+        DOM.terminalWrap.scrollIntoView({
+          block: 'nearest',
+          inline: 'nearest'
+        });
+      }
+      const term = getTerm();
+      if (term && typeof term.scrollActivePaneNearBottom === 'function') {
+        term.scrollActivePaneNearBottom(TERMINAL_CONTEXT_LINES);
       }
     },
 
@@ -829,6 +872,55 @@ export function createUi({ getControl, getTerm }) {
 
   const QuickKeys = {
     pointerHandledUntilMsByKey: {},
+    togglePointerHandledUntilMs: 0,
+    visible: false,
+
+    setVisible(visible, options = {}) {
+      const { skipMeasure = false, keepTerminalFocus = true } = options;
+      const nextVisible = !!visible;
+      const previousDockHeight = DOM.dock ? Math.ceil(DOM.dock.getBoundingClientRect().height) : 0;
+      this.visible = nextVisible;
+      if (DOM.dock) {
+        DOM.dock.classList.toggle('is-quick-keys-visible', nextVisible);
+      }
+      Dock.syncTerminalScrollReserve();
+      if (DOM.quickKeysToggle) {
+        DOM.quickKeysToggle.setAttribute('aria-expanded', nextVisible ? 'true' : 'false');
+        DOM.quickKeysToggle.setAttribute('aria-pressed', nextVisible ? 'true' : 'false');
+        DOM.quickKeysToggle.textContent = nextVisible ? QUICK_KEYS_TOGGLE_TEXT_HIDE : QUICK_KEYS_TOGGLE_TEXT_SHOW;
+      }
+      if (!skipMeasure) {
+        Dock.scheduleMeasure();
+      }
+      window.requestAnimationFrame(() => {
+        if (keepTerminalFocus) {
+          const term = getTerm();
+          if (term && typeof term.focusActivePane === 'function') {
+            term.focusActivePane();
+          }
+        }
+        const nextDockHeight = DOM.dock ? Math.ceil(DOM.dock.getBoundingClientRect().height) : previousDockHeight;
+        const reserve = Dock.syncTerminalScrollReserve();
+        if (nextVisible) {
+          const scrollDelta = Math.max(0, nextDockHeight - previousDockHeight, reserve);
+          if (scrollDelta > 0) {
+            window.scrollBy({
+              top: scrollDelta,
+              left: 0,
+              behavior: 'auto'
+            });
+          }
+        }
+        Dock.ensureTerminalVisible();
+        if (nextVisible) {
+          Dock.ensureQuickKeysVisible();
+        }
+      });
+    },
+
+    toggle(options = {}) {
+      this.setVisible(!this.visible, options);
+    },
 
     render() {
       if (!DOM.quickKeys) {
@@ -902,6 +994,20 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
       this.render();
+      this.setVisible(false, { skipMeasure: true, keepTerminalFocus: false });
+      if (DOM.quickKeysToggle) {
+        DOM.quickKeysToggle.addEventListener('pointerdown', (event) => {
+          event.preventDefault();
+          this.togglePointerHandledUntilMs = Date.now() + 420;
+          this.toggle({ keepTerminalFocus: true });
+        });
+        DOM.quickKeysToggle.addEventListener('click', () => {
+          if (this.togglePointerHandledUntilMs > Date.now()) {
+            return;
+          }
+          this.toggle({ keepTerminalFocus: true });
+        });
+      }
 
       DOM.quickKeys.addEventListener('pointerdown', (event) => {
         const button = event.target.closest('.quick-key-btn');
@@ -1079,11 +1185,6 @@ export function createUi({ getControl, getTerm }) {
           return;
         }
         scheduleDelayedInsetSync();
-        if (isTerminalFocusTarget(event.target)) {
-          window.setTimeout(() => {
-            Dock.ensureQuickKeysVisible();
-          }, KEYBOARD_INSET_APPLY_DELAY_MS);
-        }
       });
       window.addEventListener('focusout', (event) => {
         if (!isKeyboardInputTarget(event.target)) {
@@ -1100,7 +1201,6 @@ export function createUi({ getControl, getTerm }) {
                 return;
               }
               this.applyInset();
-              Dock.ensureQuickKeysVisible();
             }, KEYBOARD_INSET_APPLY_DELAY_MS);
           },
           { passive: true }

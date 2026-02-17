@@ -12,6 +12,7 @@ export const DOM = {
   sessionPill: document.getElementById('session-pill'),
   dock: document.getElementById('dock'),
   dockHandle: document.getElementById('dock-handle'),
+  quickKeysToggle: document.getElementById('quick-keys-toggle'),
   sessionTabs: document.getElementById('session-tabs'),
   quickKeys: document.getElementById('quick-keys'),
   filesPath: document.getElementById('files-path'),
@@ -65,7 +66,6 @@ export const QUICK_KEY_SEQUENCES = {
   down: '\x1b[B',
   left: '\x1b[D',
   right: '\x1b[C',
-  esc: '\x1b',
   enter: '\r'
 };
 export const KEYBOARD_VISIBLE_THRESHOLD_PX = 80;

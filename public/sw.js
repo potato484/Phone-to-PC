@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v21';
+const CACHE_NAME = 'c2p-v28';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',

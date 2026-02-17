@@ -1091,6 +1091,21 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       }
       pane.terminal.focus();
       return true;
+    },
+
+    scrollActivePaneNearBottom(contextLines = 0) {
+      const pane = getActivePane();
+      if (!pane || !pane.terminal || typeof pane.terminal.scrollToBottom !== 'function') {
+        return false;
+      }
+      pane.terminal.scrollToBottom();
+      if (typeof pane.terminal.scrollLines === 'function') {
+        const safeContextLines = Number.isFinite(contextLines) ? Math.max(0, Math.floor(contextLines)) : 0;
+        if (safeContextLines > 0) {
+          pane.terminal.scrollLines(-safeContextLines);
+        }
+      }
+      return true;
     }
   };
 }
