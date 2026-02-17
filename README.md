@@ -10,11 +10,11 @@
 ## 连通方案（强烈推荐 Tailscale）
 
 `Tailscale` 是本项目推荐的默认连通方式。  
-原因：在手机远程交互场景下，Cloudflare Tunnel 常见高延迟和抖动，操作体验明显更差。
+原因：在本项目的实际远程交互场景里，`cloudflare` 的连接效果通常明显差于 `tailscale`（更高延迟、更容易抖动）。
 
 结论：
 - 生产/日常使用：优先 `Tailscale`
-- `cloudflare`：仅作为兜底或临时排障
+- `cloudflare`：仅作为兜底或临时排障，不建议作为常态连接方案
 
 ## 功能概览
 
@@ -164,6 +164,26 @@ pnpm start -- --cwd=/path/to/workspace
 - Tailscale 地址（若启用）
 - 可扫码连接的 URL（含 token）
 
+## 连接地址与 Token 注意事项（必读）
+
+1. 访问 URL 必须带 `#token`
+- 正确格式：`https://<域名或IP>/#token=<bootstrap_token>`
+- 例如：`https://xxxx.trycloudflare.com/#token=...`
+- 仅打开 `https://xxxx.trycloudflare.com`（不带 `#token`）会被视为未登录
+
+2. `bootstrap token` 获取方式
+- 默认保存在服务端工作目录：`.auth-token`
+- 查看命令：`cat /home/potato/Phone-to-PC/.auth-token`
+
+3. 为什么会出现“token 无效或已过期”
+- 浏览器里的 `access token` 是短期票据（默认 24h），会过期或被刷新轮换
+- 失效后需要重新使用带 `#token` 的完整链接进入
+
+4. 首次登录后地址栏变化
+- 页面认证成功后会清理 URL 中的 `#token`
+- 如果你直接复制“已清理后的地址”再次打开，就会缺少登录 token
+- 解决方式：重新使用启动日志输出的 bootstrap 链接，或手动按格式拼接 `#token=...`
+
 ## systemd / c2pctl
 
 安装脚本会部署 `c2p@.service` 与 `c2pctl`，常用命令：
@@ -189,11 +209,12 @@ c2pctl logs --user <user>
 
 ### `cloudflare`（不推荐，兜底）
 
-- 仅在你明确接受更高延迟时使用。
+- 在本项目中，`cloudflare` 实测通常比 `tailscale` 连接体验差，仅建议临时使用。
 - 使用方式：
   - 设置 `TUNNEL=cloudflare`
   - 可选设置 `TUNNEL_HOSTNAME` 走命名隧道
   - 不设置则走 Quick Tunnel
+- 重启服务后，以日志输出的 `tunnel: https://.../#token=...` 为准直接访问
 
 ### `off`
 
