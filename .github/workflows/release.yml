@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify build and tests
+        run: pnpm build && pnpm test:unit && pnpm test:integration
+
+      - name: Package release bundle
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          bundle="c2p-${GITHUB_REF_NAME}.tar.gz"
+          tar -czf "release/${bundle}" dist public package.json pnpm-lock.yaml scripts
+          sha256sum "release/${bundle}" > "release/${bundle}.sha256"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: c2p-release-${{ github.ref_name }}
+          path: release/*
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

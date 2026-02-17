@@ -19,6 +19,7 @@ test('AccessTokenService issues, verifies and revokes tokens', async () => {
   try {
     const issuedA = tokenService.issueAccessToken('unit-test');
     const issuedB = tokenService.issueAccessToken('unit-test');
+    const readonly = tokenService.issueAccessToken('unit-test', 'readonly');
 
     assert.equal(issuedA.claims.exp - issuedA.claims.iat, 3600);
     assert.notEqual(issuedA.claims.jti, issuedB.claims.jti);
@@ -28,6 +29,26 @@ test('AccessTokenService issues, verifies and revokes tokens', async () => {
     if (ok.ok) {
       assert.equal(ok.claims.scope, 'admin');
       assert.equal(ok.claims.jti, issuedA.claims.jti);
+    }
+
+    const readonlyCheck = tokenService.verifyAccessToken(readonly.token);
+    assert.equal(readonlyCheck.ok, true);
+    if (readonlyCheck.ok) {
+      assert.equal(readonlyCheck.claims.scope, 'readonly');
+    }
+
+    const refreshed = tokenService.refreshAccessToken(readonly.token, 'unit-test');
+    assert.equal(refreshed.ok, true);
+    if (refreshed.ok) {
+      assert.equal(refreshed.previousClaims.scope, 'readonly');
+      assert.notEqual(refreshed.previousClaims.jti, refreshed.issued.claims.jti);
+      assert.equal(refreshed.issued.claims.scope, 'readonly');
+    }
+
+    const readonlyAfterRefresh = tokenService.verifyAccessToken(readonly.token);
+    assert.equal(readonlyAfterRefresh.ok, false);
+    if (!readonlyAfterRefresh.ok) {
+      assert.equal(readonlyAfterRefresh.code, 'revoked');
     }
 
     const tampered = `${issuedA.token.slice(0, -1)}x`;
