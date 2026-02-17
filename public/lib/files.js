@@ -3,6 +3,44 @@ import { DOM, State, apiUrl, authedFetch, buildAuthHeaders } from './state.js';
 const FILES_LONG_PRESS_MS = 520;
 const FILES_AUTH_RETRY_DELAY_MS = 900;
 
+function decodeBase64Url(base64Url) {
+  if (typeof base64Url !== 'string' || !base64Url) {
+    return '';
+  }
+  const normalized = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+  const padLength = (4 - (normalized.length % 4)) % 4;
+  const padded = `${normalized}${'='.repeat(padLength)}`;
+  if (typeof atob !== 'function') {
+    return '';
+  }
+  try {
+    return atob(padded);
+  } catch {
+    return '';
+  }
+}
+
+function readAccessTokenScope(token) {
+  if (typeof token !== 'string' || !token) {
+    return '';
+  }
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts[0] !== 'v1') {
+    return '';
+  }
+  const payloadJson = decodeBase64Url(parts[1]);
+  if (!payloadJson) {
+    return '';
+  }
+  try {
+    const parsed = JSON.parse(payloadJson);
+    const scope = parsed && typeof parsed === 'object' ? parsed.scope : '';
+    return scope === 'admin' || scope === 'readonly' ? scope : '';
+  } catch {
+    return '';
+  }
+}
+
 function joinPath(basePath, name) {
   const base = typeof basePath === 'string' ? basePath.trim() : '.';
   const normalizedBase = !base || base === '.' ? '' : base.replace(/\/+$/g, '');
@@ -61,6 +99,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
   let currentPath = '.';
   let parentPath = null;
   let entries = [];
+  let listNotice = null;
   let showHiddenEntries = true;
   let contextTarget = null;
   let contextMenuEl = null;
@@ -70,16 +109,114 @@ export function createFiles({ toast, openTerminalAtPath }) {
   let suppressClick = false;
   let loading = false;
   let authRetryTimer = 0;
+  let writeBlocked = false;
 
   function isAuthFailureError(error) {
-    const message = error && typeof error === 'object' && 'message' in error ? String(error.message).toLowerCase() : '';
+    const message = readErrorMessage(error).toLowerCase();
     return (
       message.includes('401') ||
       message.includes('403') ||
       message.includes('missing bearer token') ||
-      message.includes('unauthorized') ||
-      message.includes('insufficient_scope')
+      message.includes('unauthorized')
     );
+  }
+
+  function isInsufficientScopeError(error) {
+    const message = readErrorMessage(error).toLowerCase();
+    return message.includes('insufficient_scope');
+  }
+
+  function readErrorMessage(error) {
+    if (!error || typeof error !== 'object' || !('message' in error)) {
+      return '';
+    }
+    const raw = error.message;
+    return typeof raw === 'string' ? raw : String(raw || '');
+  }
+
+  function classifyFsError(error) {
+    const message = readErrorMessage(error);
+    const normalized = message.toLowerCase();
+
+    if (
+      normalized.includes('missing bearer token') ||
+      normalized.includes('unauthorized') ||
+      normalized.includes('401')
+    ) {
+      return {
+        kind: 'auth',
+        listTitle: '登录状态已失效',
+        listHint: '请重新登录后再访问目录。',
+        listToast: '登录状态已失效，请重新登录',
+        listToastType: 'warn'
+      };
+    }
+
+    if (
+      normalized.includes('insufficient_scope') ||
+      normalized.includes('permission denied') ||
+      normalized.includes('forbidden') ||
+      normalized.includes('403')
+    ) {
+      return {
+        kind: 'permission',
+        listTitle: '权限不足，无法读取目录',
+        listHint: '请切换管理员令牌，或进入有读取权限的目录。',
+        listToast: '权限不足：无法读取该目录',
+        listToastType: 'warn'
+      };
+    }
+
+    if (
+      normalized.includes('too large') ||
+      normalized.includes('limit=') ||
+      normalized.includes('413') ||
+      normalized.includes('insufficient disk space')
+    ) {
+      return {
+        kind: 'size',
+        listTitle: '当前操作超出大小限制',
+        listHint: '请缩小文件规模后重试，或改用下载到本地处理。',
+        listToast: '操作超出大小限制，请缩小后重试',
+        listToastType: 'warn'
+      };
+    }
+
+    return {
+      kind: 'generic',
+      listTitle: '读取目录失败',
+      listHint: '请稍后重试，或检查网络与目录路径。',
+      listToast: `读取目录失败: ${message || 'unknown'}`,
+      listToastType: 'danger'
+    };
+  }
+
+  function isReadonlyToken() {
+    return readAccessTokenScope(State.token) === 'readonly';
+  }
+
+  function syncWriteAccessUi() {
+    const readonly = isReadonlyToken();
+    writeBlocked = readonly;
+
+    if (DOM.filesScopePill) {
+      DOM.filesScopePill.hidden = !readonly;
+      DOM.filesScopePill.textContent = readonly ? '只读' : '';
+      DOM.filesScopePill.title = readonly ? '只读令牌：写操作将被禁用' : '';
+    }
+
+    if (DOM.filesNewfileBtn) {
+      DOM.filesNewfileBtn.disabled = readonly;
+    }
+    if (DOM.filesMkdirBtn) {
+      DOM.filesMkdirBtn.disabled = readonly;
+    }
+    if (DOM.filesUploadBtn) {
+      DOM.filesUploadBtn.disabled = readonly;
+    }
+    if (DOM.filesEditorSaveBtn) {
+      DOM.filesEditorSaveBtn.disabled = readonly;
+    }
   }
 
   function scheduleAuthRetry(pathToRetry) {
@@ -244,6 +381,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
     contextTarget = entry;
     menu.hidden = false;
 
+    const readonly = isReadonlyToken();
     const downloadBtn = menu.querySelector('[data-action="download"]');
     if (downloadBtn) {
       downloadBtn.hidden = entry.type !== 'file';
@@ -255,6 +393,14 @@ export function createFiles({ toast, openTerminalAtPath }) {
     const copyAbsBtn = menu.querySelector('[data-action="copy-path-abs"]');
     if (copyAbsBtn) {
       copyAbsBtn.hidden = typeof entry.absPath !== 'string' || !entry.absPath;
+    }
+    const renameBtn = menu.querySelector('[data-action="rename"]');
+    if (renameBtn) {
+      renameBtn.hidden = readonly;
+    }
+    const removeBtn = menu.querySelector('[data-action="remove"]');
+    if (removeBtn) {
+      removeBtn.hidden = readonly;
     }
 
     menu.style.left = '0px';
@@ -269,6 +415,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
     if (!DOM.filesList || !DOM.filesPath) {
       return;
     }
+    syncWriteAccessUi();
     DOM.filesPath.textContent = currentPath || '.';
     syncHiddenButton();
 
@@ -278,6 +425,20 @@ export function createFiles({ toast, openTerminalAtPath }) {
       loadingEl.className = 'files-empty';
       loadingEl.textContent = '读取中...';
       DOM.filesList.appendChild(loadingEl);
+      return;
+    }
+
+    if (listNotice) {
+      const titleEl = document.createElement('p');
+      titleEl.className = 'files-empty files-empty-error';
+      titleEl.textContent = listNotice.title;
+      DOM.filesList.appendChild(titleEl);
+      if (listNotice.hint) {
+        const hintEl = document.createElement('p');
+        hintEl.className = 'files-empty-hint';
+        hintEl.textContent = listNotice.hint;
+        DOM.filesList.appendChild(hintEl);
+      }
       return;
     }
 
@@ -360,6 +521,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
       return;
     }
     loading = true;
+    listNotice = null;
     render();
     try {
       const payload = await fetchJson('/api/fs/list', {
@@ -372,6 +534,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
       currentPath = typeof payload.path === 'string' ? payload.path : '.';
       parentPath = typeof payload.parent === 'string' ? payload.parent : null;
       entries = Array.isArray(payload.entries) ? payload.entries : [];
+      listNotice = null;
       if (DOM.filesEditorWrap && !DOM.filesEditorWrap.hidden) {
         DOM.filesEditorWrap.hidden = true;
       }
@@ -379,7 +542,12 @@ export function createFiles({ toast, openTerminalAtPath }) {
       if (silentAuthRetry && isAuthFailureError(error)) {
         scheduleAuthRetry(requestPath);
       } else {
-        toast.show(`读取目录失败: ${error.message}`, 'danger');
+        const feedback = classifyFsError(error);
+        listNotice = {
+          title: feedback.listTitle,
+          hint: feedback.listHint
+        };
+        toast.show(feedback.listToast, feedback.listToastType);
       }
     } finally {
       loading = false;
@@ -399,7 +567,16 @@ export function createFiles({ toast, openTerminalAtPath }) {
       DOM.filesEditor.value = typeof payload.content === 'string' ? payload.content : '';
       DOM.filesEditorWrap.hidden = false;
     } catch (error) {
-      toast.show(`读取文件失败: ${error.message}`, 'danger');
+      const feedback = classifyFsError(error);
+      if (feedback.kind === 'permission') {
+        toast.show('权限不足：当前令牌无权读取该文件', 'warn');
+        return;
+      }
+      if (feedback.kind === 'size') {
+        toast.show('文件过大，无法在线读取；请下载后处理', 'warn');
+        return;
+      }
+      toast.show(`读取文件失败: ${readErrorMessage(error) || 'unknown'}`, 'danger');
     }
   }
 
@@ -459,6 +636,10 @@ export function createFiles({ toast, openTerminalAtPath }) {
   }
 
   async function renameEntry(entry) {
+    if (isReadonlyToken()) {
+      toast.show('只读模式不可写', 'warn');
+      return;
+    }
     const { dir, base } = splitPath(entry.path);
     const nextNameRaw = window.prompt('输入新名称', base);
     if (nextNameRaw === null) {
@@ -483,11 +664,19 @@ export function createFiles({ toast, openTerminalAtPath }) {
       toast.show('重命名成功', 'success');
       await refresh();
     } catch (error) {
+      if (isInsufficientScopeError(error)) {
+        toast.show('只读模式不可写', 'warn');
+        return;
+      }
       toast.show(`重命名失败: ${error.message}`, 'danger');
     }
   }
 
   async function removeEntry(entry) {
+    if (isReadonlyToken()) {
+      toast.show('只读模式不可写', 'warn');
+      return;
+    }
     const confirmed = window.confirm(`确认删除 ${entry.name} ?`);
     if (!confirmed) {
       return;
@@ -506,6 +695,10 @@ export function createFiles({ toast, openTerminalAtPath }) {
       toast.show('删除完成', 'warn');
       await refresh();
     } catch (error) {
+      if (isInsufficientScopeError(error)) {
+        toast.show('只读模式不可写', 'warn');
+        return;
+      }
       toast.show(`删除失败: ${error.message}`, 'danger');
     }
   }
@@ -552,6 +745,10 @@ export function createFiles({ toast, openTerminalAtPath }) {
     if (!DOM.filesEditorWrap || DOM.filesEditorWrap.hidden || !DOM.filesEditor || !DOM.filesEditorPath) {
       return;
     }
+    if (isReadonlyToken()) {
+      toast.show('只读模式不可写', 'warn');
+      return;
+    }
     const targetPath = DOM.filesEditorPath.textContent || '';
     try {
       await fetchJson('/api/fs/write', {
@@ -567,11 +764,19 @@ export function createFiles({ toast, openTerminalAtPath }) {
       toast.show('文件已保存', 'success');
       await refresh();
     } catch (error) {
+      if (isInsufficientScopeError(error)) {
+        toast.show('只读模式不可写', 'warn');
+        return;
+      }
       toast.show(`保存失败: ${error.message}`, 'danger');
     }
   }
 
   async function createFile() {
+    if (isReadonlyToken()) {
+      toast.show('只读模式不可写', 'warn');
+      return;
+    }
     const fileNameRaw = window.prompt('新文件名称', 'new-file.txt');
     if (fileNameRaw === null) {
       return;
@@ -608,12 +813,20 @@ export function createFiles({ toast, openTerminalAtPath }) {
       toast.show(existing ? '文件已覆盖' : '文件创建成功', 'success');
       await refresh();
     } catch (error) {
+      if (isInsufficientScopeError(error)) {
+        toast.show('只读模式不可写', 'warn');
+        return;
+      }
       toast.show(`创建文件失败: ${error.message}`, 'danger');
     }
   }
 
   async function uploadFiles(fileList) {
     if (!fileList || fileList.length === 0) {
+      return;
+    }
+    if (isReadonlyToken()) {
+      toast.show('只读模式不可写', 'warn');
       return;
     }
     for (const file of fileList) {
@@ -633,7 +846,16 @@ export function createFiles({ toast, openTerminalAtPath }) {
         }
         toast.show(`上传完成: ${file.name}`, 'success');
       } catch (error) {
-        toast.show(`上传失败: ${file.name} - ${error.message}`, 'danger');
+        if (isInsufficientScopeError(error)) {
+          toast.show('只读模式不可写', 'warn');
+          return;
+        }
+        const feedback = classifyFsError(error);
+        if (feedback.kind === 'size') {
+          toast.show(`上传失败: ${file.name} 超出大小限制，请压缩或拆分后重试`, 'warn');
+          continue;
+        }
+        toast.show(`上传失败: ${file.name} - ${readErrorMessage(error) || 'unknown'}`, 'danger');
       }
     }
     await refresh();
@@ -776,6 +998,10 @@ export function createFiles({ toast, openTerminalAtPath }) {
     }
     if (DOM.filesMkdirBtn) {
       DOM.filesMkdirBtn.addEventListener('click', async () => {
+        if (isReadonlyToken()) {
+          toast.show('只读模式不可写', 'warn');
+          return;
+        }
         const folderNameRaw = window.prompt('新目录名称', 'new-folder');
         if (folderNameRaw === null) {
           return;
@@ -798,6 +1024,10 @@ export function createFiles({ toast, openTerminalAtPath }) {
           toast.show('目录创建成功', 'success');
           await refresh();
         } catch (error) {
+          if (isInsufficientScopeError(error)) {
+            toast.show('只读模式不可写', 'warn');
+            return;
+          }
           toast.show(`创建目录失败: ${error.message}`, 'danger');
         }
       });
