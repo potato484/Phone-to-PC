@@ -46,15 +46,10 @@ export const DOM = {
   monitorJitterText: document.getElementById('monitor-jitter-text'),
   monitorLossText: document.getElementById('monitor-loss-text'),
   monitorProfileText: document.getElementById('monitor-profile-text'),
-  telemetryOptIn: document.getElementById('telemetry-opt-in'),
   prefThemeSelect: document.getElementById('pref-theme'),
   prefContrastSelect: document.getElementById('pref-contrast'),
   prefMotionSelect: document.getElementById('pref-motion'),
   prefTransparencySelect: document.getElementById('pref-transparency'),
-  authOverlay: document.getElementById('auth-overlay'),
-  authBootstrapToken: document.getElementById('auth-bootstrap-token'),
-  authLoginBtn: document.getElementById('auth-login-btn'),
-  authError: document.getElementById('auth-error'),
   toastRoot: document.getElementById('toast-root')
 };
 

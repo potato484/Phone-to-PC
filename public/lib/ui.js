@@ -35,15 +35,15 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=18';
+const SERVICE_WORKER_URL = '/sw.js?v=19';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const AUTH_TOKEN_WARN_LEAD_MS = 5 * 60 * 1000;
 const AUTH_TOKEN_REFRESH_LEAD_MS = 2 * 60 * 1000;
 
-export function createUi({ getControl, getTerm, getTelemetry }) {
+export function createUi({ getControl, getTerm }) {
   let sessionCache = [];
-  const Theme = createThemeManager({ getTelemetry });
+  const Theme = createThemeManager();
 
   const Toast = {
     show(message, type = 'info', options = {}) {
@@ -823,37 +823,6 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
     }
   };
 
-  const TelemetryControls = {
-    sync() {
-      if (!DOM.telemetryOptIn) {
-        return;
-      }
-      const telemetry = typeof getTelemetry === 'function' ? getTelemetry() : null;
-      if (!telemetry || typeof telemetry.isEnabled !== 'function') {
-        DOM.telemetryOptIn.checked = false;
-        DOM.telemetryOptIn.disabled = true;
-        return;
-      }
-      DOM.telemetryOptIn.disabled = false;
-      DOM.telemetryOptIn.checked = telemetry.isEnabled();
-    },
-
-    bind() {
-      this.sync();
-      if (!DOM.telemetryOptIn) {
-        return;
-      }
-      DOM.telemetryOptIn.addEventListener('change', () => {
-        const telemetry = typeof getTelemetry === 'function' ? getTelemetry() : null;
-        if (!telemetry || typeof telemetry.setEnabled !== 'function') {
-          DOM.telemetryOptIn.checked = false;
-          return;
-        }
-        telemetry.setEnabled(DOM.telemetryOptIn.checked);
-      });
-    }
-  };
-
   const Network = {
     bind() {
       window.addEventListener(
@@ -1038,7 +1007,6 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
       return {
         reason: 'unauthorized',
         status,
-        overlayMessage: '登录失败：token 无效或已过期，请重新获取链接后重试。',
         toastMessage: '登录失败：token 无效或已过期'
       };
     }
@@ -1046,7 +1014,6 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
       return {
         reason: 'rate_limited',
         status,
-        overlayMessage: '登录请求过于频繁，请稍后再试。',
         toastMessage: '登录请求过于频繁，请稍后再试'
       };
     }
@@ -1054,14 +1021,12 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
       return {
         reason: 'network',
         status: 0,
-        overlayMessage: '网络连接失败，请检查网络后重试。',
         toastMessage: '网络连接失败，请检查网络后重试'
       };
     }
     return {
       reason: 'unknown',
       status: Number.isFinite(status) ? status : 0,
-      overlayMessage: '登录失败，请稍后重试。',
       toastMessage: '登录失败，请稍后重试'
     };
   }
@@ -1083,140 +1048,6 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
     State.tokenExpiresAt = '';
     window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
     window.sessionStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-  }
-
-  let authOverlayBound = false;
-
-  function setAuthOverlayError(message) {
-    if (!DOM.authError) {
-      return;
-    }
-    const text = typeof message === 'string' ? message.trim() : '';
-    if (!text) {
-      DOM.authError.hidden = true;
-      DOM.authError.textContent = '';
-      return;
-    }
-    DOM.authError.hidden = false;
-    DOM.authError.textContent = text;
-  }
-
-  function showAuthOverlay(options = {}) {
-    if (!DOM.authOverlay) {
-      return;
-    }
-    const wasHidden = DOM.authOverlay.hidden;
-    DOM.authOverlay.hidden = false;
-    setAuthOverlayError(options.error || '');
-    if (DOM.authBootstrapToken) {
-      DOM.authBootstrapToken.disabled = false;
-      if (options.preserveInput !== true) {
-        DOM.authBootstrapToken.value = '';
-      }
-      window.setTimeout(() => {
-        try {
-          DOM.authBootstrapToken.focus();
-        } catch {
-          // ignore focus failures
-        }
-      }, 30);
-    }
-    if (wasHidden && options.trackShown === true) {
-      const telemetry = typeof getTelemetry === 'function' ? getTelemetry() : null;
-      if (telemetry && typeof telemetry.track === 'function') {
-        telemetry.track('ui.auth_overlay_shown', {});
-      }
-    }
-  }
-
-  function hideAuthOverlay() {
-    if (!DOM.authOverlay) {
-      return;
-    }
-    DOM.authOverlay.hidden = true;
-    setAuthOverlayError('');
-  }
-
-  function bindAuthOverlay() {
-    if (authOverlayBound) {
-      return;
-    }
-    authOverlayBound = true;
-
-    if (!DOM.authOverlay || !DOM.authBootstrapToken || !DOM.authLoginBtn) {
-      return;
-    }
-
-    const runLogin = async () => {
-      if (!DOM.authBootstrapToken || !DOM.authLoginBtn) {
-        return;
-      }
-      const bootstrapToken = DOM.authBootstrapToken.value.trim();
-      if (!bootstrapToken) {
-        setAuthOverlayError('请粘贴 bootstrap token');
-        return;
-      }
-
-      DOM.authBootstrapToken.disabled = true;
-      DOM.authLoginBtn.disabled = true;
-      setAuthOverlayError('');
-      try {
-        const issued = await Auth.loginWithBootstrapToken(bootstrapToken);
-        hideAuthOverlay();
-        Toast.show('认证成功，已建立访问会话', 'success');
-        const control = getControl();
-        if (control && typeof control.reconnectNow === 'function') {
-          control.reconnectNow();
-        }
-        Runtime.load().finally(() => {});
-        window.dispatchEvent(new Event('c2p:authenticated'));
-
-        const telemetry = typeof getTelemetry === 'function' ? getTelemetry() : null;
-        if (telemetry && typeof telemetry.track === 'function') {
-          telemetry.track('ui.auth_exchange_success', {
-            hasExpiresAt: !!(issued && issued.expiresAt)
-          });
-        }
-      } catch (error) {
-        const detail = describeAuthExchangeError(error);
-        setAuthOverlayError(detail.overlayMessage);
-        Toast.show(detail.toastMessage, 'danger');
-        const telemetry = typeof getTelemetry === 'function' ? getTelemetry() : null;
-        if (telemetry && typeof telemetry.track === 'function') {
-          telemetry.track('ui.auth_exchange_fail', {
-            reason: detail.reason,
-            status: detail.status
-          });
-        }
-      } finally {
-        if (DOM.authBootstrapToken) {
-          DOM.authBootstrapToken.disabled = false;
-        }
-        if (DOM.authLoginBtn) {
-          DOM.authLoginBtn.disabled = false;
-        }
-      }
-    };
-
-    DOM.authLoginBtn.addEventListener('click', () => {
-      void runLogin();
-    });
-
-    DOM.authBootstrapToken.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter') {
-        return;
-      }
-      event.preventDefault();
-      void runLogin();
-    });
-
-    window.addEventListener(
-      'c2p:auth-required',
-      () => {
-        showAuthOverlay({ trackShown: true, preserveInput: true });
-      },
-      { passive: true }
-    );
   }
 
   function scheduleTokenLifecycle() {
@@ -1245,7 +1076,6 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
         StatusBar.setControl('offline');
         StatusBar.setText('访问令牌刷新失败，请重新使用 #token 链接登录');
         Toast.show(`令牌刷新失败: ${message}`, 'danger');
-        showAuthOverlay({ trackShown: true });
       }
     };
 
@@ -1322,17 +1152,6 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
         accessToken: payload.accessToken,
         expiresAt: typeof payload.expiresAt === 'string' ? payload.expiresAt : ''
       };
-    },
-
-    async loginWithBootstrapToken(bootstrapToken) {
-      const token = typeof bootstrapToken === 'string' ? bootstrapToken.trim() : '';
-      if (!token) {
-        throw new Error('bootstrap token is required');
-      }
-      const issued = await this.exchangeBootstrapToken(token);
-      applyAccessToken(issued.accessToken, issued.expiresAt);
-      scheduleTokenLifecycle();
-      return issued;
     },
 
     async init() {
@@ -1457,36 +1276,26 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
     Dock.bind();
     Dock.updateHeight();
     QuickKeys.bind();
-    TelemetryControls.bind();
     bindSessionCopy();
     Actions.bind();
-    bindAuthOverlay();
     const authReady = Auth.init()
-      .then((authed) => {
-        if (authed) {
-          hideAuthOverlay();
-        } else {
-          showAuthOverlay({ trackShown: true, preserveInput: true });
-        }
-        return authed;
-      })
       .finally(() => {
-      term.init();
-      window.requestAnimationFrame(() => {
-        term.focusActivePane();
+        term.init();
+        window.requestAnimationFrame(() => {
+          term.focusActivePane();
+        });
+        Network.bind();
+        Viewport.bind();
+        Actions.initServiceWorker().catch(() => {});
+        Runtime.load().finally(() => {
+          if (State.token) {
+            control.connect();
+          } else {
+            StatusBar.setControl('offline');
+            StatusBar.setText('请使用带 #token 的链接登录');
+          }
+        });
       });
-      Network.bind();
-      Viewport.bind();
-      Actions.initServiceWorker().catch(() => {});
-      Runtime.load().finally(() => {
-        if (State.token) {
-          control.connect();
-        } else {
-          StatusBar.setControl('offline');
-          StatusBar.setText('请登录以继续');
-        }
-      });
-    });
     window.setTimeout(() => {
       Dock.updateHeight();
       term.scheduleResize(true);
@@ -1501,7 +1310,6 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
     SessionTabs,
     Actions,
     QuickKeys,
-    TelemetryControls,
     Network,
     Viewport,
     Auth,

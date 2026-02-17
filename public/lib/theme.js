@@ -118,7 +118,7 @@ function scheduleMetaThemeColorSync(metaEl, root) {
   });
 }
 
-export function createThemeManager({ getTelemetry } = {}) {
+export function createThemeManager() {
   const hasDocument = typeof document !== 'undefined';
   const root = hasDocument ? document.documentElement : null;
   const metaThemeColor = hasDocument ? document.querySelector('meta[name="theme-color"]') : null;
@@ -129,17 +129,6 @@ export function createThemeManager({ getTelemetry } = {}) {
   let mqlContrast = null;
   let mqlMotion = null;
   let systemChangeHandler = null;
-
-  function track(name, payload) {
-    if (typeof getTelemetry !== 'function') {
-      return;
-    }
-    const telemetry = getTelemetry();
-    if (!telemetry || typeof telemetry.track !== 'function') {
-      return;
-    }
-    telemetry.track(name, payload || {});
-  }
 
   function syncMetaThemeColor() {
     scheduleMetaThemeColorSync(metaThemeColor, root);
@@ -167,24 +156,12 @@ export function createThemeManager({ getTelemetry } = {}) {
     } else if (kind === 'contrast') {
       next.contrast = normalizeContrastPreference(value);
       writePreferenceToStorage(storage, PREF_CONTRAST_KEY, next.contrast);
-      track('ui.contrast_more_enabled', {
-        enabled: next.contrast === 'more',
-        preference: next.contrast
-      });
     } else if (kind === 'motion') {
       next.motion = normalizeMotionPreference(value);
       writePreferenceToStorage(storage, PREF_MOTION_KEY, next.motion);
-      track('ui.motion_reduce_enabled', {
-        enabled: next.motion === 'reduce',
-        preference: next.motion
-      });
     } else if (kind === 'transparency') {
       next.transparency = normalizeTransparencyPreference(value);
       writePreferenceToStorage(storage, PREF_TRANSPARENCY_KEY, next.transparency);
-      track('ui.transparency_reduce_enabled', {
-        enabled: next.transparency === 'reduce',
-        preference: next.transparency
-      });
     } else {
       return;
     }

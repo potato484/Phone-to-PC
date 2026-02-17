@@ -86,16 +86,13 @@ function computeQuality(samples, connected) {
   };
 }
 
-export function createQualityMonitor({ sendHeartbeat, onSnapshot, telemetry }) {
+export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
   let heartbeatTimer = 0;
   let heartbeatSeq = 0;
   let connected = false;
   let desktopProfile = 'balanced';
   let riseStreak = 0;
   let dropStreak = 0;
-  let lastQualityPassAt = 0;
-  let magicMomentTracked = false;
-  let lastDisconnectAt = 0;
   const pending = new Map();
   const samples = [];
 
@@ -148,17 +145,6 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot, telemetry }) {
       if (dropStreak >= 2) {
         desktopProfile = recommendedProfile;
         dropStreak = 0;
-        if (telemetry && telemetry.isEnabled()) {
-          telemetry.track(
-            'desktop_quality_profile_changed',
-            {
-              profile: desktopProfile,
-              score: quality.score,
-              reason: 'auto_downgrade'
-            },
-            { sessionId: State.currentSessionId }
-          );
-        }
       }
     } else {
       riseStreak += 1;
@@ -166,61 +152,7 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot, telemetry }) {
       if (riseStreak >= 4) {
         desktopProfile = recommendedProfile;
         riseStreak = 0;
-        if (telemetry && telemetry.isEnabled()) {
-          telemetry.track(
-            'desktop_quality_profile_changed',
-            {
-              profile: desktopProfile,
-              score: quality.score,
-              reason: 'auto_upgrade'
-            },
-            { sessionId: State.currentSessionId }
-          );
-        }
       }
-    }
-
-    if (
-      telemetry &&
-      telemetry.isEnabled() &&
-      connected &&
-      quality.score >= 70 &&
-      quality.lossPercent <= 5 &&
-      Date.now() - lastQualityPassAt >= 60_000
-    ) {
-      lastQualityPassAt = Date.now();
-      telemetry.track(
-        'session_quality_pass',
-        {
-          score: quality.score,
-          rttMs: quality.rttMs,
-          jitterMs: quality.jitterMs,
-          lossPercent: quality.lossPercent
-        },
-        { sessionId: State.currentSessionId }
-      );
-    }
-
-    if (
-      telemetry &&
-      telemetry.isEnabled() &&
-      connected &&
-      !magicMomentTracked &&
-      quality.score >= 82 &&
-      quality.rttMs > 0 &&
-      quality.rttMs <= 120 &&
-      quality.lossPercent <= 2
-    ) {
-      magicMomentTracked = true;
-      telemetry.track(
-        'magic_moment_reached',
-        {
-          score: quality.score,
-          rttMs: quality.rttMs,
-          jitterMs: quality.jitterMs
-        },
-        { sessionId: State.currentSessionId }
-      );
     }
 
     const snapshot = {
@@ -285,17 +217,9 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot, telemetry }) {
 
   return {
     onControlReady() {
-      const now = Date.now();
       connected = true;
       clearHeartbeatTimer();
       clearPending();
-      lastQualityPassAt = 0;
-      magicMomentTracked = false;
-
-      if (telemetry && telemetry.isEnabled() && lastDisconnectAt > 0 && now - lastDisconnectAt <= 30_000) {
-        telemetry.track('reconnect_success', { reconnectMs: now - lastDisconnectAt }, { sessionId: State.currentSessionId });
-      }
-      lastDisconnectAt = 0;
 
       sendHeartbeatPing();
       scheduleHeartbeat();
@@ -303,9 +227,6 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot, telemetry }) {
     },
 
     onControlClosed() {
-      if (connected) {
-        lastDisconnectAt = Date.now();
-      }
       connected = false;
       clearHeartbeatTimer();
       clearPending();

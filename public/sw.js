@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v18';
+const CACHE_NAME = 'c2p-v19';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -6,7 +6,6 @@ const APP_SHELL_ASSETS = [
   '/style.css',
   '/app.js',
   '/lib/state.js',
-  '/lib/telemetry.js',
   '/lib/term.js',
   '/lib/control.js',
   '/lib/ui.js',

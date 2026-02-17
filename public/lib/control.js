@@ -16,7 +16,7 @@ function withReconnectJitter(baseDelayMs) {
   return Math.max(300, safeBase + jitter);
 }
 
-export function createControl({ term, sessionTabs, statusBar, toast, actions, qualityMonitor, telemetry }) {
+export function createControl({ term, sessionTabs, statusBar, toast, actions, qualityMonitor }) {
   return {
     send(payload) {
       if (!State.controlSocket || State.controlSocket.readyState !== WebSocket.OPEN) {
@@ -53,11 +53,6 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         statusBar.setText('控制通道已鉴权');
         if (qualityMonitor && typeof qualityMonitor.onControlReady === 'function') {
           qualityMonitor.onControlReady();
-        }
-        if (telemetry && typeof telemetry.track === 'function') {
-          telemetry.track('control_authenticated', {
-            reconnectDelayMs: State.reconnectDelayMs
-          });
         }
         if (State.controlSocket && State.controlSocket.readyState === WebSocket.OPEN) {
           State.controlSocket.send(
@@ -288,11 +283,6 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
           statusBar.setControl('offline');
           statusBar.setText('访问令牌无效，请重新使用 #token 链接登录');
           toast.show('认证已失效，请重新登录', 'danger');
-          try {
-            window.dispatchEvent(new Event('c2p:auth-required'));
-          } catch {
-            // ignore event dispatch failures
-          }
           return;
         }
         statusBar.setControl('warn');

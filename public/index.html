@@ -143,10 +143,6 @@
               <span id="monitor-loss-text">丢包 -</span>
               <span id="monitor-profile-text">桌面档位 balanced</span>
             </div>
-            <label class="telemetry-toggle">
-              <input id="telemetry-opt-in" type="checkbox" />
-              启用匿名遥测（可选）
-            </label>
           </section>
 
           <section id="appearance-panel" class="dock-card appearance-card" aria-label="外观设置">
@@ -190,28 +186,6 @@
         </div>
       </section>
 
-    </div>
-
-    <div id="auth-overlay" class="auth-overlay" hidden>
-      <section class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-        <h2 id="auth-title" class="auth-title">需要登录</h2>
-        <p class="auth-desc">
-          请使用带 <code>#token</code> 的链接打开，或在下方粘贴 bootstrap token。
-        </p>
-        <input
-          id="auth-bootstrap-token"
-          class="auth-input"
-          type="text"
-          inputmode="text"
-          autocomplete="off"
-          autocapitalize="none"
-          spellcheck="false"
-          placeholder="粘贴 bootstrap token"
-        />
-        <button id="auth-login-btn" class="btn auth-login-btn" type="button">登录</button>
-        <p id="auth-error" class="auth-error" hidden></p>
-        <p class="auth-hint">提示：访问令牌仅保存在当前会话（sessionStorage）。</p>
-      </section>
     </div>
 
     <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>

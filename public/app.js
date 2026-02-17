@@ -3,25 +3,18 @@ import { createFiles } from './lib/files.js';
 import { createGestures } from './lib/gestures.js';
 import { createMonitor } from './lib/monitor.js';
 import { createQualityMonitor } from './lib/quality.js';
-import { createTelemetry } from './lib/telemetry.js';
 import { createTerm } from './lib/term.js';
 import { createUi } from './lib/ui.js';
 import { State } from './lib/state.js';
 
 let control = null;
 let term = null;
-let telemetry = null;
 let qualityMonitor = null;
 
 const getControl = () => control;
 const getTerm = () => term;
-const getTelemetry = () => telemetry;
 
-const ui = createUi({ getControl, getTerm, getTelemetry });
-
-telemetry = createTelemetry({
-  toast: ui.Toast
-});
+const ui = createUi({ getControl, getTerm });
 
 term = createTerm({
   getControl,
@@ -58,8 +51,7 @@ qualityMonitor = createQualityMonitor({
   },
   onSnapshot(snapshot) {
     monitor.setConnectionQuality(snapshot);
-  },
-  telemetry
+  }
 });
 
 control = createControl({
@@ -68,8 +60,7 @@ control = createControl({
   statusBar: ui.StatusBar,
   toast: ui.Toast,
   actions: ui.Actions,
-  qualityMonitor,
-  telemetry
+  qualityMonitor
 });
 
 let deferredModulesInited = false;
@@ -92,7 +83,6 @@ window.addEventListener(
 );
 
 const bootstrapResult = ui.bootstrap();
-telemetry.init();
 gestures.bind();
 
 Promise.resolve(bootstrapResult).finally(() => {
