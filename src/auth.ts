@@ -8,12 +8,15 @@ const BOOTSTRAP_TOKEN_FILE = '.auth-token';
 const SIGNING_SECRET_FILE = '.auth-signing-secret';
 const ACCESS_TOKEN_VERSION = 'v1';
 const DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60;
+const ACCESS_TOKEN_SCOPES = ['admin', 'readonly'] as const;
+
+export type AccessTokenScope = (typeof ACCESS_TOKEN_SCOPES)[number];
 
 export interface AccessTokenClaims {
   jti: string;
   iat: number;
   exp: number;
-  scope: 'admin';
+  scope: AccessTokenScope;
 }
 
 export interface AccessTokenIssueResult {
@@ -52,6 +55,17 @@ export interface AccessTokenServiceOptions {
   signingSecret: string;
   ttlSeconds?: number;
 }
+
+export type AccessTokenRefreshResult =
+  | {
+      ok: true;
+      previousClaims: AccessTokenClaims;
+      issued: AccessTokenIssueResult;
+    }
+  | {
+      ok: false;
+      code: AccessTokenVerifyFailureCode;
+    };
 
 export interface AccessAuthMiddlewareHooks {
   onFailure?: (req: Request, reason: AccessTokenVerifyFailureCode | 'missing') => void;
@@ -108,6 +122,10 @@ function normalizeTtlSeconds(input: number | undefined): number {
     return DEFAULT_ACCESS_TOKEN_TTL_SECONDS;
   }
   return Math.max(60, Math.min(Math.trunc(input as number), 7 * 24 * 60 * 60));
+}
+
+function isAccessTokenScope(value: unknown): value is AccessTokenScope {
+  return value === 'admin' || value === 'readonly';
 }
 
 export function tokenFilePath(baseDir = process.cwd()): string {
@@ -169,13 +187,13 @@ export class AccessTokenService {
     return this.ttlSeconds;
   }
 
-  issueAccessToken(actor: string): AccessTokenIssueResult {
+  issueAccessToken(actor: string, scope: AccessTokenScope = 'admin'): AccessTokenIssueResult {
     const nowSec = Math.floor(Date.now() / 1000);
     const claims: AccessTokenClaims = {
       jti: createJti(),
       iat: nowSec,
       exp: nowSec + this.ttlSeconds,
-      scope: 'admin'
+      scope
     };
 
     const payloadBase64Url = base64UrlEncode(JSON.stringify(claims));
@@ -227,7 +245,7 @@ export class AccessTokenService {
         typeof parsed.jti !== 'string' ||
         !Number.isFinite(parsed.iat) ||
         !Number.isFinite(parsed.exp) ||
-        parsed.scope !== 'admin'
+        !isAccessTokenScope(parsed.scope)
       ) {
         return { ok: false, code: 'invalid_payload' };
       }
@@ -235,7 +253,7 @@ export class AccessTokenService {
         jti: parsed.jti,
         iat: Math.trunc(parsed.iat as number),
         exp: Math.trunc(parsed.exp as number),
-        scope: 'admin'
+        scope: parsed.scope
       };
     } catch {
       return { ok: false, code: 'invalid_payload' };
@@ -264,6 +282,21 @@ export class AccessTokenService {
     }
     this.store.revokeToken(result.claims.jti, reason);
     return result;
+  }
+
+  refreshAccessToken(token: string, actor: string): AccessTokenRefreshResult {
+    const verified = this.verifyAccessToken(token);
+    if (!verified.ok) {
+      return verified;
+    }
+
+    this.store.revokeToken(verified.claims.jti, 'refresh-rotate');
+    const issued = this.issueAccessToken(actor, verified.claims.scope);
+    return {
+      ok: true,
+      previousClaims: verified.claims,
+      issued
+    };
   }
 }
 

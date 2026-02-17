@@ -8,6 +8,7 @@ import express from 'express';
 import qrcode from 'qrcode-terminal';
 import {
   AccessTokenService,
+  type AccessTokenScope,
   createAccessAuthMiddleware,
   ensureAccessSigningSecret,
   ensureAuthToken,
@@ -91,6 +92,10 @@ function parseIntEnv(name: string, fallback: number): number {
     return fallback;
   }
   return parsed;
+}
+
+function parseAccessTokenScope(value: unknown): AccessTokenScope {
+  return value === 'readonly' ? 'readonly' : 'admin';
 }
 
 const cliOptions = parseServerCliOptions(process.argv.slice(2));
@@ -240,13 +245,16 @@ app.post('/api/auth/exchange', (req, res) => {
     return;
   }
 
-  const issued = accessTokenService.issueAccessToken(remoteIp);
+  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : null;
+  const scope = parseAccessTokenScope(body?.scope);
+  const issued = accessTokenService.issueAccessToken(remoteIp, scope);
   auditLogger.log({
     event: 'auth.token_issued',
     actor: remoteIp,
     resource: issued.claims.jti,
     outcome: 'success',
     metadata: {
+      scope: issued.claims.scope,
       expiresAt: issued.expiresAt,
       ttlSeconds: accessTokenService.getAccessTokenTtlSeconds()
     }
@@ -255,6 +263,7 @@ app.post('/api/auth/exchange', (req, res) => {
   res.status(200).json({
     tokenType: 'Bearer',
     accessToken: issued.token,
+    scope: issued.claims.scope,
     expiresAt: issued.expiresAt,
     ttlSeconds: accessTokenService.getAccessTokenTtlSeconds()
   });
@@ -288,8 +297,57 @@ const accessAuthMiddleware = createAccessAuthMiddleware(accessTokenService, {
 });
 app.use('/api', accessAuthMiddleware);
 
+app.post('/api/auth/refresh', (req, res) => {
+  const auth = res.locals.auth as
+    | {
+        token: string;
+        claims: { jti: string; scope: AccessTokenScope };
+      }
+    | undefined;
+  if (!auth) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+
+  const remoteIp = getClientIp(req);
+  const refreshed = accessTokenService.refreshAccessToken(auth.token, remoteIp);
+  if (!refreshed.ok) {
+    auditLogger.log({
+      event: 'auth.token_refresh_failed',
+      actor: remoteIp,
+      resource: auth.claims.jti,
+      outcome: 'failure',
+      metadata: {
+        reason: refreshed.code
+      }
+    });
+    res.status(401).json({ error: 'refresh failed', reason: refreshed.code });
+    return;
+  }
+
+  auditLogger.log({
+    event: 'auth.token_refreshed',
+    actor: remoteIp,
+    resource: refreshed.issued.claims.jti,
+    outcome: 'success',
+    metadata: {
+      previousJti: refreshed.previousClaims.jti,
+      scope: refreshed.issued.claims.scope,
+      expiresAt: refreshed.issued.expiresAt
+    }
+  });
+
+  res.status(200).json({
+    tokenType: 'Bearer',
+    accessToken: refreshed.issued.token,
+    scope: refreshed.issued.claims.scope,
+    expiresAt: refreshed.issued.expiresAt,
+    ttlSeconds: accessTokenService.getAccessTokenTtlSeconds()
+  });
+});
+
 app.post('/api/auth/revoke', (req, res) => {
-  const auth = res.locals.auth as { token: string; claims: { jti: string } } | undefined;
+  const auth = res.locals.auth as { token: string; claims: { jti: string; scope: AccessTokenScope } } | undefined;
   if (!auth) {
     res.status(401).json({ error: 'unauthorized' });
     return;
@@ -307,7 +365,8 @@ app.post('/api/auth/revoke', (req, res) => {
     resource: revoked.claims.jti,
     outcome: 'success',
     metadata: {
-      reason: 'self-revoke'
+      reason: 'self-revoke',
+      scope: auth.claims.scope
     }
   });
 

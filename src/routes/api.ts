@@ -4,6 +4,7 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Application, Request, Response } from 'express';
+import type { AccessTokenScope } from '../auth.js';
 import type { AuditLogger } from '../audit-log.js';
 import type { PtyManager } from '../pty-manager.js';
 import { getClientIp } from '../security.js';
@@ -349,7 +350,7 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
   const auditFsEvent = (
     req: Request,
     res: Response,
-    event: 'fs.read' | 'fs.upload' | 'fs.download' | 'fs.delete' | 'fs.write',
+    event: 'fs.read' | 'fs.upload' | 'fs.download' | 'fs.delete' | 'fs.write' | 'fs.mkdir' | 'fs.rename',
     resource: string,
     outcome: 'success' | 'failure',
     metadata: Record<string, unknown> = {}
@@ -361,6 +362,34 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
       outcome,
       metadata
     });
+  };
+
+  const requireScope = (req: Request, res: Response, requiredScope: AccessTokenScope, resource: string): boolean => {
+    const auth = res.locals.auth as { claims?: { scope?: AccessTokenScope } } | undefined;
+    const actualScope =
+      auth?.claims?.scope === 'admin' || auth?.claims?.scope === 'readonly' ? auth.claims.scope : 'unknown';
+    if (requiredScope === 'readonly' || actualScope === 'admin') {
+      return true;
+    }
+
+    auditLogger.log({
+      event: 'auth.denied_scope',
+      actor: resolveAuditActor(req, res),
+      resource,
+      outcome: 'failure',
+      metadata: {
+        requiredScope,
+        actualScope
+      }
+    });
+
+    res.status(403).json({
+      error: 'forbidden',
+      reason: 'insufficient_scope',
+      requiredScope,
+      actualScope
+    });
+    return false;
   };
 
   app.get('/api/tasks', (_req: Request, res: Response) => {
@@ -419,6 +448,10 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
   });
 
   app.post('/api/telemetry/events', (req: Request, res: Response) => {
+    if (!requireScope(req, res, 'admin', '/api/telemetry/events')) {
+      return;
+    }
+
     const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : null;
     if (!body) {
       res.status(400).json({ error: 'invalid telemetry payload' });
@@ -614,6 +647,10 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
   });
 
   app.post('/api/fs/write', async (req: Request, res: Response) => {
+    if (!requireScope(req, res, 'admin', '/api/fs/write')) {
+      return;
+    }
+
     const requestPath = readStringBodyField(req.body, 'path');
     const content = readStringBodyField(req.body, 'content');
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
@@ -647,31 +684,46 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
   });
 
   app.post('/api/fs/mkdir', async (req: Request, res: Response) => {
+    if (!requireScope(req, res, 'admin', '/api/fs/mkdir')) {
+      return;
+    }
+
     const requestPath = readStringBodyField(req.body, 'path');
     const recursive = readBooleanBodyField(req.body, 'recursive', true);
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
     if (!targetPath) {
+      auditFsEvent(req, res, 'fs.mkdir', String(requestPath ?? ''), 'failure', { reason: 'invalid path' });
       res.status(400).json({ error: 'invalid path' });
       return;
     }
 
     try {
       await fs.promises.mkdir(targetPath, { recursive });
+      auditFsEvent(req, res, 'fs.mkdir', toRelativePath(fsRoot, targetPath), 'success', { recursive });
       res.status(201).json({
         ok: true,
         path: toRelativePath(fsRoot, targetPath)
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      auditFsEvent(req, res, 'fs.mkdir', toRelativePath(fsRoot, targetPath), 'failure', { reason: message, recursive });
       respondFsError(res, error);
     }
   });
 
   app.post('/api/fs/rename', async (req: Request, res: Response) => {
+    if (!requireScope(req, res, 'admin', '/api/fs/rename')) {
+      return;
+    }
+
     const sourcePathRaw = readStringBodyField(req.body, 'path');
     const targetPathRaw = readStringBodyField(req.body, 'to');
     const sourcePath = resolvePathWithinBase(fsRoot, sourcePathRaw);
     const targetPath = resolvePathWithinBase(fsRoot, targetPathRaw);
     if (!sourcePath || !targetPath) {
+      auditFsEvent(req, res, 'fs.rename', `${String(sourcePathRaw ?? '')} -> ${String(targetPathRaw ?? '')}`, 'failure', {
+        reason: 'invalid path'
+      });
       res.status(400).json({ error: 'invalid path' });
       return;
     }
@@ -679,17 +731,29 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     try {
       await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.promises.rename(sourcePath, targetPath);
+      auditFsEvent(req, res, 'fs.rename', toRelativePath(fsRoot, sourcePath), 'success', {
+        to: toRelativePath(fsRoot, targetPath)
+      });
       res.json({
         ok: true,
         from: toRelativePath(fsRoot, sourcePath),
         to: toRelativePath(fsRoot, targetPath)
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      auditFsEvent(req, res, 'fs.rename', toRelativePath(fsRoot, sourcePath), 'failure', {
+        reason: message,
+        to: toRelativePath(fsRoot, targetPath)
+      });
       respondFsError(res, error);
     }
   });
 
   app.post('/api/fs/remove', async (req: Request, res: Response) => {
+    if (!requireScope(req, res, 'admin', '/api/fs/remove')) {
+      return;
+    }
+
     const requestPath = readStringBodyField(req.body, 'path');
     const recursive = readBooleanBodyField(req.body, 'recursive', false);
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
@@ -765,6 +829,10 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
   });
 
   app.post('/api/fs/upload', async (req: Request, res: Response) => {
+    if (!requireScope(req, res, 'admin', '/api/fs/upload')) {
+      return;
+    }
+
     const requestPath = readStringQuery(req.query.path);
     const targetPath = resolvePathWithinBase(fsRoot, requestPath);
     if (!targetPath) {

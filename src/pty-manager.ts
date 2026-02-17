@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, type IPty } from 'node-pty';
@@ -9,6 +9,7 @@ const SESSION_LOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TMUX_SESSION_PREFIX = 'c2p-';
 const TMUX_POLL_INTERVAL_MS = 1500;
 const ATTACH_KILL_ESCALATION_DELAY_MS = 1200;
+const TMUX_KILL_TIMEOUT_MS = 1200;
 const FLOW_CONTROL_PAUSE = '\u0013';
 const FLOW_CONTROL_RESUME = '\u0011';
 const OSC52_START = '\u001b]52;';
@@ -251,6 +252,16 @@ function isTmuxNoServerError(message: string): boolean {
   );
 }
 
+function isLikelyTmuxNoServer(args: string[], error: unknown, message: string): boolean {
+  if (isTmuxNoServerError(message)) {
+    return true;
+  }
+  const status =
+    error && typeof error === 'object' ? (error as NodeJS.ErrnoException & { status?: number }).status : undefined;
+  const command = args[0] ?? '';
+  return status === 1 && (command === 'list-panes' || command === 'list-sessions');
+}
+
 export class PtyManager {
   private readonly defaultCwd: string;
   private readonly tmuxBin: string;
@@ -318,7 +329,7 @@ export class PtyManager {
       return typeof output === 'string' ? output : String(output);
     } catch (error) {
       const message = readExecErrorMessage(error);
-      if (options.allowNoServer && isTmuxNoServerError(message)) {
+      if (options.allowNoServer && isLikelyTmuxNoServer(args, error, message)) {
         return '';
       }
       if (options.allowFailure) {
@@ -326,6 +337,63 @@ export class PtyManager {
       }
       throw new Error(`tmux ${args.join(' ')} failed: ${message}`);
     }
+  }
+
+  private runTmuxAsync(
+    args: string[],
+    options: {
+      allowNoServer?: boolean;
+      allowFailure?: boolean;
+      timeoutMs?: number;
+    } = {}
+  ): Promise<string> {
+    this.ensureTmuxAvailable();
+
+    return new Promise((resolve, reject) => {
+      const controller = new AbortController();
+      let timer: NodeJS.Timeout | null = null;
+      const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(1, Math.floor(options.timeoutMs as number)) : 0;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          controller.abort();
+        }, timeoutMs);
+        timer.unref();
+      }
+
+      execFile(
+        this.tmuxBin,
+        args,
+        {
+          encoding: 'utf8',
+          signal: controller.signal
+        },
+        (error, stdout) => {
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+
+          if (error) {
+            const message = readExecErrorMessage(error);
+            const aborted =
+              (error as NodeJS.ErrnoException).name === 'AbortError' ||
+              message.toLowerCase().includes('aborted');
+            if (options.allowNoServer && isLikelyTmuxNoServer(args, error, message)) {
+              resolve('');
+              return;
+            }
+            if (options.allowFailure || aborted) {
+              resolve('');
+              return;
+            }
+            reject(new Error(`tmux ${args.join(' ')} failed: ${message}`));
+            return;
+          }
+
+          resolve(typeof stdout === 'string' ? stdout : String(stdout));
+        }
+      );
+    });
   }
 
   private startSessionPoll(): void {
@@ -789,12 +857,12 @@ export class PtyManager {
       return;
     }
 
-    this.runTmux(['kill-session', '-t', toTmuxSessionName(sessionId)], {
-      allowFailure: true,
-      allowNoServer: true
-    });
-
     this.removeSession(runtime.info.id, 0);
+    void this.runTmuxAsync(['kill-session', '-t', toTmuxSessionName(sessionId)], {
+      allowFailure: true,
+      allowNoServer: true,
+      timeoutMs: TMUX_KILL_TIMEOUT_MS
+    }).catch(() => {});
   }
 
   getLogPath(sessionId: string): string | null {

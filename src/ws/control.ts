@@ -218,6 +218,7 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
 
   const controlClients = new Set<WebSocket>();
   const killRequested = new Set<string>();
+  const killOptimisticBroadcasted = new Set<string>();
 
   const broadcastControl = (payload: ControlOutbound): void => {
     const data = JSON.stringify(payload);
@@ -236,6 +237,7 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
   ptyManager.onExit((sessionId, exitCode) => {
     const now = new Date().toISOString();
     const wasKilled = killRequested.delete(sessionId);
+    const wasOptimistic = killOptimisticBroadcasted.delete(sessionId);
     const status: TaskStatus = wasKilled ? 'killed' : exitCode === 0 ? 'done' : 'error';
 
     store.updateTask(sessionId, {
@@ -260,7 +262,9 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
       }
     });
 
-    broadcastControl({ type: 'exited', sessionId, exitCode });
+    if (!wasOptimistic) {
+      broadcastControl({ type: 'exited', sessionId, exitCode });
+    }
     broadcastSessions();
   });
 
@@ -406,6 +410,19 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
 
         if (message.type === 'kill') {
           killRequested.add(message.sessionId);
+          killOptimisticBroadcasted.add(message.sessionId);
+
+          const nowIso = new Date().toISOString();
+          store.updateSession(message.sessionId, {
+            status: 'killed',
+            updatedAt: nowIso
+          });
+
+          const optimisticList = ptyManager.listSessions().filter((session) => session.id !== message.sessionId);
+          metrics.setTerminalSessionsActive(optimisticList.length);
+          broadcastControl({ type: 'exited', sessionId: message.sessionId, exitCode: 0 });
+          broadcastControl({ type: 'sessions', list: optimisticList });
+
           auditLogger.log({
             event: 'session.terminal_kill',
             actor: remoteIp,
@@ -416,10 +433,6 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
             }
           });
           ptyManager.kill(message.sessionId);
-          store.updateSession(message.sessionId, {
-            status: 'killed',
-            updatedAt: new Date().toISOString()
-          });
         }
       });
     });
