@@ -231,8 +231,8 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
 
     connect() {
       if (!State.token) {
-        statusBar.setText('缺少 token，请使用 #token=... 打开');
-        return;
+        statusBar.setControl('offline');
+        return false;
       }
       if (
         State.controlSocket &&
@@ -288,11 +288,16 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
           statusBar.setControl('offline');
           statusBar.setText('访问令牌无效，请重新使用 #token 链接登录');
           toast.show('认证已失效，请重新登录', 'danger');
+          try {
+            window.dispatchEvent(new Event('c2p:auth-required'));
+          } catch {
+            // ignore event dispatch failures
+          }
           return;
         }
         statusBar.setControl('warn');
-        statusBar.setText('连接断开，正在重连...');
-        toast.show('连接断开，正在重连...', 'warn');
+        statusBar.setText('控制通道已断开，正在自动重连（可等待重连，或刷新页面并检查网络）');
+        toast.show('控制通道已断开，正在自动重连；可刷新页面并检查网络', 'warn');
         this.scheduleReconnect();
       };
 

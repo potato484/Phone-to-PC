@@ -1,13 +1,18 @@
-const CACHE_NAME = 'c2p-v17';
+const CACHE_NAME = 'c2p-v18';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
+  '/tokens.css',
   '/style.css',
   '/app.js',
   '/lib/state.js',
+  '/lib/telemetry.js',
   '/lib/term.js',
   '/lib/control.js',
   '/lib/ui.js',
+  '/lib/theme.js',
+  '/lib/quality.js',
+  '/lib/gesture-scroll-policy.js',
   '/lib/gestures.js',
   '/lib/files.js',
   '/lib/monitor.js',

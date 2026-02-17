@@ -83,6 +83,14 @@ function initDeferredModules() {
   monitor.init({ silentAuthRetry: true });
 }
 
+window.addEventListener(
+  'c2p:authenticated',
+  () => {
+    initDeferredModules();
+  },
+  { passive: true }
+);
+
 const bootstrapResult = ui.bootstrap();
 telemetry.init();
 gestures.bind();

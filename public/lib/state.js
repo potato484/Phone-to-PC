@@ -15,6 +15,7 @@ export const DOM = {
   sessionTabs: document.getElementById('session-tabs'),
   quickKeys: document.getElementById('quick-keys'),
   filesPath: document.getElementById('files-path'),
+  filesScopePill: document.getElementById('files-scope-pill'),
   filesList: document.getElementById('files-list'),
   filesRootBtn: document.getElementById('files-root-btn'),
   filesRefreshBtn: document.getElementById('files-refresh-btn'),
@@ -46,6 +47,14 @@ export const DOM = {
   monitorLossText: document.getElementById('monitor-loss-text'),
   monitorProfileText: document.getElementById('monitor-profile-text'),
   telemetryOptIn: document.getElementById('telemetry-opt-in'),
+  prefThemeSelect: document.getElementById('pref-theme'),
+  prefContrastSelect: document.getElementById('pref-contrast'),
+  prefMotionSelect: document.getElementById('pref-motion'),
+  prefTransparencySelect: document.getElementById('pref-transparency'),
+  authOverlay: document.getElementById('auth-overlay'),
+  authBootstrapToken: document.getElementById('auth-bootstrap-token'),
+  authLoginBtn: document.getElementById('auth-login-btn'),
+  authError: document.getElementById('auth-error'),
   toastRoot: document.getElementById('toast-root')
 };
 

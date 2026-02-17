@@ -10,6 +10,7 @@
     <title>C2P Controller</title>
     <link rel="manifest" href="/manifest.json" />
     <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/tokens.css" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -54,7 +55,10 @@
         <div id="dock-panel" class="dock-panel">
           <section class="dock-card files-card" aria-label="文件管理">
             <header class="dock-card-header">
-              <h3 class="dock-card-title">文件管理</h3>
+              <div class="dock-card-heading">
+                <h3 class="dock-card-title">文件管理</h3>
+                <span id="files-scope-pill" class="scope-pill" hidden>只读</span>
+              </div>
               <code id="files-path" class="files-path">.</code>
             </header>
             <div class="files-toolbar">
@@ -144,9 +148,70 @@
               启用匿名遥测（可选）
             </label>
           </section>
+
+          <section id="appearance-panel" class="dock-card appearance-card" aria-label="外观设置">
+            <header class="dock-card-header">
+              <h3 class="dock-card-title">外观设置</h3>
+            </header>
+            <div class="pref-grid" role="group" aria-label="外观偏好">
+              <label class="pref-row">
+                <span class="pref-label">主题</span>
+                <select id="pref-theme" class="pref-select" aria-label="主题偏好">
+                  <option value="system">跟随系统</option>
+                  <option value="dark">深色</option>
+                  <option value="light">浅色</option>
+                </select>
+              </label>
+              <label class="pref-row">
+                <span class="pref-label">高对比</span>
+                <select id="pref-contrast" class="pref-select" aria-label="高对比偏好">
+                  <option value="system">跟随系统</option>
+                  <option value="more">开启</option>
+                  <option value="normal">关闭</option>
+                </select>
+              </label>
+              <label class="pref-row">
+                <span class="pref-label">减少动效</span>
+                <select id="pref-motion" class="pref-select" aria-label="减少动效偏好">
+                  <option value="system">跟随系统</option>
+                  <option value="reduce">开启</option>
+                  <option value="normal">关闭</option>
+                </select>
+              </label>
+              <label class="pref-row">
+                <span class="pref-label">降低透明度</span>
+                <select id="pref-transparency" class="pref-select" aria-label="降低透明度偏好">
+                  <option value="normal">关闭</option>
+                  <option value="reduce">开启</option>
+                </select>
+              </label>
+            </div>
+          </section>
         </div>
       </section>
 
+    </div>
+
+    <div id="auth-overlay" class="auth-overlay" hidden>
+      <section class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+        <h2 id="auth-title" class="auth-title">需要登录</h2>
+        <p class="auth-desc">
+          请使用带 <code>#token</code> 的链接打开，或在下方粘贴 bootstrap token。
+        </p>
+        <input
+          id="auth-bootstrap-token"
+          class="auth-input"
+          type="text"
+          inputmode="text"
+          autocomplete="off"
+          autocapitalize="none"
+          spellcheck="false"
+          placeholder="粘贴 bootstrap token"
+        />
+        <button id="auth-login-btn" class="btn auth-login-btn" type="button">登录</button>
+        <p id="auth-error" class="auth-error" hidden></p>
+        <p class="auth-hint">提示：访问令牌仅保存在当前会话（sessionStorage）。</p>
+      </section>
     </div>
 
     <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
