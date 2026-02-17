@@ -34,8 +34,6 @@
   - `scripts/benchmark/metrics-dump.mjs`
   - `reports/raw/lan-baseline-2026-02-17.prom`
   - `reports/raw/wan-baseline-2026-02-17.prom`
-- `CAP-TELEM-001`:
-  - `tests/integration/api-scope-enforcement.test.mjs`
 
 ## Skip Policy
 

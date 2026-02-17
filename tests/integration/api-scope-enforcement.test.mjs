@@ -209,15 +209,6 @@ test('readonly scope cannot call write APIs and emits denied-scope audit', async
           Authorization: `Bearer ${readonlyIssued.accessToken}`,
           'Content-Type': 'application/octet-stream'
         }
-      },
-      {
-        method: 'POST',
-        url: `${baseUrl}/api/telemetry/events`,
-        body: JSON.stringify({
-          deviceId: 'readonly-device',
-          events: [{ name: 'session_quality_pass', happenedAt: new Date().toISOString(), payload: {} }]
-        }),
-        headers: authHeaders
       }
     ];
 
@@ -233,13 +224,6 @@ test('readonly scope cannot call write APIs and emits denied-scope audit', async
       assert.equal(payload.requiredScope, 'admin');
       assert.equal(payload.actualScope, 'readonly');
     }
-
-    const summaryResponse = await fetch(`${baseUrl}/api/telemetry/summary`, {
-      headers: {
-        Authorization: `Bearer ${readonlyIssued.accessToken}`
-      }
-    });
-    assert.equal(summaryResponse.status, 200, 'readonly should read telemetry summary');
 
     const revokeResponse = await fetch(`${baseUrl}/api/auth/revoke`, {
       method: 'POST',

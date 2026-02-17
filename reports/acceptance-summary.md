@@ -17,7 +17,6 @@
 - 会话持久化：`CAP-PTY-001`
 - 文件链路：`CAP-FS-001`, `CAP-FS-002`
 - 可观测性：`CAP-OBS-001`, `CAP-OBS-002`
-- 遥测汇总：`CAP-TELEM-001`
 
 ## Acceptance Mapping (方案2 DoD)
 
