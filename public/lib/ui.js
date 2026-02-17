@@ -35,11 +35,48 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=19';
+const SERVICE_WORKER_URL = '/sw.js?v=21';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const AUTH_TOKEN_WARN_LEAD_MS = 5 * 60 * 1000;
 const AUTH_TOKEN_REFRESH_LEAD_MS = 2 * 60 * 1000;
+const KEYBOARD_INSET_APPLY_DELAY_MS = 120;
+const NON_TEXT_INPUT_TYPES = new Set([
+  'button',
+  'checkbox',
+  'color',
+  'file',
+  'hidden',
+  'image',
+  'radio',
+  'range',
+  'reset',
+  'submit'
+]);
+
+function isKeyboardInputTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  if (target.classList.contains('xterm-helper-textarea')) {
+    return true;
+  }
+  if (target instanceof HTMLTextAreaElement) {
+    return true;
+  }
+  if (target instanceof HTMLInputElement) {
+    const type = (target.type || 'text').toLowerCase();
+    return !NON_TEXT_INPUT_TYPES.has(type);
+  }
+  return target.isContentEditable;
+}
+
+function isTerminalFocusTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  return target.classList.contains('xterm-helper-textarea') || !!target.closest('#terminal-wrap');
+}
 
 export function createUi({ getControl, getTerm }) {
   let sessionCache = [];
@@ -136,6 +173,33 @@ export function createUi({ getControl, getTerm }) {
       });
     },
 
+    setKeyboardVisibility(visible) {
+      if (!DOM.dock) {
+        return;
+      }
+      const nextVisible = !!visible;
+      DOM.dock.classList.toggle('is-keyboard-visible', nextVisible);
+      if (nextVisible && DOM.dock.classList.contains('is-expanded')) {
+        this.collapse();
+        return;
+      }
+      this.scheduleMeasure();
+    },
+
+    ensureQuickKeysVisible() {
+      if (!DOM.quickKeys || !State.keyboardVisible) {
+        return;
+      }
+      const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      const rect = DOM.quickKeys.getBoundingClientRect();
+      if (rect.top < 0 || rect.bottom > viewportHeight) {
+        DOM.quickKeys.scrollIntoView({
+          block: 'nearest',
+          inline: 'nearest'
+        });
+      }
+    },
+
     expand() {
       if (!DOM.dock || !DOM.dockHandle) {
         return;
@@ -156,6 +220,9 @@ export function createUi({ getControl, getTerm }) {
 
     toggle() {
       if (!DOM.dock) {
+        return;
+      }
+      if (State.keyboardVisible) {
         return;
       }
       if (DOM.dock.classList.contains('is-expanded')) {
@@ -761,6 +828,8 @@ export function createUi({ getControl, getTerm }) {
   };
 
   const QuickKeys = {
+    pointerHandledUntilMsByKey: {},
+
     render() {
       if (!DOM.quickKeys) {
         return;
@@ -772,20 +841,45 @@ export function createUi({ getControl, getTerm }) {
         rowEl.className = 'quick-key-row';
         rowEl.dataset.row = rowIndex === 0 ? 'control' : 'nav';
         row.forEach((entry) => {
-          const sequence = QUICK_KEY_SEQUENCES[entry.id];
-          if (!sequence) {
+          if (!QUICK_KEY_SEQUENCES[entry.id]) {
             return;
           }
           const button = document.createElement('button');
           button.type = 'button';
           button.className = 'quick-key-btn';
-          button.dataset.sequence = sequence;
           button.dataset.key = entry.id;
           button.textContent = entry.label;
           rowEl.appendChild(button);
         });
         DOM.quickKeys.appendChild(rowEl);
       });
+    },
+
+    runKeyById(keyId) {
+      if (!keyId) {
+        return false;
+      }
+      const sequence = QUICK_KEY_SEQUENCES[keyId];
+      if (!sequence) {
+        return false;
+      }
+      this.runSequence(sequence);
+      return true;
+    },
+
+    markPointerHandled(keyId) {
+      if (!keyId) {
+        return;
+      }
+      this.pointerHandledUntilMsByKey[keyId] = Date.now() + 420;
+    },
+
+    wasPointerHandledRecently(keyId) {
+      if (!keyId) {
+        return false;
+      }
+      const until = this.pointerHandledUntilMsByKey[keyId];
+      return Number.isFinite(until) && until > Date.now();
     },
 
     runSequence(sequence) {
@@ -809,16 +903,33 @@ export function createUi({ getControl, getTerm }) {
       }
       this.render();
 
+      DOM.quickKeys.addEventListener('pointerdown', (event) => {
+        const button = event.target.closest('.quick-key-btn');
+        if (!button) {
+          return;
+        }
+        const key = button.dataset.key;
+        if (!key) {
+          return;
+        }
+        event.preventDefault();
+        this.markPointerHandled(key);
+        this.runKeyById(key);
+      });
+
       DOM.quickKeys.addEventListener('click', (event) => {
         const button = event.target.closest('.quick-key-btn');
         if (!button) {
           return;
         }
-        const sequence = button.dataset.sequence;
-        if (!sequence) {
+        const key = button.dataset.key;
+        if (!key) {
           return;
         }
-        this.runSequence(sequence);
+        if (this.wasPointerHandledRecently(key)) {
+          return;
+        }
+        this.runKeyById(key);
       });
     }
   };
@@ -884,22 +995,29 @@ export function createUi({ getControl, getTerm }) {
       }, ZOOM_SETTLE_MS);
     },
 
+    syncKeyboardVisibility(nextKeyboardVisible) {
+      const visible = !!nextKeyboardVisible;
+      const changed = visible !== State.keyboardVisible;
+      State.keyboardVisible = visible;
+      Dock.setKeyboardVisibility(visible);
+      if (!visible && State.pendingResizeAfterKeyboard) {
+        State.pendingResizeAfterKeyboard = false;
+        const term = getTerm();
+        if (term) {
+          term.scheduleResize(true);
+        }
+      }
+      return changed;
+    },
+
     applyInset() {
       if (!window.visualViewport) {
         this.clearZoomSettleTimer();
         State.zoomActive = false;
         State.zoomNoticeShown = false;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
-        if (State.keyboardVisible) {
-          State.keyboardVisible = false;
-          if (State.pendingResizeAfterKeyboard) {
-            State.pendingResizeAfterKeyboard = false;
-            const term = getTerm();
-            if (term) {
-              term.scheduleResize(true);
-            }
-          }
-        }
+        State.viewportStableHeight = Math.max(0, window.innerHeight || 0);
+        this.syncKeyboardVisibility(false);
         Dock.scheduleMeasure();
         return;
       }
@@ -910,10 +1028,8 @@ export function createUi({ getControl, getTerm }) {
       if (zoomed) {
         State.zoomActive = true;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
-        if (State.keyboardVisible) {
-          State.keyboardVisible = false;
-          State.pendingResizeAfterKeyboard = false;
-        }
+        State.pendingResizeAfterKeyboard = false;
+        this.syncKeyboardVisibility(false);
         if (!State.zoomNoticeShown) {
           State.zoomNoticeShown = true;
           Toast.show('检测到页面缩放，已暂停终端重排', 'warn');
@@ -924,31 +1040,72 @@ export function createUi({ getControl, getTerm }) {
 
       this.clearZoomSettleTimer();
       State.zoomActive = false;
-      const keyboardOffset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
-      document.documentElement.style.setProperty('--dock-bottom-offset', `${Math.round(keyboardOffset)}px`);
-
-      const nextKeyboardVisible = keyboardOffset > KEYBOARD_VISIBLE_THRESHOLD_PX;
-      if (nextKeyboardVisible !== State.keyboardVisible) {
-        State.keyboardVisible = nextKeyboardVisible;
-        if (!nextKeyboardVisible && State.pendingResizeAfterKeyboard) {
-          State.pendingResizeAfterKeyboard = false;
-          const term = getTerm();
-          if (term) {
-            term.scheduleResize(true);
-          }
-        }
+      const viewportHeight = Math.max(0, Math.round(Number(viewport.height) || window.innerHeight || 0));
+      const inputFocused = isKeyboardInputTarget(document.activeElement);
+      if (!inputFocused || !State.viewportStableHeight) {
+        State.viewportStableHeight = viewportHeight;
       }
+      const stableHeight = State.viewportStableHeight || viewportHeight;
+      const keyboardOffset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      const keyboardFromInset = keyboardOffset > KEYBOARD_VISIBLE_THRESHOLD_PX;
+      const keyboardFromResize =
+        inputFocused && Math.max(0, stableHeight - viewportHeight) > KEYBOARD_VISIBLE_THRESHOLD_PX;
+      const nextKeyboardVisible = keyboardFromInset || keyboardFromResize;
+      const bottomOffset = keyboardFromInset ? Math.round(keyboardOffset) : 0;
+      document.documentElement.style.setProperty('--dock-bottom-offset', `${bottomOffset}px`);
+      this.syncKeyboardVisibility(nextKeyboardVisible);
       if (!nextKeyboardVisible) {
         const term = getTerm();
         if (term) {
           term.scheduleResize();
         }
+      } else {
+        window.requestAnimationFrame(() => {
+          Dock.ensureQuickKeysVisible();
+        });
       }
       Dock.scheduleMeasure();
     },
 
     bind() {
       this.applyInset();
+      const scheduleDelayedInsetSync = () => {
+        window.setTimeout(() => {
+          this.applyInset();
+        }, KEYBOARD_INSET_APPLY_DELAY_MS);
+      };
+      window.addEventListener('focusin', (event) => {
+        if (!isKeyboardInputTarget(event.target)) {
+          return;
+        }
+        scheduleDelayedInsetSync();
+        if (isTerminalFocusTarget(event.target)) {
+          window.setTimeout(() => {
+            Dock.ensureQuickKeysVisible();
+          }, KEYBOARD_INSET_APPLY_DELAY_MS);
+        }
+      });
+      window.addEventListener('focusout', (event) => {
+        if (!isKeyboardInputTarget(event.target)) {
+          return;
+        }
+        scheduleDelayedInsetSync();
+      });
+      if (DOM.terminalWrap) {
+        DOM.terminalWrap.addEventListener(
+          'pointerup',
+          () => {
+            window.setTimeout(() => {
+              if (!isTerminalFocusTarget(document.activeElement)) {
+                return;
+              }
+              this.applyInset();
+              Dock.ensureQuickKeysVisible();
+            }, KEYBOARD_INSET_APPLY_DELAY_MS);
+          },
+          { passive: true }
+        );
+      }
       if (!window.visualViewport) {
         return;
       }

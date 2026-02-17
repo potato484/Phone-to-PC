@@ -120,6 +120,7 @@ export const State = {
   resizeRafId: 0,
   resizeDebounceTimer: 0,
   keyboardVisible: false,
+  viewportStableHeight: 0,
   pendingResizeAfterKeyboard: false,
   zoomActive: false,
   zoomNoticeShown: false,

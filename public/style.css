@@ -3,6 +3,7 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --dock-bottom-offset: 0px;
   --dock-height: 180px;
+  --quick-keys-min-visible-height: 96px;
   --session-tab-delete-width: 84px;
   --session-tabs-max-height: clamp(112px, 24vh, 220px);
 }
@@ -217,6 +218,39 @@ select {
   padding: 8px 10px calc(10px + var(--safe-bottom));
 }
 
+.dock.is-keyboard-visible {
+  position: fixed;
+  left: 0;
+  right: 0;
+  width: min(100vw, 980px);
+  margin: 0 auto;
+  bottom: var(--dock-bottom-offset);
+  z-index: 24;
+  padding: 6px 10px calc(8px + var(--safe-bottom));
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.28);
+}
+
+.dock.is-keyboard-visible .session-tabs {
+  display: none;
+}
+
+.dock.is-keyboard-visible .quick-keys {
+  min-height: var(--quick-keys-min-visible-height);
+}
+
+.dock.is-keyboard-visible .dock-handle {
+  display: none;
+}
+
+.dock.is-keyboard-visible .dock-panel {
+  margin-top: 0 !important;
+  max-height: 0 !important;
+  opacity: 0 !important;
+  overflow: hidden !important;
+  pointer-events: none !important;
+  transform: translateY(8px) !important;
+}
+
 .session-tabs {
   display: grid;
   grid-auto-rows: minmax(44px, auto);
@@ -309,7 +343,7 @@ select {
   padding: 0 4px;
   user-select: none;
 }
-.quick-key-btn:active { border-color: var(--accent); background: var(--surface-high); transform: scale(0.92); }
+.quick-key-btn:active { border-color: var(--accent); background: var(--surface-high); transform: none; }
 
 .dock-handle {
   width: 100%;
