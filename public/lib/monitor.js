@@ -1,6 +1,7 @@
-import { DOM, apiUrl, authedFetch } from './state.js';
+import { DOM, State, apiUrl, authedFetch } from './state.js';
 
 const MONITOR_POLL_INTERVAL_MS = 5_000;
+const MONITOR_AUTH_RETRY_DELAY_MS = 1_000;
 
 function clampPercent(value) {
   const num = Number(value);
@@ -82,6 +83,13 @@ export function createMonitor({ toast }) {
   let pollTimer = 0;
   let firstLoad = true;
   let qualitySnapshot = null;
+  let authRetryTimer = 0;
+  let silentAuthRetryEnabled = false;
+
+  function isAuthFailureError(error) {
+    const message = error && typeof error === 'object' && 'message' in error ? String(error.message).toLowerCase() : '';
+    return message.includes('401') || message.includes('403') || message.includes('missing bearer token');
+  }
 
   async function fetchStats() {
     const response = await authedFetch(apiUrl('/api/system/stats'));
@@ -157,11 +165,27 @@ export function createMonitor({ toast }) {
   }
 
   async function pollOnce() {
+    if (!State.token && silentAuthRetryEnabled) {
+      return;
+    }
     try {
       const stats = await fetchStats();
+      if (authRetryTimer) {
+        window.clearTimeout(authRetryTimer);
+        authRetryTimer = 0;
+      }
       render(stats);
       firstLoad = false;
     } catch (error) {
+      if (silentAuthRetryEnabled && isAuthFailureError(error)) {
+        if (!authRetryTimer) {
+          authRetryTimer = window.setTimeout(() => {
+            authRetryTimer = 0;
+            void pollOnce();
+          }, MONITOR_AUTH_RETRY_DELAY_MS);
+        }
+        return;
+      }
       if (firstLoad) {
         toast.show(`系统监控初始化失败: ${error.message}`, 'warn');
         firstLoad = false;
@@ -181,10 +205,11 @@ export function createMonitor({ toast }) {
   }
 
   return {
-    init() {
+    init(options = {}) {
       if (!DOM.monitorPanel) {
         return;
       }
+      silentAuthRetryEnabled = options && options.silentAuthRetry === true;
       void pollOnce();
       schedule();
     },

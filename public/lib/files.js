@@ -1,6 +1,7 @@
-import { DOM, apiUrl, authedFetch, buildAuthHeaders } from './state.js';
+import { DOM, State, apiUrl, authedFetch, buildAuthHeaders } from './state.js';
 
 const FILES_LONG_PRESS_MS = 520;
+const FILES_AUTH_RETRY_DELAY_MS = 900;
 
 function joinPath(basePath, name) {
   const base = typeof basePath === 'string' ? basePath.trim() : '.';
@@ -68,6 +69,28 @@ export function createFiles({ toast, openTerminalAtPath }) {
   let dragDepth = 0;
   let suppressClick = false;
   let loading = false;
+  let authRetryTimer = 0;
+
+  function isAuthFailureError(error) {
+    const message = error && typeof error === 'object' && 'message' in error ? String(error.message).toLowerCase() : '';
+    return (
+      message.includes('401') ||
+      message.includes('403') ||
+      message.includes('missing bearer token') ||
+      message.includes('unauthorized') ||
+      message.includes('insufficient_scope')
+    );
+  }
+
+  function scheduleAuthRetry(pathToRetry) {
+    if (authRetryTimer) {
+      return;
+    }
+    authRetryTimer = window.setTimeout(() => {
+      authRetryTimer = 0;
+      void refresh(pathToRetry, { silentAuthRetry: true });
+    }, FILES_AUTH_RETRY_DELAY_MS);
+  }
 
   function buildApiUrl(pathname, extraParams = {}) {
     const url = new URL(apiUrl(pathname));
@@ -329,14 +352,23 @@ export function createFiles({ toast, openTerminalAtPath }) {
     button.setAttribute('aria-label', actionText);
   }
 
-  async function refresh(nextPath = currentPath) {
+  async function refresh(nextPath = currentPath, options = {}) {
     const requestPath = nextPath || '.';
+    const silentAuthRetry = options && options.silentAuthRetry === true;
+    if (!State.token && silentAuthRetry) {
+      scheduleAuthRetry(requestPath);
+      return;
+    }
     loading = true;
     render();
     try {
       const payload = await fetchJson('/api/fs/list', {
         query: { path: requestPath }
       });
+      if (authRetryTimer) {
+        window.clearTimeout(authRetryTimer);
+        authRetryTimer = 0;
+      }
       currentPath = typeof payload.path === 'string' ? payload.path : '.';
       parentPath = typeof payload.parent === 'string' ? payload.parent : null;
       entries = Array.isArray(payload.entries) ? payload.entries : [];
@@ -344,7 +376,11 @@ export function createFiles({ toast, openTerminalAtPath }) {
         DOM.filesEditorWrap.hidden = true;
       }
     } catch (error) {
-      toast.show(`读取目录失败: ${error.message}`, 'danger');
+      if (silentAuthRetry && isAuthFailureError(error)) {
+        scheduleAuthRetry(requestPath);
+      } else {
+        toast.show(`读取目录失败: ${error.message}`, 'danger');
+      }
     } finally {
       loading = false;
       render();
@@ -800,14 +836,15 @@ export function createFiles({ toast, openTerminalAtPath }) {
   }
 
   return {
-    init() {
+    init(options = {}) {
       if (!DOM.filesList || !DOM.filesPath) {
         return;
       }
+      const silentAuthRetry = options && options.silentAuthRetry === true;
       bindToolbar();
       bindEditor();
       bindListInteractions();
-      void refresh('.');
+      void refresh('.', { silentAuthRetry });
     },
     refresh() {
       void refresh();

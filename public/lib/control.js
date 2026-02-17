@@ -2,6 +2,7 @@ import {
   CONTROL_CLIENT_CAPABILITIES,
   CONTROL_PROTOCOL_VERSION,
   State,
+  TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
   createWsAuthMessage,
   setActionButtonsEnabled,
@@ -44,6 +45,10 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
 
       if (payload.type === 'auth.ok') {
         State.controlConnected = true;
+        if (typeof payload.expiresAt === 'string' && payload.expiresAt) {
+          State.tokenExpiresAt = payload.expiresAt;
+          window.sessionStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, payload.expiresAt);
+        }
         statusBar.setControl('online');
         statusBar.setText('控制通道已鉴权');
         if (qualityMonitor && typeof qualityMonitor.onControlReady === 'function') {
@@ -98,6 +103,11 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         const isCurrentSession = exitedSessionId === State.currentSessionId;
         if (typeof term.handleSessionExit === 'function') {
           term.handleSessionExit(exitedSessionId);
+        }
+        if (State.killInFlight && State.killTargetSessionId === exitedSessionId) {
+          State.killRequested = false;
+          actions.resetKillRequest();
+          setActionButtonsEnabled(!!State.currentSessionId && !State.killInFlight);
         }
         if (!isCurrentSession) {
           return;
@@ -263,8 +273,18 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
           qualityMonitor.onControlClosed();
         }
         if (event.code === 4401) {
+          if (State.tokenWarningTimer) {
+            window.clearTimeout(State.tokenWarningTimer);
+            State.tokenWarningTimer = 0;
+          }
+          if (State.tokenRefreshTimer) {
+            window.clearTimeout(State.tokenRefreshTimer);
+            State.tokenRefreshTimer = 0;
+          }
           window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+          window.sessionStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
           State.token = '';
+          State.tokenExpiresAt = '';
           statusBar.setControl('offline');
           statusBar.setText('访问令牌无效，请重新使用 #token 链接登录');
           toast.show('认证已失效，请重新登录', 'danger');

@@ -6,6 +6,7 @@ import { createQualityMonitor } from './lib/quality.js';
 import { createTelemetry } from './lib/telemetry.js';
 import { createTerm } from './lib/term.js';
 import { createUi } from './lib/ui.js';
+import { State } from './lib/state.js';
 
 let control = null;
 let term = null;
@@ -71,8 +72,31 @@ control = createControl({
   telemetry
 });
 
-ui.bootstrap();
+let deferredModulesInited = false;
+
+function initDeferredModules() {
+  if (deferredModulesInited) {
+    return;
+  }
+  deferredModulesInited = true;
+  files.init({ silentAuthRetry: true });
+  monitor.init({ silentAuthRetry: true });
+}
+
+const bootstrapResult = ui.bootstrap();
 telemetry.init();
-files.init();
-monitor.init();
 gestures.bind();
+
+Promise.resolve(bootstrapResult).finally(() => {
+  if (State.token) {
+    initDeferredModules();
+    return;
+  }
+
+  const timer = window.setInterval(() => {
+    if (State.token) {
+      window.clearInterval(timer);
+      initDeferredModules();
+    }
+  }, 600);
+});

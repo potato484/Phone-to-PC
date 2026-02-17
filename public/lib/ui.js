@@ -4,6 +4,7 @@ import {
   KILL_REQUEST_TIMEOUT_MS,
   QUICK_KEY_SEQUENCES,
   State,
+  TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
   ZOOM_SCALE_EPSILON,
   ZOOM_SETTLE_MS,
@@ -36,18 +37,30 @@ const QUICK_KEY_ROWS = [
 const SERVICE_WORKER_URL = '/sw.js?v=17';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
+const AUTH_TOKEN_WARN_LEAD_MS = 5 * 60 * 1000;
+const AUTH_TOKEN_REFRESH_LEAD_MS = 2 * 60 * 1000;
 
 export function createUi({ getControl, getTerm, getTelemetry }) {
   let sessionCache = [];
 
   const Toast = {
-    show(message, type = 'info') {
-      if (!DOM.toastRoot || !message) {
+    show(message, type = 'info', options = {}) {
+      if (!message) {
         return;
       }
+
+      const text = String(message);
+      if (DOM.statusText && options.updateStatus !== false) {
+        DOM.statusText.textContent = text;
+      }
+
+      if (!DOM.toastRoot || options.popup !== true) {
+        return;
+      }
+
       const toast = document.createElement('div');
       toast.className = `toast is-${type}`;
-      toast.textContent = message;
+      toast.textContent = text;
       DOM.toastRoot.appendChild(toast);
 
       window.setTimeout(() => {
@@ -646,6 +659,7 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
       }
       const wasKillInFlight = State.killInFlight;
       State.killInFlight = false;
+      State.killTargetSessionId = '';
       if (wasKillInFlight) {
         SessionTabs.renderActiveState();
       }
@@ -694,12 +708,25 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
         Toast.show('关闭请求发送失败', 'danger');
         return false;
       }
-      State.killRequested = targetSessionId === State.currentSessionId;
+
+      const isCurrentSession = targetSessionId === State.currentSessionId;
+      State.killRequested = isCurrentSession;
       State.killInFlight = true;
-      setActionButtonsEnabled(false);
-      SessionTabs.renderActiveState();
-      StatusBar.setText('关闭请求已发送，等待会话退出...');
-      Toast.show('关闭请求已发送', 'warn');
+      State.killTargetSessionId = targetSessionId;
+
+      if (isCurrentSession) {
+        const term = getTerm();
+        if (term && typeof term.handleSessionExit === 'function') {
+          term.handleSessionExit(targetSessionId);
+        }
+        State.currentSessionId = '';
+        StatusBar.setSession('');
+      }
+      sessionCache = sessionCache.filter((entry) => entry.id !== targetSessionId);
+      SessionTabs.update(sessionCache);
+      setActionButtonsEnabled(!!State.currentSessionId && !State.killInFlight);
+      StatusBar.setText('关闭请求已发送');
+      Toast.show('会话关闭中', 'warn');
       if (State.killRequestTimer) {
         window.clearTimeout(State.killRequestTimer);
       }
@@ -710,10 +737,11 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
         }
         State.killInFlight = false;
         State.killRequested = false;
+        State.killTargetSessionId = '';
         setActionButtonsEnabled(!!State.currentSessionId);
         SessionTabs.renderActiveState();
-        StatusBar.setText('关闭超时，可重试');
-        Toast.show('关闭超时，可再次尝试', 'warn');
+        StatusBar.setText('关闭操作仍在后台处理中，可刷新会话列表确认状态');
+        Toast.show('关闭操作仍在后台处理中', 'warn');
       }, KILL_REQUEST_TIMEOUT_MS);
       return true;
     },
@@ -970,6 +998,99 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
     }
   };
 
+  function clearTokenTimers() {
+    if (State.tokenWarningTimer) {
+      window.clearTimeout(State.tokenWarningTimer);
+      State.tokenWarningTimer = 0;
+    }
+    if (State.tokenRefreshTimer) {
+      window.clearTimeout(State.tokenRefreshTimer);
+      State.tokenRefreshTimer = 0;
+    }
+  }
+
+  function parseIsoMs(value) {
+    if (typeof value !== 'string' || !value) {
+      return 0;
+    }
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function applyAccessToken(accessToken, expiresAt = '') {
+    State.token = accessToken;
+    State.tokenExpiresAt = expiresAt || '';
+    window.sessionStorage.setItem(TOKEN_STORAGE_KEY, accessToken);
+    if (State.tokenExpiresAt) {
+      window.sessionStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, State.tokenExpiresAt);
+    } else {
+      window.sessionStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+    }
+  }
+
+  function clearAccessTokenState() {
+    clearTokenTimers();
+    State.token = '';
+    State.tokenExpiresAt = '';
+    window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+    window.sessionStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  }
+
+  function scheduleTokenLifecycle() {
+    clearTokenTimers();
+    if (!State.token) {
+      return;
+    }
+
+    const expiresAtMs = parseIsoMs(State.tokenExpiresAt);
+    if (!expiresAtMs) {
+      return;
+    }
+
+    const runRefresh = async () => {
+      if (!State.token) {
+        return;
+      }
+      try {
+        const refreshed = await Auth.refreshAccessToken();
+        applyAccessToken(refreshed.accessToken, refreshed.expiresAt);
+        StatusBar.setText('访问令牌已自动刷新');
+        scheduleTokenLifecycle();
+      } catch (error) {
+        clearAccessTokenState();
+        const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : 'unknown';
+        StatusBar.setControl('offline');
+        StatusBar.setText('访问令牌刷新失败，请重新使用 #token 链接登录');
+        Toast.show(`令牌刷新失败: ${message}`, 'danger');
+      }
+    };
+
+    const nowMs = Date.now();
+    const warnDelayMs = expiresAtMs - AUTH_TOKEN_WARN_LEAD_MS - nowMs;
+    if (warnDelayMs <= 0) {
+      StatusBar.setText('访问令牌即将过期，正在自动刷新');
+    } else {
+      State.tokenWarningTimer = window.setTimeout(() => {
+        State.tokenWarningTimer = 0;
+        if (!State.token) {
+          return;
+        }
+        StatusBar.setText('访问令牌即将过期，正在自动刷新');
+      }, warnDelayMs);
+    }
+
+    const refreshDelayMs = expiresAtMs - AUTH_TOKEN_REFRESH_LEAD_MS - nowMs;
+    if (refreshDelayMs <= 0) {
+      void runRefresh();
+      return;
+    }
+
+    State.tokenRefreshTimer = window.setTimeout(() => {
+      State.tokenRefreshTimer = 0;
+      void runRefresh();
+    }, refreshDelayMs);
+  }
+
   const Auth = {
     async exchangeBootstrapToken(bootstrapToken) {
       const response = await fetch(apiUrl('/api/auth/exchange'), {
@@ -985,27 +1106,62 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
       if (!payload || typeof payload.accessToken !== 'string' || !payload.accessToken) {
         throw new Error('invalid exchange response');
       }
-      return payload.accessToken;
+      return {
+        accessToken: payload.accessToken,
+        expiresAt: typeof payload.expiresAt === 'string' ? payload.expiresAt : ''
+      };
+    },
+
+    async refreshAccessToken() {
+      const response = await authedFetch(apiUrl('/api/auth/refresh'), {
+        method: 'POST'
+      });
+      if (!response.ok) {
+        throw new Error(`token refresh failed (${response.status})`);
+      }
+      const payload = await response.json();
+      if (!payload || typeof payload.accessToken !== 'string' || !payload.accessToken) {
+        throw new Error('invalid refresh response');
+      }
+      return {
+        accessToken: payload.accessToken,
+        expiresAt: typeof payload.expiresAt === 'string' ? payload.expiresAt : ''
+      };
     },
 
     async init() {
       const hashToken = readTokenFromHash();
       if (hashToken) {
         try {
-          const accessToken = await this.exchangeBootstrapToken(hashToken);
-          window.sessionStorage.setItem(TOKEN_STORAGE_KEY, accessToken);
-          State.token = accessToken;
+          const issued = await this.exchangeBootstrapToken(hashToken);
+          applyAccessToken(issued.accessToken, issued.expiresAt);
+          scheduleTokenLifecycle();
           Toast.show('认证成功，已建立访问会话', 'success');
         } catch (error) {
-          window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-          State.token = '';
+          clearAccessTokenState();
           const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : 'unknown';
           Toast.show(`认证失败: ${message}`, 'danger');
         }
         history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
-        return;
+        return !!State.token;
       }
+
       State.token = window.sessionStorage.getItem(TOKEN_STORAGE_KEY) || '';
+      State.tokenExpiresAt = window.sessionStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY) || '';
+      if (!State.token) {
+        return false;
+      }
+
+      if (!State.tokenExpiresAt) {
+        try {
+          const refreshed = await this.refreshAccessToken();
+          applyAccessToken(refreshed.accessToken, refreshed.expiresAt);
+        } catch {
+          // Keep using existing token until server rejects it.
+        }
+      }
+      scheduleTokenLifecycle();
+      return true;
     }
   };
 
@@ -1072,7 +1228,7 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
     const term = getTerm();
     if (!control || !term) {
       StatusBar.setText('模块初始化失败');
-      return;
+      return Promise.resolve(false);
     }
 
     StatusBar.setControl('offline');
@@ -1090,7 +1246,7 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
     TelemetryControls.bind();
     bindSessionCopy();
     Actions.bind();
-    Auth.init().finally(() => {
+    const authReady = Auth.init().finally(() => {
       term.init();
       window.requestAnimationFrame(() => {
         term.focusActivePane();
@@ -1106,6 +1262,7 @@ export function createUi({ getControl, getTerm, getTelemetry }) {
       Dock.updateHeight();
       term.scheduleResize(true);
     }, 300);
+    return authReady;
   }
 
   return {

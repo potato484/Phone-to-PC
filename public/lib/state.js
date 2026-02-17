@@ -50,6 +50,7 @@ export const DOM = {
 };
 
 export const TOKEN_STORAGE_KEY = 'c2p_token';
+export const TOKEN_EXPIRES_AT_STORAGE_KEY = 'c2p_token_expires_at';
 export const SIGNAL_STATES = ['is-online', 'is-warn', 'is-offline'];
 export const QUICK_KEY_SEQUENCES = {
   'ctrl-c': '\x03',
@@ -74,7 +75,7 @@ export const TERMINAL_WRITE_LOW_WATER_BYTES = 96 * 1024;
 export const TERMINAL_INPUT_DIRECT_CHARS = 8;
 export const TERMINAL_INPUT_BATCH_CHARS = 4096;
 export const RESIZE_DEBOUNCE_MS = 90;
-export const KILL_REQUEST_TIMEOUT_MS = 6000;
+export const KILL_REQUEST_TIMEOUT_MS = 1500;
 export const TERMINAL_REPLAY_TAIL_BYTES = 64 * 1024;
 export const CONTROL_PROTOCOL_VERSION = 1;
 export const CAPABILITY_TERMINAL_BINARY_V1 = 'terminal.binary.v1';
@@ -96,6 +97,9 @@ export const WebglAddonCtor =
 
 export const State = {
   token: '',
+  tokenExpiresAt: '',
+  tokenRefreshTimer: 0,
+  tokenWarningTimer: 0,
   controlSocket: null,
   terminalSocket: null,
   terminal: null,
@@ -137,6 +141,7 @@ export const State = {
   killRequestTimer: 0,
   killInFlight: false,
   killRequested: false,
+  killTargetSessionId: '',
   desktopQualityProfile: 'balanced',
   connectionQualitySnapshot: null
 };
