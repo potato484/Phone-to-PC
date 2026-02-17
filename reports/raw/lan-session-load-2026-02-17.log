@@ -1,0 +1,13 @@
+
+> c2p-controller@0.1.0 bench:session-load /home/potato/Phone-to-PC
+> node scripts/benchmark/session-load.mjs -- --base-url=http://127.0.0.1:3900 --bootstrap-token=5fc0e5e99016a770fd966b2e82218b1db1e967f9fe2a0b0ec0243ed65795b6fe --concurrency=20 --hold-ms=3000 --min-success-rate=0.99
+
+Session load benchmark
+Base URL         : http://127.0.0.1:3900
+Session ID       : 3eaaffb6-4e6c-481c-9663-e3f95c175817
+Concurrency      : 20
+Hold per client  : 3000ms
+Success / Failure: 20 / 0
+Success rate     : 100.00%
+Auth p95         : 46.67ms
+PASS: success rate 100.00% >= 99.00%

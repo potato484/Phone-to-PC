@@ -1,0 +1,18 @@
+[Unit]
+Description=C2P Controller
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/c2p
+EnvironmentFile=/opt/c2p/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/server.js --cwd=%h
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

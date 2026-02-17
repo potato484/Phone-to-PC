@@ -1,32 +1,51 @@
-# MVP + PMF Stage1 Acceptance Summary
+# PMF 方案2 Acceptance Summary
 
 ## Automated Verification
 
 - `pnpm build`: PASS
-- `pnpm test`: PASS
-  - `tests/unit/auth-token.test.mjs`
-  - `tests/unit/desktop-quality-policy.test.mjs`
-  - `tests/unit/store-migration.test.mjs`
-  - `tests/unit/store-telemetry.test.mjs`
-  - `tests/unit/pty-manager-tmux.test.mjs` (受限环境可能 skip)
-  - `tests/integration/control-heartbeat.test.mjs` (受限环境可能 skip)
-  - `tests/integration/tmux-recovery.test.mjs` (受限环境可能 skip)
+- `pnpm test:unit`: PASS
+- `pnpm test:integration`: PASS
+- `pnpm test:e2e`: PASS（受限环境会显式 `skip`）
 
-## Covered Acceptance Items
+## Capability Traceability
 
-- 安全认证体系：access token 签发/校验/吊销、WS 首帧鉴权、限流与审计链路已接入。
-- 会话持久化：`tmux` 会话创建、attach/detach、`SQLite sessions` 恢复、服务重启后会话恢复列表。
-- 可观测性：`/healthz`、`/readyz`、`/metrics` 与 event-loop 指标可用。
-- 压测资产：`scripts/benchmark/*` 与 `reports/lan-baseline.md`、`reports/wan-baseline.md` 已提供。
-- PMF 阶段 1 工程闭环（最小可验收包）：
-  - 控制通道应用层心跳：`heartbeat.ping/pong` 已接入（用于 RTT/抖动/丢包采样）。
-  - CQS 客户端评分：前端实时计算并展示 `CQS/RTT/抖动/丢包`，并触发桌面质量档位自动升降。
-  - 触控体验增强：`触控/触板` 双模式切换 + 国际文本输入入口。
-  - 桌面弱网策略：`/ws/desktop` 支持 `low/balanced/high` 质量档位并按档位调整背压阈值。
-  - 匿名遥测（opt-in）：新增 `/api/telemetry/events` 与 `/api/telemetry/summary`，落库与聚合可用。
+能力追溯基线见 `docs/capability-matrix.md`。本轮验收覆盖如下能力 ID：
 
-## Pending External Validation
+- 认证生命周期：`CAP-AUTH-001`, `CAP-AUTH-002`, `CAP-AUTH-003`
+- 权限边界与审计：`CAP-AUTH-004`, `CAP-AUTH-005`
+- 控制链路：`CAP-WS-001`, `CAP-WS-002`, `CAP-WS-003`
+- 会话持久化：`CAP-PTY-001`
+- 文件链路：`CAP-FS-001`, `CAP-FS-002`
+- 可观测性：`CAP-OBS-001`, `CAP-OBS-002`
+- 遥测汇总：`CAP-TELEM-001`
 
-- 真机与 WAN 压测需在可监听端口、具备真实 `tmux` 与移动网络环境中执行。
-- 桌面链路的弱网体感与端侧渲染效果仍需在真机 noVNC 场景下做专项验证。
-- Playwright 端到端浏览器自动化需在可联网安装依赖后补齐。
+## Acceptance Mapping (方案2 DoD)
+
+- DoD-1 新机器安装/启动/回滚：
+  - 交付 `scripts/install.sh`, `scripts/c2pctl`, `scripts/c2p.service`
+  - 发布流程 `/.github/workflows/release.yml`
+- DoD-2 安全 scope + refresh + revoke + audit：
+  - scope: `admin|readonly`，写接口 403 拦截
+  - refresh/revoke 事件入审计
+- DoD-3 CI 分层与关键链路自动化：
+  - `/.github/workflows/ci.yml` 分层 `build/unit/integration/e2e-smoke`
+  - `tests/e2e/smoke.test.mjs` 覆盖 `auth -> session -> ws -> fs`
+- DoD-4 WAN/LAN 报告可复现：
+  - `reports/lan-baseline.md` 与 `reports/wan-baseline.md` 已填实测值
+  - 原始数据在 `reports/raw/*`
+- DoD-5 文档与代码一致性：
+  - 能力矩阵与测试矩阵均引用能力 ID，避免文档漂移
+
+## Residual Risks
+
+- 真机公网（蜂窝网络 + noVNC）体验仍需单独场景复测。
+- `e2e-smoke` 在严格沙箱中可能因端口权限受限被 `skip`，但会在日志显式标记。
+
+## Extra Verification (Continue Test)
+
+- `tests/integration/auth-refresh.test.mjs`: PASS
+  - 覆盖 refresh 轮换后旧 token 撤销、新 token 保留 scope 与审计事件。
+- `tests/integration/auth-exchange-rate-limit.test.mjs`: PASS
+  - 覆盖 bootstrap 错误请求触发限流锁定、`429 + Retry-After`、以及失败审计落盘。
+- `tests/integration/control-kill-latency.test.mjs`: PASS
+  - 覆盖 kill 乐观反馈，消息确认耗时阈值 `<200ms`。

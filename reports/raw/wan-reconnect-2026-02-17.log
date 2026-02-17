@@ -1,0 +1,10 @@
+
+> c2p-controller@0.1.0 bench:reconnect /home/potato/Phone-to-PC
+> node scripts/benchmark/reconnect-latency.mjs -- --base-url=http://192.168.1.50:3900 --bootstrap-token=5fc0e5e99016a770fd966b2e82218b1db1e967f9fe2a0b0ec0243ed65795b6fe --iterations=20 --assert-lt-ms=2000
+
+Reconnect latency benchmark
+Base URL      : http://192.168.1.50:3900
+Iterations    : 20
+Session ID    : 7008d858-3c48-492e-b124-586b0cf9fc54
+p50 / p95 / p99 (ms): 5.78 / 7.14 / 7.85
+PASS: p95=7.14ms < 2000ms

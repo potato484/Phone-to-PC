@@ -1,0 +1,156 @@
+# snapshot_at=2026-02-17T09:01:21.114Z
+# HELP c2p_ws_connections Active websocket connections by channel
+# TYPE c2p_ws_connections gauge
+c2p_ws_connections{channel="control"} 0
+c2p_ws_connections{channel="terminal"} 0
+# HELP c2p_ws_auth_fail_total Total websocket auth failures
+# TYPE c2p_ws_auth_fail_total counter
+c2p_ws_auth_fail_total 0
+# HELP c2p_event_loop_lag_ms Event loop lag quantiles in milliseconds
+# TYPE c2p_event_loop_lag_ms gauge
+c2p_event_loop_lag_ms{quantile="p50"} 20.169
+c2p_event_loop_lag_ms{quantile="p95"} 20.578
+c2p_event_loop_lag_ms{quantile="p99"} 41.976
+# HELP c2p_terminal_sessions_active Active terminal sessions
+# TYPE c2p_terminal_sessions_active gauge
+c2p_terminal_sessions_active 0
+# HELP c2p_terminal_send_buffered_bytes Buffered bytes pending terminal send
+# TYPE c2p_terminal_send_buffered_bytes gauge
+c2p_terminal_send_buffered_bytes 0
+# HELP process_resident_memory_bytes Resident memory size in bytes
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 78106624
+# HELP nodejs_heap_size_used_bytes V8 heap used bytes
+# TYPE nodejs_heap_size_used_bytes gauge
+nodejs_heap_size_used_bytes 12410448
+
+# snapshot_at=2026-02-17T09:01:26.142Z
+# HELP c2p_ws_connections Active websocket connections by channel
+# TYPE c2p_ws_connections gauge
+c2p_ws_connections{channel="control"} 0
+c2p_ws_connections{channel="terminal"} 0
+# HELP c2p_ws_auth_fail_total Total websocket auth failures
+# TYPE c2p_ws_auth_fail_total counter
+c2p_ws_auth_fail_total 0
+# HELP c2p_event_loop_lag_ms Event loop lag quantiles in milliseconds
+# TYPE c2p_event_loop_lag_ms gauge
+c2p_event_loop_lag_ms{quantile="p50"} 20.169
+c2p_event_loop_lag_ms{quantile="p95"} 20.529
+c2p_event_loop_lag_ms{quantile="p99"} 41.943
+# HELP c2p_terminal_sessions_active Active terminal sessions
+# TYPE c2p_terminal_sessions_active gauge
+c2p_terminal_sessions_active 0
+# HELP c2p_terminal_send_buffered_bytes Buffered bytes pending terminal send
+# TYPE c2p_terminal_send_buffered_bytes gauge
+c2p_terminal_send_buffered_bytes 0
+# HELP process_resident_memory_bytes Resident memory size in bytes
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 78106624
+# HELP nodejs_heap_size_used_bytes V8 heap used bytes
+# TYPE nodejs_heap_size_used_bytes gauge
+nodejs_heap_size_used_bytes 12830576
+
+# snapshot_at=2026-02-17T09:01:31.145Z
+# HELP c2p_ws_connections Active websocket connections by channel
+# TYPE c2p_ws_connections gauge
+c2p_ws_connections{channel="control"} 0
+c2p_ws_connections{channel="terminal"} 0
+# HELP c2p_ws_auth_fail_total Total websocket auth failures
+# TYPE c2p_ws_auth_fail_total counter
+c2p_ws_auth_fail_total 0
+# HELP c2p_event_loop_lag_ms Event loop lag quantiles in milliseconds
+# TYPE c2p_event_loop_lag_ms gauge
+c2p_event_loop_lag_ms{quantile="p50"} 20.169
+c2p_event_loop_lag_ms{quantile="p95"} 20.431
+c2p_event_loop_lag_ms{quantile="p99"} 41.419
+# HELP c2p_terminal_sessions_active Active terminal sessions
+# TYPE c2p_terminal_sessions_active gauge
+c2p_terminal_sessions_active 0
+# HELP c2p_terminal_send_buffered_bytes Buffered bytes pending terminal send
+# TYPE c2p_terminal_send_buffered_bytes gauge
+c2p_terminal_send_buffered_bytes 0
+# HELP process_resident_memory_bytes Resident memory size in bytes
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 78106624
+# HELP nodejs_heap_size_used_bytes V8 heap used bytes
+# TYPE nodejs_heap_size_used_bytes gauge
+nodejs_heap_size_used_bytes 12342760
+
+# snapshot_at=2026-02-17T09:01:36.150Z
+# HELP c2p_ws_connections Active websocket connections by channel
+# TYPE c2p_ws_connections gauge
+c2p_ws_connections{channel="control"} 0
+c2p_ws_connections{channel="terminal"} 0
+# HELP c2p_ws_auth_fail_total Total websocket auth failures
+# TYPE c2p_ws_auth_fail_total counter
+c2p_ws_auth_fail_total 0
+# HELP c2p_event_loop_lag_ms Event loop lag quantiles in milliseconds
+# TYPE c2p_event_loop_lag_ms gauge
+c2p_event_loop_lag_ms{quantile="p50"} 20.169
+c2p_event_loop_lag_ms{quantile="p95"} 20.382
+c2p_event_loop_lag_ms{quantile="p99"} 40.042
+# HELP c2p_terminal_sessions_active Active terminal sessions
+# TYPE c2p_terminal_sessions_active gauge
+c2p_terminal_sessions_active 0
+# HELP c2p_terminal_send_buffered_bytes Buffered bytes pending terminal send
+# TYPE c2p_terminal_send_buffered_bytes gauge
+c2p_terminal_send_buffered_bytes 0
+# HELP process_resident_memory_bytes Resident memory size in bytes
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 78106624
+# HELP nodejs_heap_size_used_bytes V8 heap used bytes
+# TYPE nodejs_heap_size_used_bytes gauge
+nodejs_heap_size_used_bytes 12856816
+
+# snapshot_at=2026-02-17T09:01:41.153Z
+# HELP c2p_ws_connections Active websocket connections by channel
+# TYPE c2p_ws_connections gauge
+c2p_ws_connections{channel="control"} 0
+c2p_ws_connections{channel="terminal"} 0
+# HELP c2p_ws_auth_fail_total Total websocket auth failures
+# TYPE c2p_ws_auth_fail_total counter
+c2p_ws_auth_fail_total 0
+# HELP c2p_event_loop_lag_ms Event loop lag quantiles in milliseconds
+# TYPE c2p_event_loop_lag_ms gauge
+c2p_event_loop_lag_ms{quantile="p50"} 20.169
+c2p_event_loop_lag_ms{quantile="p95"} 20.365
+c2p_event_loop_lag_ms{quantile="p99"} 40.042
+# HELP c2p_terminal_sessions_active Active terminal sessions
+# TYPE c2p_terminal_sessions_active gauge
+c2p_terminal_sessions_active 0
+# HELP c2p_terminal_send_buffered_bytes Buffered bytes pending terminal send
+# TYPE c2p_terminal_send_buffered_bytes gauge
+c2p_terminal_send_buffered_bytes 0
+# HELP process_resident_memory_bytes Resident memory size in bytes
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 78106624
+# HELP nodejs_heap_size_used_bytes V8 heap used bytes
+# TYPE nodejs_heap_size_used_bytes gauge
+nodejs_heap_size_used_bytes 12374880
+
+# snapshot_at=2026-02-17T09:01:46.161Z
+# HELP c2p_ws_connections Active websocket connections by channel
+# TYPE c2p_ws_connections gauge
+c2p_ws_connections{channel="control"} 0
+c2p_ws_connections{channel="terminal"} 0
+# HELP c2p_ws_auth_fail_total Total websocket auth failures
+# TYPE c2p_ws_auth_fail_total counter
+c2p_ws_auth_fail_total 0
+# HELP c2p_event_loop_lag_ms Event loop lag quantiles in milliseconds
+# TYPE c2p_event_loop_lag_ms gauge
+c2p_event_loop_lag_ms{quantile="p50"} 20.169
+c2p_event_loop_lag_ms{quantile="p95"} 20.365
+c2p_event_loop_lag_ms{quantile="p99"} 38.273
+# HELP c2p_terminal_sessions_active Active terminal sessions
+# TYPE c2p_terminal_sessions_active gauge
+c2p_terminal_sessions_active 0
+# HELP c2p_terminal_send_buffered_bytes Buffered bytes pending terminal send
+# TYPE c2p_terminal_send_buffered_bytes gauge
+c2p_terminal_send_buffered_bytes 0
+# HELP process_resident_memory_bytes Resident memory size in bytes
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 78106624
+# HELP nodejs_heap_size_used_bytes V8 heap used bytes
+# TYPE nodejs_heap_size_used_bytes gauge
+nodejs_heap_size_used_bytes 12806864
+

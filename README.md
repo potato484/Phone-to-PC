@@ -47,50 +47,35 @@
 |------|------|
 | Tailscale | 用于手机与电脑之间的稳定连通 |
 
-## 一键配置（推荐，Ubuntu/Debian）
+## 运行环境约束
 
-下面命令会完成：安装依赖、拉代码、安装 Node 依赖、生成 `.env`、并强制配置为 `Tailscale` 模式。
+- 主机环境：`Linux Ubuntu 22.04`（首要验证目标）；
+- `tmux` 不可用时，终端能力会降级（`/readyz` 也会反映非就绪）；
+- 在受限沙箱环境里，端口监听可能被禁用，`integration/e2e/benchmark` 会显式跳过或失败并输出原因；
+- Python 命令统一使用 `python3`。
+
+## 一键安装（推荐）
+
+使用仓库内置脚本：
 
 ```bash
-bash -lc '
-set -euo pipefail
-
-sudo apt update
-sudo apt install -y curl git python3 make gcc g++ tmux
-curl -fsSL https://tailscale.com/install.sh | sh
-
-corepack enable
-corepack prepare pnpm@9 --activate
-
-if [ ! -d computer-to-phone ]; then
-  git clone https://github.com/potato484/Phone-to-PC.git computer-to-phone
-fi
-cd computer-to-phone
-
-pnpm install
-cp .env.example .env
-
-upsert_env() {
-  local key="$1"
-  local value="$2"
-  if grep -q "^${key}=" .env; then
-    sed -i "s#^${key}=.*#${key}=${value}#" .env
-  else
-    echo "${key}=${value}" >> .env
-  fi
-}
-
-upsert_env TUNNEL tailscale
-upsert_env TAILSCALE_FUNNEL false
-
-echo ""
-echo "[下一步1] 执行: sudo tailscale up"
-echo "[下一步2] 登录完成后执行: pnpm start -- --cwd=$HOME"
-'
+bash scripts/install.sh --install-dir /opt/c2p --service-user "$USER"
 ```
 
-注意：
-- `sudo tailscale up` 会要求你登录 Tailscale 账号，这是必做步骤。
+脚本能力：
+
+- 自动检测发行版（Debian/Ubuntu/Fedora/Arch）并安装基础依赖
+- 拉取/更新仓库并执行 `pnpm install` + `pnpm build`
+- 生成 `.env`（不覆盖已存在键，仅补缺省）
+- 安装 `systemd` 模板与 `c2pctl`
+- 可选安装 Tailscale（可通过 `--skip-tailscale` 跳过）
+
+常用参数：
+
+- `--non-interactive`
+- `--install-dir <path>`（默认 `/opt/c2p`）
+- `--service-user <user>`
+- `--skip-tailscale`
 
 ## 用户必须配置的部分
 
@@ -179,6 +164,22 @@ pnpm start -- --cwd=/path/to/workspace
 - Tailscale 地址（若启用）
 - 可扫码连接的 URL（含 token）
 
+## systemd / c2pctl
+
+安装脚本会部署 `c2p@.service` 与 `c2pctl`，常用命令：
+
+```bash
+sudo systemctl enable --now c2p@<user>.service
+c2pctl status --user <user> --install-dir /opt/c2p
+c2pctl restart --user <user>
+c2pctl logs --user <user>
+```
+
+`c2pctl status` 的退出码约定：
+
+- `0`：`service=active` 且 `healthz/readyz=200`
+- 非 `0`：任一检查异常
+
 ## 隧道模式说明
 
 ### `tailscale`（推荐）
@@ -208,7 +209,9 @@ pnpm start -- --cwd=/path/to/workspace
 pnpm install
 pnpm dev
 pnpm build
-pnpm test
+pnpm test:unit
+pnpm test:integration
+pnpm test:e2e
 pnpm start -- --cwd=/your/workspace
 ```
 

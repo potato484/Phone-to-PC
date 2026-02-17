@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMAND="${1:-}"
+if [[ -n "$COMMAND" ]]; then
+  shift
+fi
+
+SERVICE_USER="${C2P_SERVICE_USER:-${SUDO_USER:-$USER}}"
+INSTALL_DIR="${C2P_INSTALL_DIR:-/opt/c2p}"
+PORT_DEFAULT="3000"
+TAIL_LINES="${C2PCTL_LOG_LINES:-120}"
+
+usage() {
+  cat <<USAGE
+Usage: c2pctl <start|stop|restart|status|logs> [options]
+
+Options:
+  --user <name>         service instance user (default: current user)
+  --install-dir <path>  install dir containing .env (default: /opt/c2p)
+  --lines <n>           log lines for logs command (default: 120)
+USAGE
+}
+
+parse_flags() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --user)
+        [[ $# -ge 2 ]] || { echo "missing value for --user" >&2; exit 2; }
+        SERVICE_USER="$2"
+        shift 2
+        ;;
+      --install-dir)
+        [[ $# -ge 2 ]] || { echo "missing value for --install-dir" >&2; exit 2; }
+        INSTALL_DIR="$2"
+        shift 2
+        ;;
+      --lines)
+        [[ $# -ge 2 ]] || { echo "missing value for --lines" >&2; exit 2; }
+        TAIL_LINES="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "unknown argument: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
+require_systemd() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "systemctl not found" >&2
+    exit 1
+  fi
+}
+
+service_unit() {
+  printf 'c2p@%s.service' "$SERVICE_USER"
+}
+
+read_port() {
+  local env_file="$INSTALL_DIR/.env"
+  if [[ ! -f "$env_file" ]]; then
+    printf '%s' "$PORT_DEFAULT"
+    return
+  fi
+  local value
+  value="$(grep -E '^PORT=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+  if [[ -z "$value" ]]; then
+    printf '%s' "$PORT_DEFAULT"
+    return
+  fi
+  printf '%s' "$value"
+}
+
+fetch_http_status() {
+  local url="$1"
+  if ! command -v curl >/dev/null 2>&1; then
+    printf 'curl-missing'
+    return
+  fi
+  local status
+  status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$url" || true)"
+  if [[ -z "$status" ]]; then
+    printf 'unreachable'
+    return
+  fi
+  printf '%s' "$status"
+}
+
+run_status() {
+  require_systemd
+  local unit
+  unit="$(service_unit)"
+  local service_state
+  service_state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+  [[ -n "$service_state" ]] || service_state="unknown"
+
+  local pid
+  pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
+  [[ -n "$pid" && "$pid" != "0" ]] || pid="-"
+
+  local port
+  port="$(read_port)"
+  local base_url="http://127.0.0.1:${port}"
+  local healthz
+  local readyz
+  healthz="$(fetch_http_status "${base_url}/healthz")"
+  readyz="$(fetch_http_status "${base_url}/readyz")"
+
+  printf 'service: %s\n' "$service_state"
+  printf 'pid: %s\n' "$pid"
+  printf 'healthz: %s\n' "$healthz"
+  printf 'readyz: %s\n' "$readyz"
+
+  if [[ "$service_state" == "active" && "$healthz" == "200" && "$readyz" == "200" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+run_service_command() {
+  local action="$1"
+  require_systemd
+  local unit
+  unit="$(service_unit)"
+
+  if [[ $EUID -eq 0 ]]; then
+    systemctl "$action" "$unit"
+  else
+    sudo systemctl "$action" "$unit"
+  fi
+}
+
+run_logs() {
+  require_systemd
+  local unit
+  unit="$(service_unit)"
+
+  if [[ $EUID -eq 0 ]]; then
+    journalctl -u "$unit" -n "$TAIL_LINES" -f
+  else
+    sudo journalctl -u "$unit" -n "$TAIL_LINES" -f
+  fi
+}
+
+main() {
+  if [[ -z "$COMMAND" ]]; then
+    usage
+    exit 2
+  fi
+
+  parse_flags "$@"
+
+  case "$COMMAND" in
+    start)
+      run_service_command start
+      ;;
+    stop)
+      run_service_command stop
+      ;;
+    restart)
+      run_service_command restart
+      ;;
+    status)
+      run_status
+      ;;
+    logs)
+      run_logs
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
