@@ -8,15 +8,11 @@ import type { AccessTokenScope } from '../auth.js';
 import type { AuditLogger } from '../audit-log.js';
 import type { PtyManager } from '../pty-manager.js';
 import { getClientIp } from '../security.js';
-import type { C2PStore, TelemetryEventInput } from '../store.js';
+import type { C2PStore } from '../store.js';
 
 const FS_UPLOAD_LIMIT_BYTES = 100 * 1024 * 1024;
 const FS_READ_LIMIT_BYTES = 2 * 1024 * 1024;
 const FS_UPLOAD_MIN_FREE_BYTES = 1 * 1024 * 1024 * 1024;
-const TELEMETRY_BATCH_LIMIT = 32;
-const TELEMETRY_EVENT_NAME_PATTERN = /^[a-z][a-z0-9_.-]{1,63}$/;
-const TELEMETRY_MAX_DEVICE_ID_LENGTH = 96;
-const TELEMETRY_MAX_PAYLOAD_BYTES = 8 * 1024;
 
 interface CpuSnapshot {
   idle: number;
@@ -73,47 +69,6 @@ function readBooleanBodyField(body: unknown, key: string, fallback: boolean): bo
   }
   const candidate = (body as Record<string, unknown>)[key];
   return typeof candidate === 'boolean' ? candidate : fallback;
-}
-
-function normalizeTelemetryEventName(value: unknown): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (!TELEMETRY_EVENT_NAME_PATTERN.test(normalized)) {
-    return null;
-  }
-  return normalized;
-}
-
-function normalizeTelemetryTimestamp(value: unknown): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    return new Date().toISOString();
-  }
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) {
-    return new Date().toISOString();
-  }
-  return new Date(parsed).toISOString();
-}
-
-function sanitizeTelemetryPayload(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-  try {
-    const json = JSON.stringify(value);
-    if (typeof json !== 'string' || Buffer.byteLength(json, 'utf8') > TELEMETRY_MAX_PAYLOAD_BYTES) {
-      return {};
-    }
-    const parsed = JSON.parse(json) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {};
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    return {};
-  }
 }
 
 function normalizeRelativeInput(rawPath: string | undefined): string {
@@ -445,104 +400,6 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
 
   app.get('/api/runtime', (_req: Request, res: Response) => {
     res.json({ cwd: defaultWorkingDirectory });
-  });
-
-  app.post('/api/telemetry/events', (req: Request, res: Response) => {
-    if (!requireScope(req, res, 'admin', '/api/telemetry/events')) {
-      return;
-    }
-
-    const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : null;
-    if (!body) {
-      res.status(400).json({ error: 'invalid telemetry payload' });
-      return;
-    }
-
-    const deviceId = readStringBodyField(body, 'deviceId')?.trim() ?? '';
-    if (!deviceId || deviceId.length > TELEMETRY_MAX_DEVICE_ID_LENGTH) {
-      res.status(400).json({ error: 'invalid telemetry device id' });
-      return;
-    }
-
-    const eventsRaw = body.events;
-    if (!Array.isArray(eventsRaw) || eventsRaw.length === 0 || eventsRaw.length > TELEMETRY_BATCH_LIMIT) {
-      res.status(400).json({ error: 'invalid telemetry events batch' });
-      return;
-    }
-
-    const accepted: TelemetryEventInput[] = [];
-    for (const entry of eventsRaw) {
-      if (!entry || typeof entry !== 'object') {
-        continue;
-      }
-      const row = entry as Record<string, unknown>;
-      const eventName = normalizeTelemetryEventName(row.name);
-      if (!eventName) {
-        continue;
-      }
-      const sessionId =
-        typeof row.sessionId === 'string' && row.sessionId.trim().length > 0 ? row.sessionId.trim() : undefined;
-      accepted.push({
-        deviceId,
-        eventName,
-        sessionId,
-        happenedAt: normalizeTelemetryTimestamp(row.happenedAt),
-        payload: sanitizeTelemetryPayload(row.payload)
-      });
-    }
-
-    if (accepted.length === 0) {
-      res.status(400).json({ error: 'telemetry batch has no valid events' });
-      return;
-    }
-
-    for (const event of accepted) {
-      store.addTelemetryEvent(event);
-    }
-
-    res.status(202).json({
-      ok: true,
-      accepted: accepted.length
-    });
-  });
-
-  app.get('/api/telemetry/summary', (req: Request, res: Response) => {
-    const daysValue = Number.parseInt(readStringQuery(req.query.days) ?? '7', 10);
-    const days = Number.isFinite(daysValue) ? Math.max(1, Math.min(90, Math.floor(daysValue))) : 7;
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    const eventName = normalizeTelemetryEventName(readStringQuery(req.query.event));
-
-    const summary = store.getTelemetrySummary({
-      since,
-      eventName: eventName ?? undefined
-    });
-    const events = store.listTelemetryEvents({
-      since,
-      eventName: eventName ?? undefined,
-      limit: 200
-    });
-
-    const wdsDeviceSet = new Set<string>();
-    let magicMomentReached = 0;
-    for (const event of events) {
-      if (event.eventName === 'session_quality_pass') {
-        wdsDeviceSet.add(event.deviceId);
-      }
-      if (event.eventName === 'magic_moment_reached') {
-        magicMomentReached += 1;
-      }
-    }
-
-    res.json({
-      windowDays: days,
-      since,
-      eventFilter: eventName ?? null,
-      totalEvents: summary.totalEvents,
-      uniqueDevices: summary.uniqueDevices,
-      eventCounts: summary.eventCounts,
-      wdsDevices: wdsDeviceSet.size,
-      magicMomentReached
-    });
   });
 
   app.get('/api/fs/list', async (req: Request, res: Response) => {
