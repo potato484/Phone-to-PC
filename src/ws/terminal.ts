@@ -29,13 +29,13 @@ const TERMINAL_FRAME_TYPE_OUTPUT = 1;
 const TERMINAL_FRAME_TYPE_INPUT = 2;
 const TERMINAL_CODEC_BINARY_V1 = 'binary-v1';
 
-function parseReplayOffset(value: string | null): number {
-  if (!value) {
-    return 0;
+function parseReplayOffset(value: string | null): number | null {
+  if (value === null) {
+    return null;
   }
   const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return 0;
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
   }
   return parsed;
 }
@@ -176,7 +176,9 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
       const host = request.headers.host ?? 'localhost';
       const parsed = new URL(request.url ?? '/', `http://${host}`);
       const sessionId = parsed.searchParams.get('session');
-      const replayFrom = parseReplayOffset(parsed.searchParams.get('replayFrom'));
+      const replayFromParsed = parseReplayOffset(parsed.searchParams.get('replayFrom'));
+      const replayRequested = replayFromParsed !== null;
+      const replayFrom = replayRequested ? replayFromParsed : 0;
       const binaryCodec = useBinaryCodec(parsed.searchParams.get('codec'));
       const attachCols = parseDimension(parsed.searchParams.get('cols'), 100);
       const attachRows = parseDimension(parsed.searchParams.get('rows'), 30);
@@ -214,7 +216,7 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
       let flushTimer: NodeJS.Timeout | null = null;
       let drainTimer: NodeJS.Timeout | null = null;
       let flowPaused = false;
-      let replayReady = replayFrom <= 0;
+      let replayReady = !replayRequested;
       const liveQueue: string[] = [];
       let closedByClient = false;
 
@@ -380,7 +382,7 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
         }
       });
 
-      if (replayFrom > 0) {
+      if (replayRequested) {
         void (async () => {
           const logPath = ptyManager.getLogPath(sessionId);
           const snapshotEnd = ptyManager.getLogBytes(sessionId);

@@ -433,6 +433,20 @@ server.on('close', () => {
   store.close();
 });
 
+server.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EADDRINUSE') {
+    const suggestedPort = Number.isFinite(port) ? port + 1 : 3001;
+    console.error(`[c2p] listen failed: port ${port} is already in use`);
+    console.error(
+      `[c2p] hint: stop the process using this port, or start with another port (for example: PORT=${suggestedPort} pnpm dev)`
+    );
+    process.exit(1);
+    return;
+  }
+  console.error(`[c2p] server error: ${error.message}`);
+  process.exit(1);
+});
+
 server.listen(port, async () => {
   const localUrl = `http://localhost:${port}/#token=${bootstrapToken}`;
   const lan = getLanAddress();
