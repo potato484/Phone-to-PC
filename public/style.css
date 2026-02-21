@@ -4,8 +4,6 @@
   --dock-bottom-offset: 0px;
   --dock-height: 180px;
   --terminal-scroll-reserve: 0px;
-  --quick-keys-min-visible-height: 96px;
-  --session-tab-delete-width: 44px;
   --session-tabs-max-height: clamp(112px, 24vh, 220px);
 }
 
@@ -318,7 +316,7 @@ html.is-terminal-scroll-mode body {
 }
 
 .dock.is-keyboard-visible.is-quick-keys-visible .quick-keys {
-  min-height: var(--quick-keys-min-visible-height);
+  min-height: 0;
 }
 
 .dock.is-keyboard-visible .dock-panel {
@@ -367,9 +365,6 @@ html.is-terminal-scroll-mode body {
   font-size: 14px;
   position: relative;
   z-index: 1;
-  transform: translateX(var(--swipe-offset, 0px));
-  transition: transform 180ms var(--ease-out);
-  will-change: transform;
 }
 .session-tab:focus-visible { outline: 2px solid var(--accent); }
 .session-tab.is-active { border-color: var(--accent); background: var(--accent-dim); color: var(--text); }
@@ -401,32 +396,8 @@ html.is-terminal-scroll-mode body {
   height: 44px;
   flex: 0 0 auto;
   border-radius: 12px;
-  overflow: hidden;
-  --swipe-offset: 0px;
 }
-.session-tab-item.is-swiping .session-tab, .session-tab-item.is-swiping .session-tab-delete { transition: none; }
-.session-tab-item.is-swipe-open { --swipe-offset: calc(var(--session-tab-delete-width) * -1); }
-
-.session-tab-delete {
-  position: absolute;
-  top: 0; right: 0; bottom: 0;
-  width: var(--session-tab-delete-width);
-  min-height: 44px;
-  border: 1px solid var(--danger);
-  border-left: 0;
-  border-radius: 0 12px 12px 0;
-  background: var(--danger-dim);
-  color: var(--danger);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1;
-  transform: translateX(calc(100% + var(--swipe-offset, 0px)));
-  transition: transform 180ms var(--ease-out), opacity 160ms ease;
-}
-.session-tab-item.is-delete-pending .session-tab-delete, .session-tab-delete:disabled { opacity: 0.58; cursor: not-allowed; }
+.session-tab-item.is-delete-pending .session-tab { opacity: 0.58; }
 .session-tab-add {
   border-style: dashed;
   color: var(--text);
@@ -436,7 +407,8 @@ html.is-terminal-scroll-mode body {
   flex: 0 0 auto;
 }
 
-.quick-keys-toggle {
+.quick-keys-toggle,
+.dock-handle {
   width: 44px;
   min-width: 44px;
   height: 44px;
@@ -454,49 +426,58 @@ html.is-terminal-scroll-mode body {
   align-items: center;
   justify-content: center;
 }
-.quick-keys-toggle:active { transform: none; border-color: var(--accent); }
-.quick-keys-toggle.is-active {
+.quick-keys-toggle:active,
+.dock-handle:active {
+  transform: none;
+  border-color: var(--accent);
+}
+.quick-keys-toggle.is-active,
+.dock-handle.is-active {
   border-color: var(--accent);
   background: var(--accent-dim);
   color: var(--accent);
 }
+.quick-keys-toggle.is-terminal-nearby {
+  align-self: flex-start;
+  z-index: 2;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--border-subtle);
+}
 
 .quick-keys {
   display: none;
-  gap: 5px;
-  margin-top: 6px;
+  position: fixed;
+  right: max(8px, calc(env(safe-area-inset-right, 0px) + 8px));
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 24;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--c2p-glass-menu-bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2), 0 14px 26px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--border-subtle);
 }
-.dock.is-quick-keys-visible .quick-keys { display: grid; }
-.quick-key-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
-.quick-key-row[data-row="nav"] { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.dock.is-quick-keys-visible .quick-keys { display: grid; grid-template-columns: minmax(0, 1fr); }
+.quick-key-row { display: contents; }
 
 .quick-key-btn {
-  min-height: 44px;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
   border-radius: 8px;
   border-color: var(--border);
   background: var(--surface);
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.05;
-  padding: 0 4px;
+  padding: 0;
   user-select: none;
 }
 .quick-key-btn:active { border-color: var(--accent); background: var(--surface-high); transform: none; }
-
-.dock-handle {
-  width: 100%;
-  margin-top: 8px;
-  background: var(--surface);
-  border-color: var(--border);
-  color: var(--text-muted);
-  font-size: 12px;
-  display: inline-flex;
-  gap: 8px;
-  justify-content: center;
-  align-items: center;
-}
-.dock-handle::before { content: ""; width: 36px; height: 4px; border-radius: 999px; background: var(--surface-higher); }
 
 /* 3.2 微交互：Dock 展开 Spring 动画 */
 .dock-panel {
@@ -834,16 +815,16 @@ html.is-terminal-scroll-mode body {
   position: fixed;
   z-index: 40;
   display: grid;
-  gap: 6px;
+  gap: 4px;
   pointer-events: auto;
-  min-width: 148px;
-  padding: 8px;
-  border-radius: 12px;
+  min-width: 120px;
+  padding: 6px;
+  border-radius: 10px;
   border: 1px solid var(--border-subtle);
   background: var(--c2p-glass-menu-bg);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2), 0 16px 30px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--border-subtle);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.2), 0 12px 22px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--border-subtle);
 }
 .touch-context-backdrop {
   position: fixed;
@@ -857,17 +838,66 @@ html.is-terminal-scroll-mode body {
   display: none !important;
 }
 .touch-context-btn {
-  min-height: 44px;
-  border-radius: 10px;
+  min-height: 34px;
+  border-radius: 8px;
   border-color: var(--border-subtle);
   background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
+  padding: 0 10px;
 }
 .touch-context-btn.is-danger {
   border-color: var(--danger);
   background: var(--danger-dim);
   color: var(--danger);
+}
+
+.session-tab-delete-menu {
+  min-width: 104px;
+}
+
+.touch-selection-handle {
+  position: fixed;
+  z-index: 39;
+  width: 24px;
+  height: 24px;
+  margin-left: -12px;
+  margin-top: -12px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--surface-high);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--border-subtle);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: auto;
+}
+.touch-selection-handle::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.touch-selection-handle::after {
+  content: "";
+  position: absolute;
+  width: 2px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.touch-selection-handle[data-handle="start"]::after {
+  top: -7px;
+}
+.touch-selection-handle[data-handle="end"]::after {
+  bottom: -7px;
+}
+.touch-selection-handle[hidden] {
+  display: none !important;
 }
 
 @keyframes toast-in {
@@ -903,6 +933,7 @@ html.is-terminal-scroll-mode body {
 }
 :root[data-transparency="reduce"] .status-bar,
 :root[data-transparency="reduce"] .dock,
+:root[data-transparency="reduce"] .quick-keys,
 :root[data-transparency="reduce"] .touch-context-menu,
 :root[data-transparency="reduce"] .dock-card,
 :root[data-transparency="reduce"] .terminal-reconnect {
@@ -949,7 +980,18 @@ html.is-terminal-scroll-mode body {
   }
   .session-tabs { gap: 6px; }
   .files-toolbar { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .quick-key-row[data-row="nav"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .quick-keys {
+    right: max(6px, calc(env(safe-area-inset-right, 0px) + 6px));
+    padding: 5px;
+    gap: 5px;
+  }
+  .quick-key-btn {
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+    min-height: 32px;
+    font-size: 9px;
+  }
 }
 
 @media (max-width: 460px) {

@@ -40,6 +40,16 @@
               <span id="terminal-reconnect-fill" class="terminal-reconnect-fill"></span>
             </div>
           </div>
+          <button
+            id="quick-keys-toggle"
+            class="quick-keys-toggle is-terminal-nearby"
+            type="button"
+            aria-controls="quick-keys"
+            aria-expanded="false"
+            aria-pressed="false"
+          >
+            ⌨
+          </button>
           <div id="terminal-grid" class="terminal-grid" aria-live="polite"></div>
         </section>
       </main>
@@ -47,21 +57,10 @@
       <section id="dock" class="dock" aria-label="底部控制坞">
         <div id="session-tabs" class="session-tabs" role="tablist" aria-label="活跃会话" hidden></div>
 
-        <button
-          id="quick-keys-toggle"
-          class="quick-keys-toggle"
-          type="button"
-          aria-controls="quick-keys"
-          aria-expanded="false"
-          aria-pressed="false"
-        >
-          ⌨
-        </button>
-
         <div id="quick-keys" class="quick-keys" role="group" aria-label="快捷键"></div>
 
-        <button id="dock-handle" class="dock-handle" type="button" aria-expanded="false">
-          控制面板
+        <button id="dock-handle" class="dock-handle" type="button" aria-expanded="false" aria-pressed="false">
+          ⚙
         </button>
 
         <div id="dock-panel" class="dock-panel">

@@ -38,14 +38,14 @@ const QUICK_KEY_ROWS = [
 const SERVICE_WORKER_URL = '/sw.js?v=58';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
+const SESSION_TAB_FOCUS_SUPPRESS_MS = 700;
 const AUTH_TOKEN_WARN_LEAD_MS = 5 * 60 * 1000;
 const AUTH_TOKEN_REFRESH_LEAD_MS = 2 * 60 * 1000;
 const QUICK_KEYS_TOGGLE_TEXT_SHOW = '显示快捷键';
 const QUICK_KEYS_TOGGLE_TEXT_HIDE = '隐藏快捷键';
+const DOCK_TOGGLE_TEXT_SHOW = '展开控制面板';
+const DOCK_TOGGLE_TEXT_HIDE = '收起控制面板';
 const TERMINAL_CONTEXT_LINES = 8;
-const TERMINAL_VISUAL_BUFFER_PX = 96;
-const TERMINAL_VISUAL_BUFFER_WITH_KEYBOARD_PX = 132;
-const TERMINAL_VIEWPORT_BUFFER_RATIO = 0.18;
 const KEYBOARD_INSET_APPLY_DELAY_MS = 120;
 const DOCK_INPUT_PRESERVE_MS = 2000;
 const UI_STATE_STORAGE_KEY = 'c2p_ui_state_v1';
@@ -90,6 +90,18 @@ function syncQuickKeysToggleVisual(button, visible) {
   button.setAttribute('aria-label', nextVisible ? QUICK_KEYS_TOGGLE_TEXT_HIDE : QUICK_KEYS_TOGGLE_TEXT_SHOW);
   button.title = nextVisible ? QUICK_KEYS_TOGGLE_TEXT_HIDE : QUICK_KEYS_TOGGLE_TEXT_SHOW;
   button.classList.toggle('is-active', nextVisible);
+}
+
+function syncDockHandleVisual(button, expanded) {
+  if (!button) {
+    return;
+  }
+  const nextExpanded = !!expanded;
+  button.textContent = '⚙';
+  button.setAttribute('aria-label', nextExpanded ? DOCK_TOGGLE_TEXT_HIDE : DOCK_TOGGLE_TEXT_SHOW);
+  button.title = nextExpanded ? DOCK_TOGGLE_TEXT_HIDE : DOCK_TOGGLE_TEXT_SHOW;
+  button.setAttribute('aria-pressed', nextExpanded ? 'true' : 'false');
+  button.classList.toggle('is-active', nextExpanded);
 }
 
 function isTruthyQueryValue(value) {
@@ -173,6 +185,16 @@ function restoreDockInputFocus(inputEl) {
     } catch {
       // ignore unsupported setSelectionRange for certain input types
     }
+  }
+}
+
+function blurTerminalKeyboardInputIfFocused() {
+  const active = document.activeElement;
+  if (!isTerminalFocusTarget(active) || !isKeyboardInputTarget(active)) {
+    return;
+  }
+  if (active instanceof HTMLElement) {
+    active.blur();
   }
 }
 
@@ -373,18 +395,8 @@ export function createUi({ getControl, getTerm }) {
         document.documentElement.style.setProperty('--terminal-scroll-reserve', '0px');
         return 0;
       }
-      const quickKeysRect = DOM.quickKeys.getBoundingClientRect();
-      const viewportHeight = Math.max(0, window.visualViewport ? window.visualViewport.height : window.innerHeight);
-      const viewportBuffer = Math.max(
-        TERMINAL_VISUAL_BUFFER_PX,
-        Math.round(viewportHeight * TERMINAL_VIEWPORT_BUFFER_RATIO)
-      );
-      const extraBuffer = State.keyboardVisible
-        ? Math.max(viewportBuffer, TERMINAL_VISUAL_BUFFER_WITH_KEYBOARD_PX)
-        : viewportBuffer;
-      const reserve = Math.max(0, Math.ceil(quickKeysRect.height + extraBuffer));
-      document.documentElement.style.setProperty('--terminal-scroll-reserve', `${reserve}px`);
-      return reserve;
+      document.documentElement.style.setProperty('--terminal-scroll-reserve', '0px');
+      return 0;
     },
 
     scheduleMeasure() {
@@ -458,6 +470,7 @@ export function createUi({ getControl, getTerm }) {
       }
       DOM.dock.classList.add('is-expanded');
       DOM.dockHandle.setAttribute('aria-expanded', 'true');
+      syncDockHandleVisual(DOM.dockHandle, true);
       this.scheduleMeasure();
       scheduleUiStatePersist();
     },
@@ -468,6 +481,7 @@ export function createUi({ getControl, getTerm }) {
       }
       DOM.dock.classList.remove('is-expanded');
       DOM.dockHandle.setAttribute('aria-expanded', 'false');
+      syncDockHandleVisual(DOM.dockHandle, false);
       this.scheduleMeasure();
       scheduleUiStatePersist();
     },
@@ -490,6 +504,11 @@ export function createUi({ getControl, getTerm }) {
       if (!DOM.dock || !DOM.dockHandle) {
         return;
       }
+      if (DOM.sessionTabs && !DOM.sessionTabs.contains(DOM.dockHandle)) {
+        DOM.sessionTabs.appendChild(DOM.dockHandle);
+        DOM.sessionTabs.hidden = false;
+      }
+      syncDockHandleVisual(DOM.dockHandle, DOM.dock.classList.contains('is-expanded'));
       DOM.dockHandle.addEventListener('click', () => this.toggle());
 
       let touchStartY = 0;
@@ -532,13 +551,26 @@ export function createUi({ getControl, getTerm }) {
     },
 
     activateSession(sessionId, options = {}) {
-      const { showStatusText = true } = options;
+      const { showStatusText = true, suppressKeyboardFocus = true } = options;
       if (!sessionId) {
         return;
       }
       const term = getTerm();
       if (!term) {
         return;
+      }
+      const blurTerminalInput = () => {
+        blurTerminalKeyboardInputIfFocused();
+        if (typeof term.blurActivePane === 'function') {
+          term.blurActivePane();
+        }
+      };
+
+      if (suppressKeyboardFocus) {
+        if (typeof term.suppressActivePaneFocus === 'function') {
+          term.suppressActivePaneFocus(SESSION_TAB_FOCUS_SUPPRESS_MS);
+        }
+        blurTerminalInput();
       }
       const session = this.getById(sessionId);
       State.currentSessionId = sessionId;
@@ -610,23 +642,22 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
 
-      const SWIPE_DELETE_WIDTH_PX = 44;
-      const SWIPE_LOCK_THRESHOLD_PX = 8;
-      const SWIPE_OPEN_THRESHOLD_PX = 16;
-      const SWIPE_VERTICAL_TOLERANCE_PX = 24;
-
+      const MENU_MARGIN_PX = 8;
+      const POINTER_MOVE_CANCEL_PX = 6;
+      const allowMouseLongPressOpen =
+        typeof window.matchMedia === 'function'
+          ? window.matchMedia('(hover: hover) and (pointer: fine)').matches
+          : false;
       let longPressTimer = 0;
       let longPressSessionId = '';
+      let longPressAction = '';
       let suppressClick = false;
       let pointerStartX = 0;
       let pointerStartY = 0;
-      let swipePointerId = null;
-      let swipeTarget = null;
-      let swipeStartX = 0;
-      let swipeStartY = 0;
-      let swipeStartOffset = 0;
-      let swipeOffset = 0;
-      let swipeGesture = '';
+      let pointerLastX = 0;
+      let pointerLastY = 0;
+      let deleteMenuEl = null;
+      let deleteMenuSessionId = '';
 
       const clearLongPress = () => {
         if (longPressTimer) {
@@ -634,244 +665,213 @@ export function createUi({ getControl, getTerm }) {
           longPressTimer = 0;
         }
       };
-      const closeSwipeActions = (exceptSessionId = '') => {
-        DOM.sessionTabs.querySelectorAll('.session-tab-item.is-swipe-open').forEach((item) => {
-          const sessionId = item.dataset.sessionId || '';
-          if (exceptSessionId && sessionId === exceptSessionId) {
-            return;
-          }
-          item.classList.remove('is-swipe-open', 'is-delete-pending', 'is-swiping');
-          item.style.removeProperty('--swipe-offset');
-        });
+
+      const clampDeleteMenuPosition = (x, y, menuWidth, menuHeight) => {
+        const safeWidth = Number.isFinite(menuWidth) ? menuWidth : 0;
+        const safeHeight = Number.isFinite(menuHeight) ? menuHeight : 0;
+        const maxX = Math.max(MENU_MARGIN_PX, window.innerWidth - safeWidth - MENU_MARGIN_PX);
+        const maxY = Math.max(MENU_MARGIN_PX, window.innerHeight - safeHeight - MENU_MARGIN_PX);
+        return {
+          x: Math.min(Math.max(MENU_MARGIN_PX, x), maxX),
+          y: Math.min(Math.max(MENU_MARGIN_PX, y), maxY)
+        };
       };
-      const beginSwipeTracking = (item, event) => {
-        swipePointerId = event.pointerId;
-        swipeTarget = item;
-        swipeStartX = event.clientX;
-        swipeStartY = event.clientY;
-        swipeStartOffset = item.classList.contains('is-swipe-open') ? -SWIPE_DELETE_WIDTH_PX : 0;
-        swipeOffset = swipeStartOffset;
-        swipeGesture = 'pending';
-        if (!item.classList.contains('is-swipe-open')) {
-          closeSwipeActions(item.dataset.sessionId || '');
-        }
-      };
-      const endSwipeTracking = ({ suppress = false } = {}) => {
-        if (!swipeTarget) {
-          swipePointerId = null;
-          swipeGesture = '';
-          swipeOffset = 0;
-          swipeStartOffset = 0;
+
+      const hideDeleteMenu = () => {
+        deleteMenuSessionId = '';
+        if (!deleteMenuEl) {
           return;
         }
-        const target = swipeTarget;
-        const pointerId = swipePointerId;
-        target.classList.remove('is-swiping');
-        target.style.removeProperty('--swipe-offset');
-        if (swipeGesture === 'horizontal') {
-          target.classList.toggle('is-swipe-open', swipeOffset <= -SWIPE_OPEN_THRESHOLD_PX);
-          if (!target.classList.contains('is-swipe-open')) {
-            target.classList.remove('is-delete-pending');
-          }
-          if (suppress) {
-            suppressClick = true;
-          }
-        }
-        if (Number.isInteger(pointerId) && target.hasPointerCapture && target.hasPointerCapture(pointerId)) {
-          try {
-            target.releasePointerCapture(pointerId);
-          } catch {
-            // ignore release failure
-          }
-        }
-        swipePointerId = null;
-        swipeTarget = null;
-        swipeGesture = '';
-        swipeOffset = 0;
-        swipeStartOffset = 0;
+        deleteMenuEl.hidden = true;
       };
+
+      const ensureDeleteMenu = () => {
+        if (deleteMenuEl) {
+          return deleteMenuEl;
+        }
+        deleteMenuEl = document.createElement('div');
+        deleteMenuEl.className = 'touch-context-menu session-tab-delete-menu';
+        deleteMenuEl.hidden = true;
+        deleteMenuEl.innerHTML = `
+          <button type="button" class="touch-context-btn is-danger" data-action="delete-session">删除终端</button>
+        `;
+        document.body.appendChild(deleteMenuEl);
+
+        deleteMenuEl.addEventListener('click', (event) => {
+          const button =
+            event.target instanceof Element ? event.target.closest('[data-action="delete-session"]') : null;
+          if (!button) {
+            return;
+          }
+          const sessionId = deleteMenuSessionId || '';
+          hideDeleteMenu();
+          if (!sessionId || sessionId !== State.currentSessionId || State.killInFlight) {
+            return;
+          }
+          Actions.requestKill(sessionId);
+        });
+
+        const dismissOnOutsidePress = (event) => {
+          if (!deleteMenuEl || deleteMenuEl.hidden) {
+            return;
+          }
+          if (event.target instanceof Node && deleteMenuEl.contains(event.target)) {
+            return;
+          }
+          hideDeleteMenu();
+        };
+        document.addEventListener('pointerdown', dismissOnOutsidePress, { passive: true, capture: true });
+        document.addEventListener('click', dismissOnOutsidePress, { passive: true, capture: true });
+
+        return deleteMenuEl;
+      };
+
+      const showDeleteMenu = (sessionId, clientX, clientY) => {
+        const menu = ensureDeleteMenu();
+        deleteMenuSessionId = sessionId || '';
+        const deleteButton = menu.querySelector('[data-action="delete-session"]');
+        const canDelete = !!sessionId && sessionId === State.currentSessionId && !State.killInFlight;
+        if (deleteButton instanceof HTMLButtonElement) {
+          deleteButton.disabled = !canDelete;
+        }
+        menu.hidden = false;
+        menu.style.left = '0px';
+        menu.style.top = '0px';
+        const { width, height } = menu.getBoundingClientRect();
+        const next = clampDeleteMenuPosition(clientX, clientY, width || 124, height || 46);
+        menu.style.left = `${Math.round(next.x)}px`;
+        menu.style.top = `${Math.round(next.y)}px`;
+      };
+
+      const resetLongPressTracking = () => {
+        clearLongPress();
+        longPressSessionId = '';
+        longPressAction = '';
+      };
+      const suppressTerminalFocusFromSessionToolbar = () => {
+        const term = getTerm();
+        if (!term) {
+          blurTerminalKeyboardInputIfFocused();
+          return;
+        }
+        if (typeof term.suppressActivePaneFocus === 'function') {
+          term.suppressActivePaneFocus(SESSION_TAB_FOCUS_SUPPRESS_MS);
+        }
+        if (typeof term.blurActivePane === 'function') {
+          term.blurActivePane();
+        } else {
+          blurTerminalKeyboardInputIfFocused();
+        }
+      };
+
+      DOM.sessionTabs.addEventListener(
+        'touchstart',
+        (event) => {
+          if (!(event.target instanceof Element)) {
+            return;
+          }
+          if (!event.target.closest('.session-tab, .session-tab-add')) {
+            return;
+          }
+          suppressTerminalFocusFromSessionToolbar();
+        },
+        { passive: true, capture: true }
+      );
 
       DOM.sessionTabs.addEventListener('click', (event) => {
         if (suppressClick) {
           suppressClick = false;
           return;
         }
-        const deleteButton = event.target.closest('.session-tab-delete[data-session-id]');
-        if (deleteButton) {
-          const sessionId = deleteButton.dataset.sessionId || '';
-          if (!sessionId || sessionId !== State.currentSessionId || State.killInFlight) {
-            return;
-          }
-          const sent = Actions.requestKill(sessionId);
-          if (sent) {
-            const item = deleteButton.closest('.session-tab-item[data-session-id]');
-            if (item) {
-              item.classList.add('is-swipe-open', 'is-delete-pending');
-              item.style.removeProperty('--swipe-offset');
-            }
-          }
-          return;
+        if (event.target instanceof Element && event.target.closest('.session-tab, .session-tab-add')) {
+          suppressTerminalFocusFromSessionToolbar();
         }
         const addButton = event.target.closest('.session-tab-add');
         if (addButton) {
-          closeSwipeActions();
+          hideDeleteMenu();
           Actions.spawn();
           return;
         }
         const tab = event.target.closest('.session-tab[data-session-id]');
         if (!tab) {
-          closeSwipeActions();
-          return;
-        }
-        const tabItem = tab.closest('.session-tab-item[data-session-id]');
-        if (tabItem && tabItem.classList.contains('is-swipe-open')) {
-          tabItem.classList.remove('is-swipe-open', 'is-delete-pending');
-          tabItem.style.removeProperty('--swipe-offset');
+          hideDeleteMenu();
           return;
         }
         const sessionId = tab.dataset.sessionId;
         if (!sessionId) {
+          hideDeleteMenu();
           return;
         }
         if (sessionId === State.currentSessionId) {
           setActionButtonsEnabled(true);
+          hideDeleteMenu();
           return;
         }
-        closeSwipeActions();
+        hideDeleteMenu();
         this.activateSession(sessionId);
       });
 
       DOM.sessionTabs.addEventListener('pointerdown', (event) => {
-        if (event.pointerType === 'mouse') {
-          return;
-        }
-        const tabItem = event.target.closest('.session-tab-item[data-session-id]');
-        if (!tabItem) {
-          closeSwipeActions();
-          return;
-        }
-        beginSwipeTracking(tabItem, event);
-        if (tabItem.setPointerCapture) {
-          try {
-            tabItem.setPointerCapture(event.pointerId);
-          } catch {
-            // ignore capture failure
-          }
-        }
-      });
-
-      DOM.sessionTabs.addEventListener('pointermove', (event) => {
-        if (!swipeTarget || swipePointerId !== event.pointerId || event.pointerType === 'mouse') {
-          return;
-        }
-        const deltaX = event.clientX - swipeStartX;
-        const deltaY = event.clientY - swipeStartY;
-
-        if (swipeGesture === 'pending') {
-          if (Math.abs(deltaX) < SWIPE_LOCK_THRESHOLD_PX && Math.abs(deltaY) < SWIPE_LOCK_THRESHOLD_PX) {
-            return;
-          }
-          const sessionId = swipeTarget.dataset.sessionId || '';
-          const canSwipeDelete =
-            sessionId &&
-            sessionId === State.currentSessionId &&
-            swipeTarget.classList.contains('is-active') &&
-            !State.killInFlight;
-          if (Math.abs(deltaY) > Math.abs(deltaX) || Math.abs(deltaY) > SWIPE_VERTICAL_TOLERANCE_PX) {
-            swipeGesture = 'vertical';
-            return;
-          }
-          if (!canSwipeDelete || (deltaX >= 0 && swipeStartOffset === 0)) {
-            swipeGesture = 'blocked';
-            return;
-          }
-          swipeGesture = 'horizontal';
-          swipeTarget.classList.add('is-swiping');
-        }
-        if (swipeGesture !== 'horizontal') {
-          return;
-        }
-
-        event.preventDefault();
-        const nextOffset = Math.max(-SWIPE_DELETE_WIDTH_PX, Math.min(0, swipeStartOffset + deltaX));
-        swipeOffset = nextOffset;
-        swipeTarget.style.setProperty('--swipe-offset', `${nextOffset}px`);
-      });
-
-      const completeSwipeFromPointerEvent = (event, options = {}) => {
-        if (!swipeTarget || swipePointerId !== event.pointerId) {
-          return;
-        }
-        endSwipeTracking(options);
-      };
-
-      DOM.sessionTabs.addEventListener('pointerup', (event) => {
-        completeSwipeFromPointerEvent(event, { suppress: swipeGesture === 'horizontal' });
-      });
-      DOM.sessionTabs.addEventListener('pointercancel', (event) => {
-        completeSwipeFromPointerEvent(event, { suppress: swipeGesture === 'horizontal' });
-      });
-      DOM.sessionTabs.addEventListener('lostpointercapture', (event) => {
-        completeSwipeFromPointerEvent(event, { suppress: swipeGesture === 'horizontal' });
-      });
-
-      const allowLongPressOpen =
-        typeof window.matchMedia === 'function'
-          ? window.matchMedia('(hover: hover) and (pointer: fine)').matches
-          : false;
-      if (!allowLongPressOpen) {
-        return;
-      }
-
-      DOM.sessionTabs.addEventListener('pointerdown', (event) => {
-        if (event.pointerType !== 'mouse') {
-          return;
-        }
         const tab = event.target.closest('.session-tab[data-session-id]');
         if (!tab || tab.classList.contains('session-tab-add')) {
+          hideDeleteMenu();
+          resetLongPressTracking();
           return;
         }
-        if (tab.closest('.session-tab-item.is-swipe-open')) {
-          return;
+        if (event.pointerType !== 'mouse') {
+          suppressTerminalFocusFromSessionToolbar();
         }
         const sessionId = tab.dataset.sessionId;
         if (!sessionId) {
+          resetLongPressTracking();
           return;
         }
-        clearLongPress();
+        hideDeleteMenu();
+        resetLongPressTracking();
         pointerStartX = event.clientX;
         pointerStartY = event.clientY;
+        pointerLastX = event.clientX;
+        pointerLastY = event.clientY;
         longPressSessionId = sessionId;
+        const useMouseLongPressOpen = allowMouseLongPressOpen && event.pointerType === 'mouse';
+        if (!useMouseLongPressOpen && sessionId !== State.currentSessionId) {
+          resetLongPressTracking();
+          return;
+        }
+        longPressAction = useMouseLongPressOpen ? 'open-pane' : 'delete';
         longPressTimer = window.setTimeout(() => {
           longPressTimer = 0;
-          if (!longPressSessionId) {
+          const targetSessionId = longPressSessionId;
+          const action = longPressAction;
+          longPressSessionId = '';
+          longPressAction = '';
+          if (!targetSessionId) {
             return;
           }
           suppressClick = true;
-          this.openSessionInNewPane(longPressSessionId);
-          longPressSessionId = '';
+          if (action === 'open-pane') {
+            this.openSessionInNewPane(targetSessionId);
+            return;
+          }
+          showDeleteMenu(targetSessionId, pointerLastX, pointerLastY);
         }, SESSION_TAB_LONG_PRESS_MS);
       });
 
-      DOM.sessionTabs.addEventListener('pointerup', () => {
-        clearLongPress();
-        longPressSessionId = '';
-      });
-      DOM.sessionTabs.addEventListener('pointercancel', () => {
-        clearLongPress();
-        longPressSessionId = '';
-      });
+      DOM.sessionTabs.addEventListener('pointerup', resetLongPressTracking);
+      DOM.sessionTabs.addEventListener('pointercancel', resetLongPressTracking);
+      DOM.sessionTabs.addEventListener('lostpointercapture', resetLongPressTracking);
       DOM.sessionTabs.addEventListener(
         'pointermove',
         (event) => {
           if (!longPressTimer) {
             return;
           }
+          pointerLastX = event.clientX;
+          pointerLastY = event.clientY;
           const deltaX = Math.abs(event.clientX - pointerStartX);
           const deltaY = Math.abs(event.clientY - pointerStartY);
-          if (deltaX > 6 || deltaY > 6) {
-            clearLongPress();
-            longPressSessionId = '';
+          if (deltaX > POINTER_MOVE_CANCEL_PX || deltaY > POINTER_MOVE_CANCEL_PX) {
+            resetLongPressTracking();
           }
         },
         { passive: true }
@@ -886,24 +886,15 @@ export function createUi({ getControl, getTerm }) {
       DOM.sessionTabs.querySelectorAll('.session-tab-item[data-session-id]').forEach((item) => {
         const sessionId = item.dataset.sessionId || '';
         const tab = item.querySelector('.session-tab[data-session-id]');
-        const deleteButton = item.querySelector('.session-tab-delete[data-session-id]');
         const active = sessionId === State.currentSessionId;
         const pending = !!pendingSessionId && sessionId === pendingSessionId;
 
         item.classList.toggle('is-active', active);
         item.classList.toggle('is-delete-pending', pending);
-        if (!active) {
-          item.classList.remove('is-swipe-open');
-          item.style.removeProperty('--swipe-offset');
-        }
 
         if (tab) {
           tab.classList.toggle('is-active', active);
           tab.setAttribute('aria-selected', active ? 'true' : 'false');
-        }
-        if (deleteButton) {
-          deleteButton.disabled = pending || !active;
-          deleteButton.setAttribute('aria-hidden', active ? 'false' : 'true');
         }
       });
     },
@@ -918,15 +909,16 @@ export function createUi({ getControl, getTerm }) {
       DOM.sessionTabs.textContent = '';
 
       const fragment = document.createDocumentFragment();
-      if (DOM.quickKeysToggle) {
-        DOM.quickKeysToggle.classList.add('session-toolbar-icon');
-        syncQuickKeysToggleVisual(DOM.quickKeysToggle, QuickKeys.visible);
-        fragment.appendChild(DOM.quickKeysToggle);
+      if (DOM.dockHandle) {
+        DOM.dockHandle.classList.add('session-toolbar-icon');
+        syncDockHandleVisual(DOM.dockHandle, !!(DOM.dock && DOM.dock.classList.contains('is-expanded')));
+        fragment.appendChild(DOM.dockHandle);
       }
 
       sessions.forEach((session, index) => {
         const active = session.id === State.currentSessionId;
         const pending = active && State.killInFlight;
+        const terminalName = `终端${index + 1}`;
 
         const item = document.createElement('div');
         item.className = active ? 'session-tab-item is-active' : 'session-tab-item';
@@ -938,13 +930,12 @@ export function createUi({ getControl, getTerm }) {
         button.dataset.sessionId = session.id;
         button.dataset.sessionIndex = String(index + 1);
         const cliLabel = session.cli || 'session';
-        const sessionLabel = `${cliLabel} ${shortenSessionId(session.id)}`;
-        button.setAttribute('aria-label', sessionLabel);
+        button.setAttribute('aria-label', terminalName);
         if (session.cwd) {
           button.dataset.cwd = session.cwd;
-          button.title = `${sessionLabel}\n${session.cwd}`;
+          button.title = `${terminalName}\n${session.cwd}`;
         } else {
-          button.title = sessionLabel;
+          button.title = terminalName;
         }
         button.setAttribute('role', 'tab');
         button.setAttribute('aria-selected', active ? 'true' : 'false');
@@ -956,20 +947,10 @@ export function createUi({ getControl, getTerm }) {
 
         const srLabel = document.createElement('span');
         srLabel.className = 'visually-hidden';
-        srLabel.textContent = sessionLabel;
+        srLabel.textContent = terminalName;
         button.appendChild(srLabel);
 
-        const deleteButton = document.createElement('button');
-        deleteButton.type = 'button';
-        deleteButton.className = 'session-tab-delete';
-        deleteButton.dataset.sessionId = session.id;
-        deleteButton.textContent = '×';
-        deleteButton.title = '删除会话';
-        deleteButton.setAttribute('aria-label', '删除会话');
-        deleteButton.disabled = pending || !active;
-
         item.appendChild(button);
-        item.appendChild(deleteButton);
         if (pending) {
           item.classList.add('is-delete-pending');
         }
@@ -1287,9 +1268,9 @@ export function createUi({ getControl, getTerm }) {
       }
       this.render();
       this.setVisible(false, { skipMeasure: true, keepTerminalFocus: false });
-      if (DOM.sessionTabs && DOM.quickKeysToggle && !DOM.sessionTabs.contains(DOM.quickKeysToggle)) {
-        DOM.sessionTabs.prepend(DOM.quickKeysToggle);
-        DOM.sessionTabs.hidden = false;
+      if (DOM.quickKeysToggle) {
+        DOM.quickKeysToggle.classList.remove('session-toolbar-icon');
+        syncQuickKeysToggleVisual(DOM.quickKeysToggle, this.visible);
       }
       if (DOM.quickKeysToggle) {
         const preserveDockInputFocus = (inputEl) => {
@@ -1355,10 +1336,12 @@ export function createUi({ getControl, getTerm }) {
           }
           const dockInputEl = resolveActiveDockInputElement();
           const preserveInputFocus = !!dockInputEl;
-          const keepTerminalFocus = !preserveInputFocus && isTerminalFocusTarget(document.activeElement);
+          if (!preserveInputFocus) {
+            blurTerminalKeyboardInputIfFocused();
+          }
           event.preventDefault();
           this.togglePointerHandledUntilMs = Date.now() + 420;
-          this.toggle({ keepTerminalFocus, preserveDockInputFocus: preserveInputFocus });
+          this.toggle({ keepTerminalFocus: false, preserveDockInputFocus: preserveInputFocus });
           if (preserveInputFocus) {
             preserveDockInputFocus(dockInputEl);
           }
@@ -1379,9 +1362,11 @@ export function createUi({ getControl, getTerm }) {
           }
           const dockInputEl = resolveActiveDockInputElement();
           const preserveInputFocus = !!dockInputEl;
-          const keepTerminalFocus = !preserveInputFocus && isTerminalFocusTarget(document.activeElement);
+          if (!preserveInputFocus) {
+            blurTerminalKeyboardInputIfFocused();
+          }
           event.preventDefault();
-          this.toggle({ keepTerminalFocus, preserveDockInputFocus: preserveInputFocus });
+          this.toggle({ keepTerminalFocus: false, preserveDockInputFocus: preserveInputFocus });
           if (preserveInputFocus) {
             preserveDockInputFocus(dockInputEl);
           }
