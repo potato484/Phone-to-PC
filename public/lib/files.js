@@ -4,6 +4,9 @@ const FILES_LONG_PRESS_MS = 520;
 const FILES_AUTH_RETRY_DELAY_MS = 900;
 const FILES_TEXT_ZOOM_MIN = 0.5;
 const FILES_TEXT_ZOOM_MAX = 5;
+const FILES_LAST_PATH_STORAGE_KEY = 'c2p_files_last_path';
+const FILES_EDITOR_SESSION_STORAGE_KEY = 'c2p_files_editor_session_v1';
+const FILES_VIEWPORT_CLOSE_GUARD_MS = 1200;
 
 function decodeBase64Url(base64Url) {
   if (typeof base64Url !== 'string' || !base64Url) {
@@ -97,6 +100,78 @@ function clampMenuPosition(x, y, width, height) {
   };
 }
 
+function readPersistedFilesPath() {
+  try {
+    const raw = window.localStorage.getItem(FILES_LAST_PATH_STORAGE_KEY) || '';
+    const trimmed = raw.trim();
+    return trimmed || '.';
+  } catch {
+    return '.';
+  }
+}
+
+function persistFilesPath(pathValue) {
+  const nextPath = typeof pathValue === 'string' ? pathValue.trim() : '';
+  try {
+    window.localStorage.setItem(FILES_LAST_PATH_STORAGE_KEY, nextPath || '.');
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
+function readPersistedEditorSession() {
+  try {
+    const raw = window.localStorage.getItem(FILES_EDITOR_SESSION_STORAGE_KEY) || '';
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+    const pathValue = typeof parsed.path === 'string' ? parsed.path.trim() : '';
+    const modeRaw = typeof parsed.mode === 'string' ? parsed.mode.trim() : '';
+    const mode = modeRaw === 'md-edit' || modeRaw === 'md-preview' ? modeRaw : '';
+    if (!pathValue) {
+      return null;
+    }
+    return {
+      path: pathValue,
+      mode
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistEditorSession(session) {
+  const pathValue = session && typeof session.path === 'string' ? session.path.trim() : '';
+  if (!pathValue) {
+    return;
+  }
+  const modeRaw = session && typeof session.mode === 'string' ? session.mode.trim() : '';
+  const mode = modeRaw === 'md-edit' || modeRaw === 'md-preview' ? modeRaw : '';
+  try {
+    window.localStorage.setItem(
+      FILES_EDITOR_SESSION_STORAGE_KEY,
+      JSON.stringify({
+        path: pathValue,
+        mode
+      })
+    );
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
+function clearPersistedEditorSession() {
+  try {
+    window.localStorage.removeItem(FILES_EDITOR_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
 export function createFiles({ toast, openTerminalAtPath }) {
   let currentPath = '.';
   let parentPath = null;
@@ -120,6 +195,24 @@ export function createFiles({ toast, openTerminalAtPath }) {
   let editorPinchState = null;
   let editorPinchBound = false;
   let editorTextZoom = 1;
+  let editorViewportGuardBound = false;
+  let lastViewportChangeAt = 0;
+  let folderPickerDialogEl = null;
+  let folderPickerTitleEl = null;
+  let folderPickerPathEl = null;
+  let folderPickerListEl = null;
+  let folderPickerRootBtn = null;
+  let folderPickerUpBtn = null;
+  let folderPickerConfirmBtn = null;
+  let folderPickerCancelBtn = null;
+  let folderPickerResolver = null;
+  let folderPickerActionText = '';
+  let folderPickerCurrentDir = '.';
+  let folderPickerParentDir = null;
+  let folderPickerEntries = [];
+  let folderPickerLoading = false;
+  let folderPickerError = '';
+  let folderPickerRequestId = 0;
 
   function isAuthFailureError(error) {
     const message = readErrorMessage(error).toLowerCase();
@@ -264,6 +357,269 @@ export function createFiles({ toast, openTerminalAtPath }) {
     return payload;
   }
 
+  function ensureFolderPickerDialog() {
+    if (folderPickerDialogEl) {
+      return folderPickerDialogEl;
+    }
+    folderPickerDialogEl = document.createElement('dialog');
+    folderPickerDialogEl.className = 'file-dialog files-folder-picker-dialog';
+    folderPickerDialogEl.innerHTML = `
+      <div class="file-dialog-header">
+        <span class="file-dialog-title" data-role="title"></span>
+      </div>
+      <div class="file-dialog-body files-folder-picker-body">
+        <div class="files-folder-picker-toolbar">
+          <button type="button" class="btn btn-sm" data-folder-action="root">根目录</button>
+          <button type="button" class="btn btn-sm" data-folder-action="up">上级</button>
+          <code class="files-folder-picker-path" data-role="path">.</code>
+        </div>
+        <div class="files-folder-picker-list" data-role="list"></div>
+        <div class="files-folder-picker-footer">
+          <button type="button" class="btn btn-sm" data-folder-action="confirm"></button>
+          <button type="button" class="btn btn-sm" data-folder-action="cancel">取消</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(folderPickerDialogEl);
+
+    folderPickerTitleEl = folderPickerDialogEl.querySelector('[data-role="title"]');
+    folderPickerPathEl = folderPickerDialogEl.querySelector('[data-role="path"]');
+    folderPickerListEl = folderPickerDialogEl.querySelector('[data-role="list"]');
+    folderPickerRootBtn = folderPickerDialogEl.querySelector('[data-folder-action="root"]');
+    folderPickerUpBtn = folderPickerDialogEl.querySelector('[data-folder-action="up"]');
+    folderPickerConfirmBtn = folderPickerDialogEl.querySelector('[data-folder-action="confirm"]');
+    folderPickerCancelBtn = folderPickerDialogEl.querySelector('[data-folder-action="cancel"]');
+
+    const resolveFolderActionButton = (event) => {
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      for (const node of path) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+        const buttonFromPath = node.closest('[data-folder-action]');
+        if (buttonFromPath && folderPickerDialogEl && folderPickerDialogEl.contains(buttonFromPath)) {
+          return buttonFromPath;
+        }
+      }
+      const target = event.target;
+      const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+      if (!element) {
+        return;
+      }
+      const button = element.closest('[data-folder-action]');
+      if (!button || (folderPickerDialogEl && !folderPickerDialogEl.contains(button))) {
+        return;
+      }
+      return button;
+    };
+
+    folderPickerDialogEl.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeFolderPicker(null);
+    });
+    folderPickerDialogEl.addEventListener('click', (event) => {
+      if (event.target === folderPickerDialogEl) {
+        closeFolderPicker(null);
+        return;
+      }
+      const button = resolveFolderActionButton(event);
+      if (!button) {
+        return;
+      }
+      const action = button.dataset.folderAction;
+      if (action === 'cancel') {
+        closeFolderPicker(null);
+        return;
+      }
+      if (action === 'root') {
+        void loadFolderPickerDirectory('.');
+        return;
+      }
+      if (action === 'up') {
+        if (folderPickerParentDir) {
+          void loadFolderPickerDirectory(folderPickerParentDir);
+        }
+        return;
+      }
+      if (action === 'confirm') {
+        closeFolderPicker(folderPickerCurrentDir || '.');
+        return;
+      }
+      if (action === 'open-dir') {
+        const nextPath = typeof button.dataset.path === 'string' ? button.dataset.path : '';
+        if (nextPath) {
+          void loadFolderPickerDirectory(nextPath);
+        }
+      }
+    });
+    folderPickerDialogEl.addEventListener('close', () => {
+      if (folderPickerResolver) {
+        const resolve = folderPickerResolver;
+        folderPickerResolver = null;
+        resolve(null);
+      }
+    });
+
+    return folderPickerDialogEl;
+  }
+
+  function closeFolderPicker(selectedDir) {
+    const resolve = folderPickerResolver;
+    folderPickerResolver = null;
+    folderPickerRequestId += 1;
+    if (folderPickerDialogEl && folderPickerDialogEl.open) {
+      folderPickerDialogEl.close();
+    }
+    if (typeof resolve === 'function') {
+      resolve(selectedDir);
+    }
+  }
+
+  function renderFolderPickerDialog() {
+    if (!folderPickerDialogEl || !folderPickerTitleEl || !folderPickerPathEl || !folderPickerListEl) {
+      return;
+    }
+    folderPickerTitleEl.textContent = `${folderPickerActionText}到目标目录`;
+    folderPickerPathEl.textContent = folderPickerCurrentDir || '.';
+    if (folderPickerConfirmBtn) {
+      folderPickerConfirmBtn.textContent = `${folderPickerActionText}到当前目录`;
+      folderPickerConfirmBtn.disabled = folderPickerLoading || !folderPickerCurrentDir;
+    }
+    if (folderPickerRootBtn) {
+      folderPickerRootBtn.disabled = folderPickerLoading;
+    }
+    if (folderPickerUpBtn) {
+      folderPickerUpBtn.disabled = folderPickerLoading || !folderPickerParentDir;
+    }
+    if (folderPickerCancelBtn) {
+      folderPickerCancelBtn.disabled = false;
+    }
+
+    folderPickerListEl.textContent = '';
+    if (folderPickerLoading) {
+      const loadingEl = document.createElement('p');
+      loadingEl.className = 'files-folder-picker-empty';
+      loadingEl.textContent = '目录读取中...';
+      folderPickerListEl.appendChild(loadingEl);
+      return;
+    }
+    if (folderPickerError) {
+      const errorEl = document.createElement('p');
+      errorEl.className = 'files-folder-picker-empty files-empty-error';
+      errorEl.textContent = folderPickerError;
+      folderPickerListEl.appendChild(errorEl);
+      return;
+    }
+    if (folderPickerEntries.length === 0) {
+      const emptyEl = document.createElement('p');
+      emptyEl.className = 'files-folder-picker-empty';
+      emptyEl.textContent = '当前目录为空';
+      folderPickerListEl.appendChild(emptyEl);
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    folderPickerEntries.forEach((entry) => {
+      const isDir = entry.type === 'dir';
+      const row = document.createElement(isDir ? 'button' : 'div');
+      if (row instanceof HTMLButtonElement) {
+        row.type = 'button';
+      }
+      row.className = `files-folder-picker-item ${isDir ? 'is-dir' : 'is-file'}`;
+      if (isDir) {
+        row.dataset.folderAction = 'open-dir';
+        row.dataset.path = entry.path;
+      }
+
+      const icon = document.createElement('span');
+      icon.className = 'files-folder-picker-item-icon';
+      icon.textContent = isDir ? 'DIR' : 'FILE';
+
+      const name = document.createElement('span');
+      name.className = 'files-folder-picker-item-name';
+      name.textContent = entry.name;
+
+      const meta = document.createElement('span');
+      meta.className = 'files-folder-picker-item-meta';
+      meta.textContent = isDir ? '-' : formatBytes(entry.size);
+
+      row.appendChild(icon);
+      row.appendChild(name);
+      row.appendChild(meta);
+      fragment.appendChild(row);
+    });
+    folderPickerListEl.appendChild(fragment);
+  }
+
+  async function loadFolderPickerDirectory(pathToLoad) {
+    const requestId = ++folderPickerRequestId;
+    folderPickerLoading = true;
+    folderPickerError = '';
+    renderFolderPickerDialog();
+    try {
+      const payload = await fetchJson('/api/fs/list', {
+        query: { path: pathToLoad || '.' }
+      });
+      if (requestId !== folderPickerRequestId || !folderPickerResolver) {
+        return;
+      }
+      folderPickerCurrentDir = typeof payload.path === 'string' ? payload.path : '.';
+      folderPickerParentDir = typeof payload.parent === 'string' ? payload.parent : null;
+      const listing = Array.isArray(payload.entries) ? payload.entries : [];
+      folderPickerEntries = listing
+        .filter((entry) => entry && (entry.type === 'dir' || entry.type === 'file'))
+        .map((entry) => ({
+          name: typeof entry.name === 'string' ? entry.name : '',
+          path: typeof entry.path === 'string' ? entry.path : '',
+          type: entry.type === 'dir' ? 'dir' : 'file',
+          size: Number.isFinite(entry.size) ? Number(entry.size) : 0
+        }))
+        .filter((entry) => entry.name && entry.path);
+    } catch (error) {
+      if (requestId !== folderPickerRequestId || !folderPickerResolver) {
+        return;
+      }
+      const feedback = classifyFsError(error);
+      folderPickerEntries = [];
+      folderPickerError = feedback.listTitle;
+      toast.show(feedback.listToast, feedback.listToastType);
+    } finally {
+      if (requestId !== folderPickerRequestId || !folderPickerResolver) {
+        return;
+      }
+      folderPickerLoading = false;
+      renderFolderPickerDialog();
+    }
+  }
+
+  function selectTargetDirectory(actionText, initialDir) {
+    const dialog = ensureFolderPickerDialog();
+    if (folderPickerResolver) {
+      closeFolderPicker(null);
+    }
+
+    folderPickerActionText = actionText;
+    folderPickerCurrentDir = normalizeTargetFolderInput(initialDir);
+    folderPickerParentDir = null;
+    folderPickerEntries = [];
+    folderPickerLoading = true;
+    folderPickerError = '';
+
+    const selectedPromise = new Promise((resolve) => {
+      folderPickerResolver = resolve;
+    });
+
+    renderFolderPickerDialog();
+    const activeEl = document.activeElement;
+    if (activeEl instanceof HTMLElement) {
+      activeEl.blur();
+    }
+    if (!dialog.open) {
+      dialog.showModal();
+    }
+    void loadFolderPickerDirectory(folderPickerCurrentDir);
+    return selectedPromise;
+  }
+
   function ensureContextMenu() {
     if (contextMenuEl) {
       return contextMenuEl;
@@ -291,6 +647,8 @@ export function createFiles({ toast, openTerminalAtPath }) {
       <button type="button" class="touch-context-btn" data-action="open-terminal">在此打开终端</button>
       <button type="button" class="touch-context-btn" data-action="download">下载</button>
       <button type="button" class="touch-context-btn" data-action="rename">重命名</button>
+      <button type="button" class="touch-context-btn" data-action="copy-to">复制到...</button>
+      <button type="button" class="touch-context-btn" data-action="move-to">移动到...</button>
       <button type="button" class="touch-context-btn" data-action="remove">删除</button>
     `;
     document.body.appendChild(contextMenuEl);
@@ -354,6 +712,14 @@ export function createFiles({ toast, openTerminalAtPath }) {
         await renameEntry(targetEntry);
         return;
       }
+      if (action === 'copy-to') {
+        await copyEntryToFolder(targetEntry);
+        return;
+      }
+      if (action === 'move-to') {
+        await moveEntryToFolder(targetEntry);
+        return;
+      }
       if (action === 'remove') {
         await removeEntry(targetEntry);
       }
@@ -407,6 +773,14 @@ export function createFiles({ toast, openTerminalAtPath }) {
     const renameBtn = menu.querySelector('[data-action="rename"]');
     if (renameBtn) {
       renameBtn.hidden = readonly;
+    }
+    const copyToBtn = menu.querySelector('[data-action="copy-to"]');
+    if (copyToBtn) {
+      copyToBtn.hidden = readonly;
+    }
+    const moveToBtn = menu.querySelector('[data-action="move-to"]');
+    if (moveToBtn) {
+      moveToBtn.hidden = readonly;
     }
     const removeBtn = menu.querySelector('[data-action="remove"]');
     if (removeBtn) {
@@ -553,6 +927,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
       currentPath = typeof payload.path === 'string' ? payload.path : '.';
       parentPath = typeof payload.parent === 'string' ? payload.parent : null;
       entries = Array.isArray(payload.entries) ? payload.entries : [];
+      persistFilesPath(currentPath);
       searchQuery = '';
       if (DOM.filesSearchInput) {
         DOM.filesSearchInput.value = '';
@@ -602,6 +977,89 @@ export function createFiles({ toast, openTerminalAtPath }) {
     resetEditorZoom();
     markDirty(false);
     document.title = 'C2P Controller';
+  }
+
+  function noteViewportChanged() {
+    lastViewportChangeAt = Date.now();
+  }
+
+  function shouldGuardDialogClose(reason) {
+    const closeReason = typeof reason === 'string' ? reason : 'manual';
+    if (closeReason !== 'backdrop' && closeReason !== 'cancel') {
+      return false;
+    }
+    if (!lastViewportChangeAt) {
+      return false;
+    }
+    return Date.now() - lastViewportChangeAt <= FILES_VIEWPORT_CLOSE_GUARD_MS;
+  }
+
+  function resolveEditorViewMode() {
+    if (DOM.filesImgPreview && !DOM.filesImgPreview.hidden) {
+      return '';
+    }
+    if (!DOM.filesMdToggleBtn || DOM.filesMdToggleBtn.hidden) {
+      return '';
+    }
+    return DOM.filesMdPreview && !DOM.filesMdPreview.hidden ? 'md-preview' : 'md-edit';
+  }
+
+  function persistCurrentEditorSession() {
+    if (!DOM.filesEditorDialog || !DOM.filesEditorDialog.open || !DOM.filesEditorPath) {
+      return;
+    }
+    const pathValue = (DOM.filesEditorPath.textContent || '').trim();
+    if (!pathValue) {
+      return;
+    }
+    persistEditorSession({
+      path: pathValue,
+      mode: resolveEditorViewMode()
+    });
+  }
+
+  function applyRestoredEditorMode(mode) {
+    if (mode !== 'md-edit' && mode !== 'md-preview') {
+      return;
+    }
+    if (!DOM.filesMdToggleBtn || DOM.filesMdToggleBtn.hidden) {
+      return;
+    }
+
+    if (mode === 'md-preview') {
+      if (DOM.filesMdPreview.hidden) {
+        const source = DOM.filesEditor.value;
+        DOM.filesMdPreview.dataset.source = source;
+        renderMarkdownPreview(source);
+        DOM.filesEditor.hidden = true;
+        DOM.filesMdPreview.hidden = false;
+        DOM.filesMdToggleBtn.textContent = '编辑';
+        markDirty(source !== editorOriginalContent);
+      }
+      return;
+    }
+
+    if (!DOM.filesMdPreview.hidden) {
+      DOM.filesEditor.value = DOM.filesMdPreview.dataset.source || '';
+      DOM.filesEditor.hidden = false;
+      DOM.filesMdPreview.hidden = true;
+      DOM.filesMdToggleBtn.textContent = '预览';
+      markDirty(DOM.filesEditor.value !== editorOriginalContent);
+    }
+  }
+
+  async function restoreEditorSessionIfNeeded() {
+    const saved = readPersistedEditorSession();
+    if (!saved || !saved.path) {
+      return;
+    }
+    await openFileForEdit(saved.path, { suppressErrorToast: true });
+    if (!DOM.filesEditorDialog || !DOM.filesEditorDialog.open) {
+      clearPersistedEditorSession();
+      return;
+    }
+    applyRestoredEditorMode(saved.mode);
+    persistCurrentEditorSession();
   }
 
   function readTouchDistance(touchA, touchB) {
@@ -749,12 +1207,17 @@ export function createFiles({ toast, openTerminalAtPath }) {
     bindLegacyGestureZoom(DOM.filesMdPreview);
   }
 
-  function tryCloseDialog() {
+  function tryCloseDialog(options = {}) {
+    const reason = options && typeof options.reason === 'string' ? options.reason : 'manual';
+    if (shouldGuardDialogClose(reason)) {
+      return;
+    }
     if (editorDirty && !window.confirm('有未保存的更改，确认关闭？')) {
       return;
     }
     DOM.filesEditorDialog.close();
     resetEditorState();
+    clearPersistedEditorSession();
   }
 
   function getMarkdownRenderer() {
@@ -798,10 +1261,11 @@ export function createFiles({ toast, openTerminalAtPath }) {
     DOM.filesEditorSaveBtn.disabled = true;
   }
 
-  async function openFileForEdit(filePath) {
+  async function openFileForEdit(filePath, options = {}) {
     if (!DOM.filesEditorDialog || !DOM.filesEditor || !DOM.filesEditorPath) {
       return;
     }
+    const suppressErrorToast = options && options.suppressErrorToast === true;
     try {
       resetEditorState();
       DOM.filesEditorPath.textContent = filePath;
@@ -837,17 +1301,24 @@ export function createFiles({ toast, openTerminalAtPath }) {
         activeEl.blur();
       }
       DOM.filesEditorDialog.showModal();
+      persistCurrentEditorSession();
     } catch (error) {
       const feedback = classifyFsError(error);
       if (feedback.kind === 'permission') {
-        toast.show('权限不足：当前令牌无权读取该文件', 'warn');
+        if (!suppressErrorToast) {
+          toast.show('权限不足：当前令牌无权读取该文件', 'warn');
+        }
         return;
       }
       if (feedback.kind === 'size') {
-        toast.show('文件过大，无法在线读取；请下载后处理', 'warn');
+        if (!suppressErrorToast) {
+          toast.show('文件过大，无法在线读取；请下载后处理', 'warn');
+        }
         return;
       }
-      toast.show(`读取文件失败: ${readErrorMessage(error) || 'unknown'}`, 'danger');
+      if (!suppressErrorToast) {
+        toast.show(`读取文件失败: ${readErrorMessage(error) || 'unknown'}`, 'danger');
+      }
     }
   }
 
@@ -940,6 +1411,106 @@ export function createFiles({ toast, openTerminalAtPath }) {
         return;
       }
       toast.show(`重命名失败: ${error.message}`, 'danger');
+    }
+  }
+
+  function normalizeTargetFolderInput(rawPath) {
+    if (typeof rawPath !== 'string') {
+      return '.';
+    }
+    const trimmed = rawPath.trim();
+    if (!trimmed || trimmed === '/') {
+      return '.';
+    }
+    const normalized = trimmed.replace(/^\/+/g, '').replace(/\/+$/g, '');
+    return normalized || '.';
+  }
+
+  function buildTransferTarget(entry, targetDirRaw) {
+    const { base } = splitPath(entry.path);
+    if (!base) {
+      toast.show('当前条目名称无效', 'warn');
+      return null;
+    }
+    const targetDir = normalizeTargetFolderInput(targetDirRaw);
+    const targetPath = joinPath(targetDir, base);
+    if (targetPath === entry.path) {
+      toast.show('目标目录与当前目录相同', 'warn');
+      return null;
+    }
+    return {
+      targetDir,
+      targetPath
+    };
+  }
+
+  async function copyEntryToFolder(entry) {
+    if (isReadonlyToken()) {
+      toast.show('只读模式不可写', 'warn');
+      return;
+    }
+    const selectedDir = await selectTargetDirectory('复制', currentPath || '.');
+    if (selectedDir === null) {
+      return;
+    }
+    const transferTarget = buildTransferTarget(entry, selectedDir);
+    if (!transferTarget) {
+      return;
+    }
+    try {
+      await fetchJson('/api/fs/copy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          path: entry.path,
+          to: transferTarget.targetPath
+        })
+      });
+      toast.show(`复制完成: ${transferTarget.targetDir}`, 'success');
+      await refresh();
+    } catch (error) {
+      if (isInsufficientScopeError(error)) {
+        toast.show('只读模式不可写', 'warn');
+        return;
+      }
+      toast.show(`复制失败: ${error.message}`, 'danger');
+    }
+  }
+
+  async function moveEntryToFolder(entry) {
+    if (isReadonlyToken()) {
+      toast.show('只读模式不可写', 'warn');
+      return;
+    }
+    const selectedDir = await selectTargetDirectory('移动', currentPath || '.');
+    if (selectedDir === null) {
+      return;
+    }
+    const transferTarget = buildTransferTarget(entry, selectedDir);
+    if (!transferTarget) {
+      return;
+    }
+    try {
+      await fetchJson('/api/fs/rename', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          path: entry.path,
+          to: transferTarget.targetPath
+        })
+      });
+      toast.show(`移动完成: ${transferTarget.targetDir}`, 'success');
+      await refresh();
+    } catch (error) {
+      if (isInsufficientScopeError(error)) {
+        toast.show('只读模式不可写', 'warn');
+        return;
+      }
+      toast.show(`移动失败: ${error.message}`, 'danger');
     }
   }
 
@@ -1335,20 +1906,34 @@ export function createFiles({ toast, openTerminalAtPath }) {
     }
 
     bindEditorPinchZoom();
+    if (!editorViewportGuardBound) {
+      editorViewportGuardBound = true;
+      const handleViewportChange = () => {
+        noteViewportChanged();
+      };
+      window.addEventListener('resize', handleViewportChange, { passive: true });
+      window.addEventListener('orientationchange', handleViewportChange, { passive: true });
+      const viewport = window.visualViewport;
+      if (viewport && typeof viewport.addEventListener === 'function') {
+        viewport.addEventListener('resize', handleViewportChange, { passive: true });
+      }
+    }
 
-    DOM.filesEditorCancelBtn.addEventListener('click', tryCloseDialog);
+    DOM.filesEditorCancelBtn.addEventListener('click', () => {
+      tryCloseDialog({ reason: 'button' });
+    });
     DOM.filesEditorSaveBtn.addEventListener('click', () => {
       void saveEditorFile();
     });
 
     DOM.filesEditorDialog.addEventListener('click', (event) => {
       if (event.target === DOM.filesEditorDialog) {
-        tryCloseDialog();
+        tryCloseDialog({ reason: 'backdrop' });
       }
     });
     DOM.filesEditorDialog.addEventListener('cancel', (event) => {
       event.preventDefault();
-      tryCloseDialog();
+      tryCloseDialog({ reason: 'cancel' });
     });
     DOM.filesEditorDialog.addEventListener('keydown', (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === 's') {
@@ -1388,6 +1973,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
         DOM.filesMdToggleBtn.textContent = '编辑';
         markDirty(source !== editorOriginalContent);
       }
+      persistCurrentEditorSession();
     });
   }
 
@@ -1407,11 +1993,17 @@ export function createFiles({ toast, openTerminalAtPath }) {
         return;
       }
       const silentAuthRetry = options && options.silentAuthRetry === true;
+      const initialPath =
+        options && typeof options.initialPath === 'string' && options.initialPath.trim()
+          ? options.initialPath.trim()
+          : readPersistedFilesPath();
       bindToolbar();
       bindEditor();
       bindSearch();
       bindListInteractions();
-      void refresh('.', { silentAuthRetry });
+      void refresh(initialPath, { silentAuthRetry }).finally(() => {
+        void restoreEditorSessionIfNeeded();
+      });
     },
     refresh() {
       void refresh();

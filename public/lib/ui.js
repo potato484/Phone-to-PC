@@ -1,17 +1,18 @@
 import {
+  clearPersistedAccessToken,
   DOM,
   KEYBOARD_VISIBLE_THRESHOLD_PX,
   KILL_REQUEST_TIMEOUT_MS,
   QUICK_KEY_SEQUENCES,
   State,
-  TOKEN_EXPIRES_AT_STORAGE_KEY,
-  TOKEN_STORAGE_KEY,
   ZOOM_SCALE_EPSILON,
   ZOOM_SETTLE_MS,
   apiUrl,
   authedFetch,
   normalizeSessionEntry,
+  persistAccessToken,
   pruneSessionOffsets,
+  readPersistedAccessToken,
   readTokenFromHash,
   setActionButtonsEnabled,
   setSignalState,
@@ -34,7 +35,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=47';
+const SERVICE_WORKER_URL = '/sw.js?v=48';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const AUTH_TOKEN_WARN_LEAD_MS = 5 * 60 * 1000;
@@ -47,6 +48,8 @@ const TERMINAL_VISUAL_BUFFER_WITH_KEYBOARD_PX = 132;
 const TERMINAL_VIEWPORT_BUFFER_RATIO = 0.18;
 const KEYBOARD_INSET_APPLY_DELAY_MS = 120;
 const DOCK_INPUT_PRESERVE_MS = 2000;
+const UI_STATE_STORAGE_KEY = 'c2p_ui_state_v1';
+const UI_STATE_WRITE_DEBOUNCE_MS = 120;
 const NON_TEXT_INPUT_TYPES = new Set([
   'button',
   'checkbox',
@@ -130,11 +133,117 @@ function restoreDockInputFocus(inputEl) {
   }
 }
 
+function tryLockPortraitOrientation() {
+  const orientation = window.screen && window.screen.orientation;
+  if (!orientation || typeof orientation.lock !== 'function') {
+    return;
+  }
+  orientation.lock('portrait-primary').catch(() => {
+    // Ignore lock failures when browser does not allow programmatic orientation lock.
+  });
+}
+
 export function createUi({ getControl, getTerm }) {
   let sessionCache = [];
   let preserveDockInputUntilMs = 0;
+  let uiStateWriteTimer = 0;
   State.lastDockInputElement = null;
   const Theme = createThemeManager();
+
+  function readPersistedUiState() {
+    try {
+      const raw = window.localStorage.getItem(UI_STATE_STORAGE_KEY);
+      if (!raw) {
+        return null;
+      }
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  function writePersistedUiState(nextState) {
+    try {
+      window.localStorage.setItem(UI_STATE_STORAGE_KEY, JSON.stringify(nextState));
+    } catch {
+      // Ignore storage write failures.
+    }
+  }
+
+  function collectUiStateSnapshot() {
+    const dockExpanded = !!(DOM.dock && DOM.dock.classList.contains('is-expanded'));
+    const quickKeysVisible = !!(DOM.dock && DOM.dock.classList.contains('is-quick-keys-visible'));
+    return {
+      dockExpanded,
+      quickKeysVisible,
+      currentSessionId: State.currentSessionId || '',
+      updatedAt: Date.now()
+    };
+  }
+
+  function persistUiStateNow() {
+    if (uiStateWriteTimer) {
+      window.clearTimeout(uiStateWriteTimer);
+      uiStateWriteTimer = 0;
+    }
+    writePersistedUiState(collectUiStateSnapshot());
+  }
+
+  function scheduleUiStatePersist() {
+    if (uiStateWriteTimer) {
+      window.clearTimeout(uiStateWriteTimer);
+    }
+    uiStateWriteTimer = window.setTimeout(() => {
+      uiStateWriteTimer = 0;
+      writePersistedUiState(collectUiStateSnapshot());
+    }, UI_STATE_WRITE_DEBOUNCE_MS);
+  }
+
+  function restoreUiStateSnapshot() {
+    const restored = readPersistedUiState();
+    if (!restored) {
+      return;
+    }
+
+    if (typeof restored.currentSessionId === 'string' && restored.currentSessionId) {
+      State.currentSessionId = restored.currentSessionId;
+      StatusBar.setSession(restored.currentSessionId);
+    }
+    if (restored.dockExpanded) {
+      Dock.expand();
+    } else {
+      Dock.collapse();
+    }
+    if (restored.quickKeysVisible) {
+      QuickKeys.setVisible(true, {
+        skipMeasure: true,
+        keepTerminalFocus: false
+      });
+    }
+  }
+
+  function bindUiStatePersistence() {
+    window.addEventListener(
+      'pagehide',
+      () => {
+        persistUiStateNow();
+      },
+      { passive: true }
+    );
+    document.addEventListener(
+      'visibilitychange',
+      () => {
+        if (document.visibilityState === 'hidden') {
+          persistUiStateNow();
+        }
+      },
+      { passive: true }
+    );
+  }
 
   const Toast = {
     show(message, type = 'info', options = {}) {
@@ -196,11 +305,13 @@ export function createUi({ getControl, getTerm }) {
       if (!sessionId) {
         DOM.sessionPill.hidden = true;
         DOM.sessionPill.dataset.sessionId = '';
+        scheduleUiStatePersist();
         return;
       }
       DOM.sessionPill.hidden = false;
       DOM.sessionPill.dataset.sessionId = sessionId;
       DOM.sessionPill.textContent = `会话 ${shortenSessionId(sessionId)}`;
+      scheduleUiStatePersist();
     }
   };
 
@@ -305,6 +416,7 @@ export function createUi({ getControl, getTerm }) {
       DOM.dock.classList.add('is-expanded');
       DOM.dockHandle.setAttribute('aria-expanded', 'true');
       this.scheduleMeasure();
+      scheduleUiStatePersist();
     },
 
     collapse() {
@@ -314,6 +426,7 @@ export function createUi({ getControl, getTerm }) {
       DOM.dock.classList.remove('is-expanded');
       DOM.dockHandle.setAttribute('aria-expanded', 'false');
       this.scheduleMeasure();
+      scheduleUiStatePersist();
     },
 
     toggle() {
@@ -942,13 +1055,14 @@ export function createUi({ getControl, getTerm }) {
           });
         });
 
-        let reloading = false;
+        let controllerChangeNotified = false;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-          if (reloading) {
+          if (controllerChangeNotified) {
             return;
           }
-          reloading = true;
-          window.location.reload();
+          controllerChangeNotified = true;
+          StatusBar.setText('应用已在后台更新，保持当前界面不中断');
+          Toast.show('应用更新已生效，本次不会自动刷新页面', 'info');
         });
       } catch {
         StatusBar.setText('Service Worker 注册失败');
@@ -975,6 +1089,7 @@ export function createUi({ getControl, getTerm }) {
         DOM.quickKeysToggle.setAttribute('aria-pressed', nextVisible ? 'true' : 'false');
         DOM.quickKeysToggle.textContent = nextVisible ? QUICK_KEYS_TOGGLE_TEXT_HIDE : QUICK_KEYS_TOGGLE_TEXT_SHOW;
       }
+      scheduleUiStatePersist();
       if (!skipMeasure) {
         Dock.scheduleMeasure();
       }
@@ -1510,20 +1625,14 @@ export function createUi({ getControl, getTerm }) {
   function applyAccessToken(accessToken, expiresAt = '') {
     State.token = accessToken;
     State.tokenExpiresAt = expiresAt || '';
-    window.sessionStorage.setItem(TOKEN_STORAGE_KEY, accessToken);
-    if (State.tokenExpiresAt) {
-      window.sessionStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, State.tokenExpiresAt);
-    } else {
-      window.sessionStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-    }
+    persistAccessToken(accessToken, State.tokenExpiresAt);
   }
 
   function clearAccessTokenState() {
     clearTokenTimers();
     State.token = '';
     State.tokenExpiresAt = '';
-    window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-    window.sessionStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+    clearPersistedAccessToken();
   }
 
   function scheduleTokenLifecycle() {
@@ -1647,11 +1756,14 @@ export function createUi({ getControl, getTerm }) {
         return !!State.token;
       }
 
-      State.token = window.sessionStorage.getItem(TOKEN_STORAGE_KEY) || '';
-      State.tokenExpiresAt = window.sessionStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY) || '';
+      const persisted = readPersistedAccessToken();
+      State.token = persisted.token;
+      State.tokenExpiresAt = persisted.expiresAt;
       if (!State.token) {
         return false;
       }
+      // Keep session/local storage in sync for crash/orientation recovery.
+      persistAccessToken(State.token, State.tokenExpiresAt);
 
       if (!State.tokenExpiresAt) {
         try {
@@ -1739,6 +1851,7 @@ export function createUi({ getControl, getTerm }) {
       motionSelect: DOM.prefMotionSelect,
       transparencySelect: DOM.prefTransparencySelect
     });
+    tryLockPortraitOrientation();
 
     StatusBar.setControl('offline');
     StatusBar.setTerminal('offline');
@@ -1752,6 +1865,8 @@ export function createUi({ getControl, getTerm }) {
     Dock.bind();
     Dock.updateHeight();
     QuickKeys.bind();
+    restoreUiStateSnapshot();
+    bindUiStatePersistence();
     bindSessionCopy();
     Actions.bind();
     const authReady = Auth.init()

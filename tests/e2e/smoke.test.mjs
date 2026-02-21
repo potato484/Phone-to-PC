@@ -328,6 +328,29 @@ test('e2e smoke: auth -> session -> ws -> fs', async (t) => {
     const downloaded = await downloadRes.text();
     assert.equal(downloaded, 'hello-from-e2e');
 
+    const copiedPath = 'nested/e2e-smoke-copy.txt';
+    const copyRes = await fetch(`${baseUrl}/api/fs/copy`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        path: filePath,
+        to: copiedPath
+      })
+    });
+    assert.equal(copyRes.status, 201, 'fs copy should succeed');
+
+    const copiedReadRes = await fetch(`${baseUrl}/api/fs/read?path=${encodeURIComponent(copiedPath)}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+    assert.equal(copiedReadRes.status, 200, 'copied file should be readable');
+    const copiedPayload = await copiedReadRes.json();
+    assert.equal(copiedPayload.content, 'hello-from-e2e');
+
     controlWs.send(
       JSON.stringify({
         type: 'kill',

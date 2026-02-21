@@ -1,10 +1,10 @@
 import {
+  clearPersistedAccessToken,
   CONTROL_CLIENT_CAPABILITIES,
   CONTROL_PROTOCOL_VERSION,
   State,
-  TOKEN_EXPIRES_AT_STORAGE_KEY,
-  TOKEN_STORAGE_KEY,
   createWsAuthMessage,
+  persistTokenExpiry,
   setActionButtonsEnabled,
   setSessionOffset,
   wsUrl
@@ -47,7 +47,7 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         State.controlConnected = true;
         if (typeof payload.expiresAt === 'string' && payload.expiresAt) {
           State.tokenExpiresAt = payload.expiresAt;
-          window.sessionStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, payload.expiresAt);
+          persistTokenExpiry(payload.expiresAt);
         }
         statusBar.setControl('online');
         statusBar.setText('控制通道已鉴权');
@@ -276,8 +276,7 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
             window.clearTimeout(State.tokenRefreshTimer);
             State.tokenRefreshTimer = 0;
           }
-          window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-          window.sessionStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+          clearPersistedAccessToken();
           State.token = '';
           State.tokenExpiresAt = '';
           statusBar.setControl('offline');

@@ -114,6 +114,18 @@ function toSessionSafeFilename(filename: string): string {
 
 function respondFsError(res: Response, error: unknown): void {
   const code = error && typeof error === 'object' ? (error as NodeJS.ErrnoException).code : undefined;
+  if (code === 'ERR_FS_CP_EEXIST') {
+    res.status(409).json({ error: 'target already exists' });
+    return;
+  }
+  if (
+    code === 'ERR_FS_CP_EINVAL' ||
+    code === 'ERR_FS_CP_DIR_TO_NON_DIR' ||
+    code === 'ERR_FS_CP_NON_DIR_TO_DIR'
+  ) {
+    res.status(400).json({ error: 'invalid path or operation' });
+    return;
+  }
   if (code === 'ENOENT') {
     res.status(404).json({ error: 'path not found' });
     return;
@@ -305,7 +317,7 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
   const auditFsEvent = (
     req: Request,
     res: Response,
-    event: 'fs.read' | 'fs.upload' | 'fs.download' | 'fs.delete' | 'fs.write' | 'fs.mkdir' | 'fs.rename',
+    event: 'fs.read' | 'fs.upload' | 'fs.download' | 'fs.delete' | 'fs.write' | 'fs.mkdir' | 'fs.rename' | 'fs.copy',
     resource: string,
     outcome: 'success' | 'failure',
     metadata: Record<string, unknown> = {}
@@ -599,6 +611,65 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       auditFsEvent(req, res, 'fs.rename', toRelativePath(fsRoot, sourcePath), 'failure', {
+        reason: message,
+        to: toRelativePath(fsRoot, targetPath)
+      });
+      respondFsError(res, error);
+    }
+  });
+
+  app.post('/api/fs/copy', async (req: Request, res: Response) => {
+    if (!requireScope(req, res, 'admin', '/api/fs/copy')) {
+      return;
+    }
+
+    const sourcePathRaw = readStringBodyField(req.body, 'path');
+    const targetPathRaw = readStringBodyField(req.body, 'to');
+    const sourcePath = resolvePathWithinBase(fsRoot, sourcePathRaw);
+    const targetPath = resolvePathWithinBase(fsRoot, targetPathRaw);
+    if (!sourcePath || !targetPath) {
+      auditFsEvent(req, res, 'fs.copy', `${String(sourcePathRaw ?? '')} -> ${String(targetPathRaw ?? '')}`, 'failure', {
+        reason: 'invalid path'
+      });
+      res.status(400).json({ error: 'invalid path' });
+      return;
+    }
+    if (sourcePath === targetPath) {
+      auditFsEvent(req, res, 'fs.copy', toRelativePath(fsRoot, sourcePath), 'failure', { reason: 'same path' });
+      res.status(400).json({ error: 'source and target cannot be the same path' });
+      return;
+    }
+
+    try {
+      await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+      const sourceStat = await fs.promises.stat(sourcePath);
+      if (sourceStat.isDirectory()) {
+        await fs.promises.cp(sourcePath, targetPath, {
+          recursive: true,
+          force: false,
+          errorOnExist: true
+        });
+      } else if (sourceStat.isFile()) {
+        await fs.promises.copyFile(sourcePath, targetPath, fs.constants.COPYFILE_EXCL);
+      } else {
+        auditFsEvent(req, res, 'fs.copy', toRelativePath(fsRoot, sourcePath), 'failure', {
+          reason: 'unsupported entry type',
+          to: toRelativePath(fsRoot, targetPath)
+        });
+        res.status(400).json({ error: 'path is not a file or directory' });
+        return;
+      }
+      auditFsEvent(req, res, 'fs.copy', toRelativePath(fsRoot, sourcePath), 'success', {
+        to: toRelativePath(fsRoot, targetPath)
+      });
+      res.status(201).json({
+        ok: true,
+        from: toRelativePath(fsRoot, sourcePath),
+        to: toRelativePath(fsRoot, targetPath)
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      auditFsEvent(req, res, 'fs.copy', toRelativePath(fsRoot, sourcePath), 'failure', {
         reason: message,
         to: toRelativePath(fsRoot, targetPath)
       });

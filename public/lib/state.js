@@ -60,6 +60,102 @@ export const DOM = {
 
 export const TOKEN_STORAGE_KEY = 'c2p_token';
 export const TOKEN_EXPIRES_AT_STORAGE_KEY = 'c2p_token_expires_at';
+
+function safeStorageGet(storage, key) {
+  if (!storage) {
+    return '';
+  }
+  try {
+    return storage.getItem(key) || '';
+  } catch {
+    return '';
+  }
+}
+
+function safeStorageSet(storage, key, value) {
+  if (!storage) {
+    return;
+  }
+  try {
+    storage.setItem(key, value);
+  } catch {
+    // Ignore storage write failures (quota/privacy mode).
+  }
+}
+
+function safeStorageRemove(storage, key) {
+  if (!storage) {
+    return;
+  }
+  try {
+    storage.removeItem(key);
+  } catch {
+    // Ignore storage write failures (quota/privacy mode).
+  }
+}
+
+export function persistTokenExpiry(expiresAt) {
+  const value = typeof expiresAt === 'string' ? expiresAt : '';
+  if (value) {
+    safeStorageSet(window.sessionStorage, TOKEN_EXPIRES_AT_STORAGE_KEY, value);
+    safeStorageSet(window.localStorage, TOKEN_EXPIRES_AT_STORAGE_KEY, value);
+    return;
+  }
+  safeStorageRemove(window.sessionStorage, TOKEN_EXPIRES_AT_STORAGE_KEY);
+  safeStorageRemove(window.localStorage, TOKEN_EXPIRES_AT_STORAGE_KEY);
+}
+
+export function persistAccessToken(accessToken, expiresAt = '') {
+  const token = typeof accessToken === 'string' ? accessToken : '';
+  if (token) {
+    safeStorageSet(window.sessionStorage, TOKEN_STORAGE_KEY, token);
+    safeStorageSet(window.localStorage, TOKEN_STORAGE_KEY, token);
+  } else {
+    safeStorageRemove(window.sessionStorage, TOKEN_STORAGE_KEY);
+    safeStorageRemove(window.localStorage, TOKEN_STORAGE_KEY);
+  }
+  persistTokenExpiry(expiresAt);
+}
+
+export function clearPersistedAccessToken() {
+  safeStorageRemove(window.sessionStorage, TOKEN_STORAGE_KEY);
+  safeStorageRemove(window.sessionStorage, TOKEN_EXPIRES_AT_STORAGE_KEY);
+  safeStorageRemove(window.localStorage, TOKEN_STORAGE_KEY);
+  safeStorageRemove(window.localStorage, TOKEN_EXPIRES_AT_STORAGE_KEY);
+}
+
+export function readPersistedAccessToken() {
+  const sessionToken = safeStorageGet(window.sessionStorage, TOKEN_STORAGE_KEY);
+  const sessionExpiresAt = safeStorageGet(window.sessionStorage, TOKEN_EXPIRES_AT_STORAGE_KEY);
+  if (sessionToken) {
+    return {
+      token: sessionToken,
+      expiresAt: sessionExpiresAt
+    };
+  }
+
+  const fallbackToken = safeStorageGet(window.localStorage, TOKEN_STORAGE_KEY);
+  const fallbackExpiresAt = safeStorageGet(window.localStorage, TOKEN_EXPIRES_AT_STORAGE_KEY);
+  if (!fallbackToken) {
+    return {
+      token: '',
+      expiresAt: ''
+    };
+  }
+
+  // Rehydrate sessionStorage so same-tab reload behavior stays unchanged afterwards.
+  safeStorageSet(window.sessionStorage, TOKEN_STORAGE_KEY, fallbackToken);
+  if (fallbackExpiresAt) {
+    safeStorageSet(window.sessionStorage, TOKEN_EXPIRES_AT_STORAGE_KEY, fallbackExpiresAt);
+  } else {
+    safeStorageRemove(window.sessionStorage, TOKEN_EXPIRES_AT_STORAGE_KEY);
+  }
+  return {
+    token: fallbackToken,
+    expiresAt: fallbackExpiresAt
+  };
+}
+
 export const SIGNAL_STATES = ['is-online', 'is-warn', 'is-offline'];
 export const QUICK_KEY_SEQUENCES = {
   'ctrl-c': '\x03',

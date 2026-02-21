@@ -2,6 +2,7 @@
   "name": "C2P",
   "short_name": "C2P",
   "display": "standalone",
+  "orientation": "portrait-primary",
   "start_url": "/",
   "background_color": "#1e1e2e",
   "theme_color": "#1e1e2e",

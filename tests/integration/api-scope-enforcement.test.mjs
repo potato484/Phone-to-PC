@@ -197,6 +197,12 @@ test('readonly scope cannot call write APIs and emits denied-scope audit', async
       },
       {
         method: 'POST',
+        url: `${baseUrl}/api/fs/copy`,
+        body: JSON.stringify({ path: 'a', to: 'b' }),
+        headers: authHeaders
+      },
+      {
+        method: 'POST',
         url: `${baseUrl}/api/fs/remove`,
         body: JSON.stringify({ path: 'a', recursive: true }),
         headers: authHeaders
