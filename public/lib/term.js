@@ -75,6 +75,20 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
   let activePaneId = '';
   let touchScrollModePaneId = '';
   let reconnectProgressTimer = 0;
+  let suppressPaneFocusUntilMs = 0;
+
+  function isPaneFocusSuppressed() {
+    return suppressPaneFocusUntilMs > Date.now();
+  }
+
+  function suppressActivePaneFocusFor(durationMs = 0) {
+    const safeDurationMs = Number.isFinite(durationMs) ? Math.max(0, Math.floor(durationMs)) : 0;
+    if (safeDurationMs <= 0) {
+      return suppressPaneFocusUntilMs;
+    }
+    suppressPaneFocusUntilMs = Math.max(suppressPaneFocusUntilMs, Date.now() + safeDurationMs);
+    return suppressPaneFocusUntilMs;
+  }
 
   function getPane(paneId) {
     if (!paneId) {
@@ -128,14 +142,15 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (!pane || !pane.titleEl) {
       return;
     }
+    const terminalName = `终端${pane.index}`;
     if (!pane.sessionId) {
-      pane.titleEl.textContent = `面板 ${pane.index}`;
+      pane.titleEl.textContent = terminalName;
       pane.rootEl.dataset.sessionId = '';
       return;
     }
     pane.rootEl.dataset.sessionId = pane.sessionId;
     const cwdLabel = pane.cwd ? ` · ${pane.cwd}` : '';
-    pane.titleEl.textContent = `${shortenSessionId(pane.sessionId)}${cwdLabel}`;
+    pane.titleEl.textContent = `${terminalName}${cwdLabel}`;
   }
 
   function stopReconnectProgress() {
@@ -233,7 +248,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       entry.rootEl.classList.toggle('is-active', entry.id === pane.id);
     });
     syncTouchScrollModeUi();
-    if (options.focus !== false) {
+    if (options.focus !== false && !isPaneFocusSuppressed()) {
       pane.terminal.focus();
     }
     syncLegacyStateFromActivePane();
@@ -1104,6 +1119,55 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     };
   }
 
+  function resolveClientPointFromActiveCell(cell, options = {}) {
+    const pane = getActivePane();
+    if (!pane || !pane.terminal || !pane.rootEl || !cell) {
+      return null;
+    }
+    const screenEl = pane.rootEl.querySelector('.xterm-screen');
+    if (!(screenEl instanceof HTMLElement)) {
+      return null;
+    }
+    const rect = screenEl.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || pane.terminal.cols <= 0 || pane.terminal.rows <= 0) {
+      return null;
+    }
+    const cols = Math.max(1, pane.terminal.cols);
+    const rows = Math.max(1, pane.terminal.rows);
+    const viewportY = Number(
+      pane.terminal.buffer &&
+        pane.terminal.buffer.active &&
+        Number.isFinite(pane.terminal.buffer.active.viewportY)
+        ? pane.terminal.buffer.active.viewportY
+        : 0
+    );
+    const maxBufferRow = Number(
+      pane.terminal.buffer &&
+        pane.terminal.buffer.active &&
+        Number.isFinite(pane.terminal.buffer.active.length)
+        ? Math.max(0, pane.terminal.buffer.active.length - 1)
+        : pane.terminal.rows - 1
+    );
+    const col = clampIndex(Number(cell.col), cols - 1);
+    const row = clampIndex(Number(cell.row), maxBufferRow);
+    const viewportRow = row - viewportY;
+    if (!Number.isFinite(viewportRow) || viewportRow < 0 || viewportRow >= rows) {
+      return null;
+    }
+    const colWidth = rect.width / cols;
+    const rowHeight = rect.height / rows;
+    if (!Number.isFinite(colWidth) || !Number.isFinite(rowHeight) || colWidth <= 0 || rowHeight <= 0) {
+      return null;
+    }
+    const edge = options && options.edge === 'end' ? 'end' : 'start';
+    const edgeCol = edge === 'end' ? col + 1 : col;
+    const safeEdgeCol = Math.max(0, Math.min(cols, edgeCol));
+    return {
+      x: rect.left + safeEdgeCol * colWidth,
+      y: rect.top + (viewportRow + 1) * rowHeight
+    };
+  }
+
   function compareCells(a, b) {
     if (a.row === b.row) {
       return a.col - b.col;
@@ -1386,6 +1450,20 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       return true;
     },
 
+    suppressActivePaneFocus(durationMs = 0) {
+      suppressActivePaneFocusFor(durationMs);
+      return true;
+    },
+
+    blurActivePane() {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !active.classList.contains('xterm-helper-textarea')) {
+        return false;
+      }
+      active.blur();
+      return true;
+    },
+
     setActivePaneById(paneId, options = {}) {
       if (!paneId || !getPane(paneId)) {
         return false;
@@ -1431,6 +1509,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
 
     resolveActiveCellFromClientPoint(clientX, clientY) {
       return resolveActiveCellFromPoint(clientX, clientY);
+    },
+
+    resolveActiveClientPointFromCell(cell, options = {}) {
+      return resolveClientPointFromActiveCell(cell, options);
     },
 
     selectActiveRange(anchorCell, focusCell) {

@@ -88,9 +88,9 @@ function isGestureDebugEnabled() {
 
 export function createGestures({ getTerm, toast }) {
   let menuEl = null;
+  let selectionHandleEls = null;
   let longPressTimer = 0;
   let longPressPoint = null;
-  let longPressPaneId = '';
   let suppressTouchEnd = false;
   let swipeStart = null;
   let directionLock = '';
@@ -100,10 +100,6 @@ export function createGestures({ getTerm, toast }) {
   let singleFingerFallbackUsed = false;
   let singleFingerRejectReason = '';
   let lastSingleFingerNoConsumeDebugAt = 0;
-  let menuContext = {
-    scope: 'clipboard',
-    paneId: ''
-  };
 
   function debugGesture(stage, payload = null) {
     if (!isGestureDebugEnabled()) {
@@ -116,31 +112,84 @@ export function createGestures({ getTerm, toast }) {
     console.debug('[c2p:gestures]', stage, payload);
   }
 
-  function resolvePaneIdFromTarget(target) {
+  function compareCells(a, b) {
+    if (!a || !b) {
+      return 0;
+    }
+    if (a.row === b.row) {
+      return a.col - b.col;
+    }
+    return a.row - b.row;
+  }
+
+  function normalizeSelectionCells(anchorCell, focusCell) {
+    if (!anchorCell || !focusCell) {
+      return null;
+    }
+    if (compareCells(anchorCell, focusCell) <= 0) {
+      return {
+        start: anchorCell,
+        end: focusCell
+      };
+    }
+    return {
+      start: focusCell,
+      end: anchorCell
+    };
+  }
+
+  function resolveSelectionHandleKindFromTarget(target) {
     if (!(target instanceof Element)) {
       return '';
     }
-    const paneEl = target.closest('.terminal-pane');
-    if (!(paneEl instanceof HTMLElement)) {
+    const handle = target.closest('.touch-selection-handle[data-handle]');
+    if (!(handle instanceof HTMLElement)) {
       return '';
     }
-    return paneEl.dataset.paneId || '';
+    const kind = handle.dataset.handle || '';
+    if (kind === 'start' || kind === 'end') {
+      return kind;
+    }
+    return '';
   }
 
-  function applyMenuContext(nextContext = {}) {
-    menuContext = {
-      scope: nextContext.scope === 'terminal' ? 'terminal' : 'clipboard',
-      paneId: typeof nextContext.paneId === 'string' ? nextContext.paneId : ''
+  function ensureSelectionHandles() {
+    if (selectionHandleEls) {
+      return selectionHandleEls;
+    }
+    const root = DOM.terminalWrap || document.body;
+    const startEl = document.createElement('div');
+    startEl.className = 'touch-selection-handle';
+    startEl.dataset.handle = 'start';
+    startEl.hidden = true;
+    const endEl = document.createElement('div');
+    endEl.className = 'touch-selection-handle';
+    endEl.dataset.handle = 'end';
+    endEl.hidden = true;
+    root.appendChild(startEl);
+    root.appendChild(endEl);
+    selectionHandleEls = {
+      startEl,
+      endEl
     };
-    if (!menuEl) {
+    return selectionHandleEls;
+  }
+
+  function hideSelectionHandles() {
+    if (!selectionHandleEls) {
       return;
     }
-    const deleteButton = menuEl.querySelector('[data-action="delete-pane"]');
-    if (deleteButton instanceof HTMLButtonElement) {
-      const showDelete = menuContext.scope === 'terminal';
-      deleteButton.hidden = !showDelete;
-      deleteButton.disabled = !showDelete || !menuContext.paneId;
+    selectionHandleEls.startEl.hidden = true;
+    selectionHandleEls.endEl.hidden = true;
+  }
+
+  function placeSelectionHandle(handleEl, point) {
+    if (!(handleEl instanceof HTMLElement) || !point) {
+      return;
     }
+    handleEl.hidden = false;
+    handleEl.style.left = `${Math.round(point.x)}px`;
+    handleEl.style.top = `${Math.round(point.y)}px`;
   }
 
   function ensureMenu() {
@@ -153,7 +202,6 @@ export function createGestures({ getTerm, toast }) {
     menuEl.innerHTML = `
       <button type="button" class="touch-context-btn" data-action="copy">复制</button>
       <button type="button" class="touch-context-btn" data-action="paste">粘贴</button>
-      <button type="button" class="touch-context-btn is-danger" data-action="delete-pane" hidden>删除终端</button>
     `;
     document.body.appendChild(menuEl);
 
@@ -208,6 +256,7 @@ export function createGestures({ getTerm, toast }) {
           if (typeof term.clearActiveSelection === 'function') {
             term.clearActiveSelection();
           }
+          endTouchSelection();
           toast.show('已复制到剪贴板', 'success');
         } catch {
           toast.show('复制失败', 'danger');
@@ -245,19 +294,6 @@ export function createGestures({ getTerm, toast }) {
         return;
       }
 
-      if (action === 'delete-pane') {
-        const paneId = menuContext.paneId || '';
-        const term = getTerm();
-        if (!paneId || !term || typeof term.removePaneById !== 'function') {
-          hideMenu();
-          return;
-        }
-        const removed = term.removePaneById(paneId);
-        if (!removed) {
-          toast.show('至少保留一个终端', 'warn');
-        }
-        hideMenu();
-      }
     });
 
     const dismissOnOutsidePress = (event) => {
@@ -277,19 +313,14 @@ export function createGestures({ getTerm, toast }) {
   }
 
   function hideMenu() {
-    applyMenuContext({
-      scope: 'clipboard',
-      paneId: ''
-    });
     if (!menuEl) {
       return;
     }
     menuEl.hidden = true;
   }
 
-  function showMenu(x, y, context = {}) {
+  function showMenu(x, y) {
     const menu = ensureMenu();
-    applyMenuContext(context);
     menu.hidden = false;
     menu.style.left = '0px';
     menu.style.top = '0px';
@@ -305,7 +336,6 @@ export function createGestures({ getTerm, toast }) {
       longPressTimer = 0;
     }
     longPressPoint = null;
-    longPressPaneId = '';
   }
 
   function resetSwipeTracking() {
@@ -319,7 +349,9 @@ export function createGestures({ getTerm, toast }) {
     resetSwipeTracking();
     twoFingerState = null;
     singleFingerScrollState = null;
-    endTouchSelection();
+    endTouchSelection({
+      clearTerminalSelection: true
+    });
     hideMenu();
   }
 
@@ -333,6 +365,67 @@ export function createGestures({ getTerm, toast }) {
     };
   }
 
+  function hasActiveTerminalSelection() {
+    const term = getTerm();
+    if (!term || typeof term.getActiveSelectionText !== 'function') {
+      return false;
+    }
+    return !!term.getActiveSelectionText();
+  }
+
+  function showClipboardMenuAtPoint(point) {
+    if (!point) {
+      return;
+    }
+    showMenu(point.x, point.y);
+  }
+
+  function beginTerminalSelectionOrOpenClipboardMenu(point) {
+    if (!point) {
+      return;
+    }
+    if (hasActiveTerminalSelection()) {
+      suppressTouchEnd = true;
+      showClipboardMenuAtPoint(point);
+      return;
+    }
+    const startedSelection = beginTouchSelection(point);
+    if (!startedSelection) {
+      suppressTouchEnd = true;
+      showClipboardMenuAtPoint(point);
+    }
+  }
+
+  function updateTouchSelectionHandles() {
+    if (!touchSelectionState) {
+      hideSelectionHandles();
+      return;
+    }
+    const range = normalizeSelectionCells(touchSelectionState.anchorCell, touchSelectionState.focusCell);
+    if (!range) {
+      hideSelectionHandles();
+      return;
+    }
+    const term = getTerm();
+    if (!term || typeof term.resolveActiveClientPointFromCell !== 'function') {
+      hideSelectionHandles();
+      return;
+    }
+    const startPoint = term.resolveActiveClientPointFromCell(range.start, {
+      edge: 'start'
+    });
+    const endPoint = term.resolveActiveClientPointFromCell(range.end, {
+      edge: 'end'
+    });
+    if (!startPoint || !endPoint) {
+      hideSelectionHandles();
+      return;
+    }
+    const handles = ensureSelectionHandles();
+    placeSelectionHandle(handles.startEl, startPoint);
+    placeSelectionHandle(handles.endEl, endPoint);
+  }
+
   function stopTouchSelectionAutoScroll() {
     if (!touchSelectionState) {
       return;
@@ -342,6 +435,26 @@ export function createGestures({ getTerm, toast }) {
       touchSelectionState.autoScrollTimer = 0;
     }
     touchSelectionState.autoScrollDir = 0;
+  }
+
+  function applyTouchSelection(anchorCell, focusCell, point = null) {
+    if (!touchSelectionState || !anchorCell || !focusCell) {
+      return false;
+    }
+    const term = getTerm();
+    if (!term || typeof term.selectActiveRange !== 'function') {
+      return false;
+    }
+    if (!term.selectActiveRange(anchorCell, focusCell)) {
+      return false;
+    }
+    touchSelectionState.anchorCell = anchorCell;
+    touchSelectionState.focusCell = focusCell;
+    if (point) {
+      touchSelectionState.lastPoint = point;
+    }
+    updateTouchSelectionHandles();
+    return true;
   }
 
   function beginTouchSelection(point) {
@@ -365,10 +478,13 @@ export function createGestures({ getTerm, toast }) {
     }
     touchSelectionState = {
       anchorCell,
+      focusCell: anchorCell,
       lastPoint: point,
       autoScrollDir: 0,
-      autoScrollTimer: 0
+      autoScrollTimer: 0,
+      dragHandle: ''
     };
+    updateTouchSelectionHandles();
     return true;
   }
 
@@ -377,22 +493,35 @@ export function createGestures({ getTerm, toast }) {
       return false;
     }
     const term = getTerm();
-    if (
-      !term ||
-      typeof term.resolveActiveCellFromClientPoint !== 'function' ||
-      typeof term.selectActiveRange !== 'function'
-    ) {
+    if (!term || typeof term.resolveActiveCellFromClientPoint !== 'function') {
       return false;
     }
     const focusCell = term.resolveActiveCellFromClientPoint(point.x, point.y);
     if (!focusCell) {
       return false;
     }
-    if (!term.selectActiveRange(touchSelectionState.anchorCell, focusCell)) {
+    return applyTouchSelection(touchSelectionState.anchorCell, focusCell, point);
+  }
+
+  function updateTouchSelectionFromHandle(point, handleKind) {
+    if (!touchSelectionState || !point) {
       return false;
     }
-    touchSelectionState.lastPoint = point;
-    return true;
+    const safeHandleKind = handleKind === 'start' || handleKind === 'end' ? handleKind : '';
+    if (!safeHandleKind) {
+      return false;
+    }
+    const term = getTerm();
+    if (!term || typeof term.resolveActiveCellFromClientPoint !== 'function') {
+      return false;
+    }
+    const handleCell = term.resolveActiveCellFromClientPoint(point.x, point.y);
+    if (!handleCell) {
+      return false;
+    }
+    const nextAnchorCell = safeHandleKind === 'start' ? handleCell : touchSelectionState.anchorCell;
+    const nextFocusCell = safeHandleKind === 'end' ? handleCell : touchSelectionState.focusCell;
+    return applyTouchSelection(nextAnchorCell, nextFocusCell, point);
   }
 
   function setTouchSelectionAutoScrollDirection(nextDirection) {
@@ -417,21 +546,49 @@ export function createGestures({ getTerm, toast }) {
         return;
       }
       if (term.scrollActivePaneByLines(safeDirection)) {
+        const handleKind = touchSelectionState.dragHandle || '';
+        if (handleKind) {
+          updateTouchSelectionFromHandle(touchSelectionState.lastPoint, handleKind);
+          return;
+        }
         updateTouchSelection(touchSelectionState.lastPoint);
       }
     }, TOUCH_SELECTION_AUTO_SCROLL_INTERVAL_MS);
   }
 
-  function endTouchSelection(point = null) {
+  function completeTouchSelectionGesture(point = null) {
     if (!touchSelectionState) {
       return false;
     }
     stopTouchSelectionAutoScroll();
     const endPoint = point || touchSelectionState.lastPoint;
+    const handleKind = touchSelectionState.dragHandle || '';
     if (endPoint) {
-      updateTouchSelection(endPoint);
+      if (handleKind) {
+        updateTouchSelectionFromHandle(endPoint, handleKind);
+      } else {
+        updateTouchSelection(endPoint);
+      }
     }
+    touchSelectionState.dragHandle = '';
+    updateTouchSelectionHandles();
+    return true;
+  }
+
+  function endTouchSelection(options = {}) {
+    if (!touchSelectionState) {
+      return false;
+    }
+    const clearTerminalSelection = !!(options && options.clearTerminalSelection);
+    stopTouchSelectionAutoScroll();
     touchSelectionState = null;
+    hideSelectionHandles();
+    if (clearTerminalSelection) {
+      const term = getTerm();
+      if (term && typeof term.clearActiveSelection === 'function') {
+        term.clearActiveSelection();
+      }
+    }
     return true;
   }
 
@@ -623,10 +780,6 @@ export function createGestures({ getTerm, toast }) {
       consumedVertical = true;
       return consumedHorizontal || consumedVertical;
     }
-    if (tryScrollByLines(-lineDelta)) {
-      consumedVertical = true;
-      return consumedHorizontal || consumedVertical;
-    }
     if (typeof term.scrollActivePaneByLines === 'function') {
       consumedVertical = false;
       if (!consumedVertical && !consumedHorizontal && Math.abs(dy) >= 1 && isGestureDebugEnabled()) {
@@ -753,23 +906,48 @@ export function createGestures({ getTerm, toast }) {
       (event) => {
         hideMenu();
         const touches = event.touches;
+        const startedInTerminal = isTerminalInteractiveTarget(event.target);
+        const selectionHandleKind = resolveSelectionHandleKindFromTarget(event.target);
+        if (touchSelectionState && selectionHandleKind && touches.length === 1) {
+          clearLongPress();
+          suppressTouchEnd = false;
+          resetSwipeTracking();
+          twoFingerState = null;
+          endSingleFingerScrollMode();
+          touchSelectionState.dragHandle = selectionHandleKind;
+          const point = pointFromTouch(touches[0]);
+          if (point) {
+            touchSelectionState.lastPoint = point;
+            updateTouchSelectionFromHandle(point, selectionHandleKind);
+          }
+          event.preventDefault();
+          return;
+        }
+        if (touchSelectionState && !selectionHandleKind) {
+          endTouchSelection({
+            clearTerminalSelection: true
+          });
+        }
         activatePaneFromEventTarget(event.target);
         if (event.target instanceof Element && event.target.closest('.terminal-pane-actions')) {
           clearLongPress();
           resetSwipeTracking();
           twoFingerState = null;
           endSingleFingerScrollMode();
-          endTouchSelection();
+          endTouchSelection({
+            clearTerminalSelection: true
+          });
           return;
         }
-        const startedInTerminal = isTerminalInteractiveTarget(event.target);
 
         if (touches.length === 2) {
           clearLongPress();
           suppressTouchEnd = false;
           resetSwipeTracking();
           endSingleFingerScrollMode();
-          endTouchSelection();
+          endTouchSelection({
+            clearTerminalSelection: true
+          });
           if (!startedInTerminal) {
             twoFingerState = null;
             return;
@@ -801,7 +979,9 @@ export function createGestures({ getTerm, toast }) {
           resetSwipeTracking();
           twoFingerState = null;
           endSingleFingerScrollMode();
-          endTouchSelection();
+          endTouchSelection({
+            clearTerminalSelection: true
+          });
           return;
         }
 
@@ -815,18 +995,13 @@ export function createGestures({ getTerm, toast }) {
               x: touch.clientX,
               y: touch.clientY
             };
-            longPressPaneId = resolvePaneIdFromTarget(event.target);
             longPressTimer = window.setTimeout(() => {
               longPressTimer = 0;
               if (!longPressPoint) {
                 return;
               }
-              suppressTouchEnd = true;
               endSingleFingerScrollMode();
-              showMenu(longPressPoint.x, longPressPoint.y, {
-                scope: 'terminal',
-                paneId: longPressPaneId
-              });
+              beginTerminalSelectionOrOpenClipboardMenu(longPressPoint);
             }, LONG_PRESS_MS);
           }
           return;
@@ -864,25 +1039,17 @@ export function createGestures({ getTerm, toast }) {
           x: touch.clientX,
           y: touch.clientY
         };
-        longPressPaneId = startedInTerminal ? resolvePaneIdFromTarget(event.target) : '';
         longPressTimer = window.setTimeout(() => {
           longPressTimer = 0;
           if (!longPressPoint) {
             return;
           }
           if (startedInTerminal) {
-            suppressTouchEnd = true;
-            showMenu(longPressPoint.x, longPressPoint.y, {
-              scope: 'terminal',
-              paneId: longPressPaneId
-            });
+            beginTerminalSelectionOrOpenClipboardMenu(longPressPoint);
             return;
           }
           suppressTouchEnd = true;
-          showMenu(longPressPoint.x, longPressPoint.y, {
-            scope: 'clipboard',
-            paneId: ''
-          });
+          showClipboardMenuAtPoint(longPressPoint);
         }, LONG_PRESS_MS);
       },
       { capture: true, passive: false }
@@ -905,7 +1072,12 @@ export function createGestures({ getTerm, toast }) {
         if (touchSelectionState && touches.length === 1) {
           clearLongPress();
           const point = pointFromTouch(touches[0]);
-          if (updateTouchSelection(point)) {
+          const handleKind = touchSelectionState.dragHandle || '';
+          const updated = handleKind ? updateTouchSelectionFromHandle(point, handleKind) : updateTouchSelection(point);
+          if (handleKind && point && !updated) {
+            touchSelectionState.lastPoint = point;
+          }
+          if (updated || !!handleKind) {
             const term = getTerm();
             const viewportEl =
               term && typeof term.getActivePaneViewportElement === 'function'
@@ -1091,7 +1263,11 @@ export function createGestures({ getTerm, toast }) {
         }
         if (touchSelectionState) {
           const endPoint = pointFromTouch(event.changedTouches && event.changedTouches[0]);
-          endTouchSelection(endPoint);
+          completeTouchSelectionGesture(endPoint);
+          const menuPoint = endPoint || touchSelectionState.lastPoint;
+          if (hasActiveTerminalSelection()) {
+            showClipboardMenuAtPoint(menuPoint);
+          }
           resetSwipeTracking();
           return;
         }
@@ -1126,7 +1302,9 @@ export function createGestures({ getTerm, toast }) {
         resetSwipeTracking();
         twoFingerState = null;
         endSingleFingerScrollMode();
-        endTouchSelection();
+        endTouchSelection({
+          clearTerminalSelection: true
+        });
       },
       { capture: true, passive: true }
     );
