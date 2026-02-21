@@ -88,10 +88,14 @@
 
       function targetUrl() {
         const token = getTokenFromUrl();
+        const search = new URLSearchParams(window.location.search);
+        search.delete('token');
+        const query = search.toString();
+        const queryPrefix = query ? `?${query}` : '';
         if (!token) {
-          return '/';
+          return `/${queryPrefix}`;
         }
-        return `/#token=${encodeURIComponent(token)}`;
+        return `/${queryPrefix}#token=${encodeURIComponent(token)}`;
       }
 
       async function resetCache() {
