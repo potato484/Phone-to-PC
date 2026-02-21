@@ -701,6 +701,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
           toast.show('目录不支持下载', 'warn');
           return;
         }
+        toast.show('正在准备下载...', 'warn');
         await downloadEntry(targetEntry.path);
         return;
       }
@@ -724,14 +725,31 @@ export function createFiles({ toast, openTerminalAtPath }) {
         await removeEntry(targetEntry);
       }
     };
-    contextMenuEl.addEventListener('pointerdown', (event) => {
-      event.preventDefault();
+    let lastContextActionAt = 0;
+    const triggerContextAction = (event, source) => {
+      const now = Date.now();
+      if (now - lastContextActionAt < 300) {
+        return;
+      }
+      lastContextActionAt = now;
+      if (source !== 'click') {
+        event.preventDefault();
+      }
       void runContextAction(event);
+    };
+    contextMenuEl.addEventListener('pointerup', (event) => {
+      triggerContextAction(event, 'pointerup');
     });
+    contextMenuEl.addEventListener(
+      'touchend',
+      (event) => {
+        triggerContextAction(event, 'touchend');
+      },
+      { passive: false }
+    );
     contextMenuEl.addEventListener('click', (event) => {
-      // Keyboard-initiated click has detail=0 and may not emit pointer events.
       if ((event.detail || 0) === 0) {
-        void runContextAction(event);
+        triggerContextAction(event, 'click');
       }
     });
 
@@ -1323,6 +1341,21 @@ export function createFiles({ toast, openTerminalAtPath }) {
   }
 
   async function downloadEntry(filePath) {
+    const userAgent = typeof navigator.userAgent === 'string' ? navigator.userAgent : '';
+    const isIOSDevice = /iPad|iPhone|iPod/i.test(userAgent);
+    const isMacTouchDevice = /Macintosh/i.test(userAgent) && Number(navigator.maxTouchPoints || 0) > 1;
+    const isAppleWebKit = /AppleWebKit/i.test(userAgent);
+    const isThirdPartyIOSBrowser = /CriOS|FxiOS|EdgiOS|OPiOS/i.test(userAgent);
+    const shouldPreopenWindow = (isIOSDevice || isMacTouchDevice) && isAppleWebKit && !isThirdPartyIOSBrowser;
+    const preopenedWindow = shouldPreopenWindow ? window.open('about:blank', '_blank') : null;
+    if (preopenedWindow) {
+      try {
+        preopenedWindow.document.title = 'Preparing download';
+        preopenedWindow.document.body.textContent = 'Downloading...';
+      } catch {
+        // Ignore cross-browser document access errors.
+      }
+    }
     const url = buildApiUrl('/api/fs/download', {
       path: filePath
     });
@@ -1337,18 +1370,91 @@ export function createFiles({ toast, openTerminalAtPath }) {
       const { base } = splitPath(filePath);
       const filename = base || 'download';
       const blobUrl = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = blobUrl;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      if (preopenedWindow && !preopenedWindow.closed) {
+        preopenedWindow.location.href = blobUrl;
+        toast.show('下载已开始', 'success');
+        window.setTimeout(() => {
+          URL.revokeObjectURL(blobUrl);
+        }, 60000);
+        return;
+      }
+      const canUseAnchorDownload = typeof HTMLAnchorElement !== 'undefined' && 'download' in HTMLAnchorElement.prototype;
+      if (canUseAnchorDownload) {
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = filename;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        toast.show('下载已开始', 'success');
+      } else {
+        const opened = window.open(blobUrl, '_blank', 'noopener');
+        if (!opened) {
+          window.location.href = blobUrl;
+        }
+        toast.show('当前环境不支持直接下载，已在新窗口打开文件', 'warn');
+      }
       window.setTimeout(() => {
         URL.revokeObjectURL(blobUrl);
-      }, 1000);
+      }, 60000);
     } catch (error) {
-      toast.show(`下载失败: ${error.message}`, 'danger');
+      if (preopenedWindow && !preopenedWindow.closed) {
+        try {
+          preopenedWindow.close();
+        } catch {
+          // ignore
+        }
+      }
+      toast.show(`下载失败: ${readErrorMessage(error) || 'unknown'}`, 'danger');
     }
+  }
+
+  function tryCopyTextWithExecCommand(text) {
+    if (typeof document.execCommand !== 'function') {
+      return false;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '-9999px';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+
+    const selection = window.getSelection();
+    const savedRanges = [];
+    if (selection && selection.rangeCount > 0) {
+      for (let index = 0; index < selection.rangeCount; index += 1) {
+        savedRanges.push(selection.getRangeAt(index).cloneRange());
+      }
+    }
+
+    const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+
+    let copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    }
+
+    textarea.remove();
+    if (selection) {
+      selection.removeAllRanges();
+      for (const range of savedRanges) {
+        selection.addRange(range);
+      }
+    }
+    if (activeElement) {
+      activeElement.focus();
+    }
+    return copied;
   }
 
   async function copyText(text, successText) {
@@ -1356,16 +1462,20 @@ export function createFiles({ toast, openTerminalAtPath }) {
       toast.show('路径为空，无法复制', 'warn');
       return;
     }
-    if (!navigator.clipboard || !navigator.clipboard.writeText) {
-      toast.show('当前环境不支持复制', 'warn');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast.show(successText, 'success');
+        return;
+      } catch {
+        // Fall through to execCommand fallback for legacy or restricted contexts.
+      }
+    }
+    if (tryCopyTextWithExecCommand(text)) {
+      toast.show(successText, 'success');
       return;
     }
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.show(successText, 'success');
-    } catch {
-      toast.show('复制失败', 'danger');
-    }
+    toast.show('复制失败', 'danger');
   }
 
   async function copyEntryPath(entry, mode) {
