@@ -35,7 +35,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=48';
+const SERVICE_WORKER_URL = '/sw.js?v=58';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const AUTH_TOKEN_WARN_LEAD_MS = 5 * 60 * 1000;
@@ -62,6 +62,49 @@ const NON_TEXT_INPUT_TYPES = new Set([
   'reset',
   'submit'
 ]);
+const SERVICE_WORKER_DEBUG_BYPASS_QUERY_KEYS = ['debugGestures', 'noSW'];
+
+function resolveSessionIcon(cli) {
+  const normalized = typeof cli === 'string' ? cli.trim().toLowerCase() : '';
+  if (!normalized || normalized === 'shell' || normalized === 'bash' || normalized === 'zsh') {
+    return '>_';
+  }
+  if (normalized.includes('python')) {
+    return 'Py';
+  }
+  if (normalized.includes('node') || normalized.includes('javascript')) {
+    return 'JS';
+  }
+  if (normalized.includes('go')) {
+    return 'Go';
+  }
+  return 'T';
+}
+
+function syncQuickKeysToggleVisual(button, visible) {
+  if (!button) {
+    return;
+  }
+  const nextVisible = !!visible;
+  button.textContent = '⌨';
+  button.setAttribute('aria-label', nextVisible ? QUICK_KEYS_TOGGLE_TEXT_HIDE : QUICK_KEYS_TOGGLE_TEXT_SHOW);
+  button.title = nextVisible ? QUICK_KEYS_TOGGLE_TEXT_HIDE : QUICK_KEYS_TOGGLE_TEXT_SHOW;
+  button.classList.toggle('is-active', nextVisible);
+}
+
+function isTruthyQueryValue(value) {
+  const normalized = (value || '').trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'on';
+}
+
+function shouldBypassServiceWorkerInDebug() {
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    return SERVICE_WORKER_DEBUG_BYPASS_QUERY_KEYS.some((key) => isTruthyQueryValue(params.get(key)));
+  } catch {
+    return false;
+  }
+}
 
 function isKeyboardInputTarget(target) {
   if (!(target instanceof Element)) {
@@ -567,9 +610,9 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
 
-      const SWIPE_DELETE_WIDTH_PX = 84;
+      const SWIPE_DELETE_WIDTH_PX = 44;
       const SWIPE_LOCK_THRESHOLD_PX = 8;
-      const SWIPE_OPEN_THRESHOLD_PX = 34;
+      const SWIPE_OPEN_THRESHOLD_PX = 16;
       const SWIPE_VERTICAL_TOLERANCE_PX = 24;
 
       let longPressTimer = 0;
@@ -875,7 +918,13 @@ export function createUi({ getControl, getTerm }) {
       DOM.sessionTabs.textContent = '';
 
       const fragment = document.createDocumentFragment();
-      sessions.forEach((session) => {
+      if (DOM.quickKeysToggle) {
+        DOM.quickKeysToggle.classList.add('session-toolbar-icon');
+        syncQuickKeysToggleVisual(DOM.quickKeysToggle, QuickKeys.visible);
+        fragment.appendChild(DOM.quickKeysToggle);
+      }
+
+      sessions.forEach((session, index) => {
         const active = session.id === State.currentSessionId;
         const pending = active && State.killInFlight;
 
@@ -887,21 +936,36 @@ export function createUi({ getControl, getTerm }) {
         button.type = 'button';
         button.className = active ? 'session-tab is-active' : 'session-tab';
         button.dataset.sessionId = session.id;
+        button.dataset.sessionIndex = String(index + 1);
+        const cliLabel = session.cli || 'session';
+        const sessionLabel = `${cliLabel} ${shortenSessionId(session.id)}`;
+        button.setAttribute('aria-label', sessionLabel);
         if (session.cwd) {
           button.dataset.cwd = session.cwd;
-          button.title = session.cwd;
+          button.title = `${sessionLabel}\n${session.cwd}`;
+        } else {
+          button.title = sessionLabel;
         }
         button.setAttribute('role', 'tab');
         button.setAttribute('aria-selected', active ? 'true' : 'false');
-        const cliLabel = session.cli || 'session';
-        button.textContent = `${cliLabel} ${shortenSessionId(session.id)}`;
+
+        const icon = document.createElement('span');
+        icon.className = 'session-tab-icon';
+        icon.textContent = resolveSessionIcon(cliLabel);
+        button.appendChild(icon);
+
+        const srLabel = document.createElement('span');
+        srLabel.className = 'visually-hidden';
+        srLabel.textContent = sessionLabel;
+        button.appendChild(srLabel);
 
         const deleteButton = document.createElement('button');
         deleteButton.type = 'button';
         deleteButton.className = 'session-tab-delete';
         deleteButton.dataset.sessionId = session.id;
-        deleteButton.textContent = '删除';
+        deleteButton.textContent = '×';
         deleteButton.title = '删除会话';
+        deleteButton.setAttribute('aria-label', '删除会话');
         deleteButton.disabled = pending || !active;
 
         item.appendChild(button);
@@ -914,10 +978,17 @@ export function createUi({ getControl, getTerm }) {
 
       const add = document.createElement('button');
       add.type = 'button';
-      add.className = 'session-tab session-tab-add';
+      add.className = 'session-tab session-tab-add session-toolbar-icon';
       add.setAttribute('aria-label', '添加新终端');
       add.title = '添加新终端';
-      add.textContent = '新建终端';
+      const addIcon = document.createElement('span');
+      addIcon.className = 'session-tab-icon';
+      addIcon.textContent = '+';
+      add.appendChild(addIcon);
+      const addLabel = document.createElement('span');
+      addLabel.className = 'visually-hidden';
+      addLabel.textContent = '新建终端';
+      add.appendChild(addLabel);
       fragment.appendChild(add);
 
       DOM.sessionTabs.appendChild(fragment);
@@ -1030,6 +1101,24 @@ export function createUi({ getControl, getTerm }) {
       if (!('serviceWorker' in navigator)) {
         return;
       }
+      if (shouldBypassServiceWorkerInDebug()) {
+        try {
+          const registrations = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(registrations.map((registration) => registration.unregister()));
+        } catch {
+          // Ignore unregister failures in debug bypass mode.
+        }
+        try {
+          if ('caches' in window) {
+            const cacheKeys = await caches.keys();
+            await Promise.all(cacheKeys.map((key) => caches.delete(key)));
+          }
+        } catch {
+          // Ignore cache deletion failures in debug bypass mode.
+        }
+        StatusBar.setText('调试模式：已禁用离线缓存');
+        return;
+      }
       try {
         const registration = await navigator.serviceWorker.register(SERVICE_WORKER_URL);
 
@@ -1076,7 +1165,7 @@ export function createUi({ getControl, getTerm }) {
     visible: false,
 
     setVisible(visible, options = {}) {
-      const { skipMeasure = false, keepTerminalFocus = true, preserveDockInputFocus = false } = options;
+      const { skipMeasure = false, keepTerminalFocus = false, preserveDockInputFocus = false } = options;
       const nextVisible = !!visible;
       const previousDockHeight = DOM.dock ? Math.ceil(DOM.dock.getBoundingClientRect().height) : 0;
       this.visible = nextVisible;
@@ -1087,7 +1176,7 @@ export function createUi({ getControl, getTerm }) {
       if (DOM.quickKeysToggle) {
         DOM.quickKeysToggle.setAttribute('aria-expanded', nextVisible ? 'true' : 'false');
         DOM.quickKeysToggle.setAttribute('aria-pressed', nextVisible ? 'true' : 'false');
-        DOM.quickKeysToggle.textContent = nextVisible ? QUICK_KEYS_TOGGLE_TEXT_HIDE : QUICK_KEYS_TOGGLE_TEXT_SHOW;
+        syncQuickKeysToggleVisual(DOM.quickKeysToggle, nextVisible);
       }
       scheduleUiStatePersist();
       if (!skipMeasure) {
@@ -1198,6 +1287,10 @@ export function createUi({ getControl, getTerm }) {
       }
       this.render();
       this.setVisible(false, { skipMeasure: true, keepTerminalFocus: false });
+      if (DOM.sessionTabs && DOM.quickKeysToggle && !DOM.sessionTabs.contains(DOM.quickKeysToggle)) {
+        DOM.sessionTabs.prepend(DOM.quickKeysToggle);
+        DOM.sessionTabs.hidden = false;
+      }
       if (DOM.quickKeysToggle) {
         const preserveDockInputFocus = (inputEl) => {
           if (!(inputEl instanceof HTMLElement)) {
@@ -1262,9 +1355,10 @@ export function createUi({ getControl, getTerm }) {
           }
           const dockInputEl = resolveActiveDockInputElement();
           const preserveInputFocus = !!dockInputEl;
+          const keepTerminalFocus = !preserveInputFocus && isTerminalFocusTarget(document.activeElement);
           event.preventDefault();
           this.togglePointerHandledUntilMs = Date.now() + 420;
-          this.toggle({ keepTerminalFocus: !preserveInputFocus, preserveDockInputFocus: preserveInputFocus });
+          this.toggle({ keepTerminalFocus, preserveDockInputFocus: preserveInputFocus });
           if (preserveInputFocus) {
             preserveDockInputFocus(dockInputEl);
           }
@@ -1285,8 +1379,9 @@ export function createUi({ getControl, getTerm }) {
           }
           const dockInputEl = resolveActiveDockInputElement();
           const preserveInputFocus = !!dockInputEl;
+          const keepTerminalFocus = !preserveInputFocus && isTerminalFocusTarget(document.activeElement);
           event.preventDefault();
-          this.toggle({ keepTerminalFocus: !preserveInputFocus, preserveDockInputFocus: preserveInputFocus });
+          this.toggle({ keepTerminalFocus, preserveDockInputFocus: preserveInputFocus });
           if (preserveInputFocus) {
             preserveDockInputFocus(dockInputEl);
           }
@@ -1377,6 +1472,8 @@ export function createUi({ getControl, getTerm }) {
   };
 
   const Viewport = {
+    lastAppliedViewportHeight: 0,
+
     clearZoomSettleTimer() {
       if (!State.zoomSettleTimer) {
         return;
@@ -1428,6 +1525,7 @@ export function createUi({ getControl, getTerm }) {
         this.clearZoomSettleTimer();
         State.zoomActive = false;
         State.zoomNoticeShown = false;
+        this.lastAppliedViewportHeight = 0;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
         State.viewportStableHeight = Math.max(0, window.innerHeight || 0);
         this.syncKeyboardVisibility(false);
@@ -1440,6 +1538,7 @@ export function createUi({ getControl, getTerm }) {
       const zoomed = Math.abs(scale - 1) > ZOOM_SCALE_EPSILON;
       if (zoomed) {
         State.zoomActive = true;
+        this.lastAppliedViewportHeight = 0;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
         State.pendingResizeAfterKeyboard = false;
         this.syncKeyboardVisibility(false);
@@ -1466,11 +1565,14 @@ export function createUi({ getControl, getTerm }) {
       const nextKeyboardVisible = keyboardFromInset || keyboardFromResize;
       const bottomOffset = keyboardFromInset ? Math.round(keyboardOffset) : 0;
       document.documentElement.style.setProperty('--dock-bottom-offset', `${bottomOffset}px`);
-      this.syncKeyboardVisibility(nextKeyboardVisible);
+      const keyboardChanged = this.syncKeyboardVisibility(nextKeyboardVisible);
+      const viewportHeightChanged = Math.abs(viewportHeight - this.lastAppliedViewportHeight) > 1;
       if (!nextKeyboardVisible) {
-        const term = getTerm();
-        if (term) {
-          term.scheduleResize();
+        if (keyboardChanged || viewportHeightChanged) {
+          const term = getTerm();
+          if (term) {
+            term.scheduleResize(keyboardChanged);
+          }
         }
       } else {
         window.requestAnimationFrame(() => {
@@ -1480,6 +1582,7 @@ export function createUi({ getControl, getTerm }) {
           Dock.ensureQuickKeysVisible();
         });
       }
+      this.lastAppliedViewportHeight = viewportHeight;
       Dock.scheduleMeasure();
     },
 
@@ -1872,9 +1975,6 @@ export function createUi({ getControl, getTerm }) {
     const authReady = Auth.init()
       .finally(() => {
         term.init();
-        window.requestAnimationFrame(() => {
-          term.focusActivePane();
-        });
         Network.bind();
         Viewport.bind();
         Actions.initServiceWorker().catch(() => {});
