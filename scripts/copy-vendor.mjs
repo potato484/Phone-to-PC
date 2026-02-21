@@ -44,6 +44,38 @@ const assets = [
       '@xterm/addon-webgl/lib/addon-webgl.umd.js',
       'xterm-addon-webgl/lib/xterm-addon-webgl.js'
     ]
+  },
+  {
+    type: 'file',
+    target: 'marked.min.js',
+    sources: ['marked/marked.min.js']
+  },
+  {
+    type: 'file',
+    target: 'hljs/highlight.min.js',
+    sources: [
+      'highlight.js/build/highlight.min.js',
+      '@highlightjs/cdn-assets/highlight.min.js',
+      'highlight.js/lib/highlight.js'
+    ]
+  },
+  {
+    type: 'file',
+    target: 'hljs/github.min.css',
+    sources: [
+      'highlight.js/styles/github.min.css',
+      'highlight.js/styles/github.css',
+      '@highlightjs/cdn-assets/styles/github.min.css'
+    ]
+  },
+  {
+    type: 'file',
+    target: 'hljs/github-dark.min.css',
+    sources: [
+      'highlight.js/styles/github-dark.min.css',
+      'highlight.js/styles/github-dark.css',
+      '@highlightjs/cdn-assets/styles/github-dark.min.css'
+    ]
   }
 ];
 

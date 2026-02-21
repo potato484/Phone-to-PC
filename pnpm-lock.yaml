@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@highlightjs/cdn-assets':
+        specifier: ^11.0.0
+        version: 11.11.1
       '@xterm/addon-webgl':
         specifier: ^0.18.0
         version: 0.18.0(@xterm/xterm@5.5.0)
@@ -17,6 +20,12 @@ importers:
       express:
         specifier: ^4.21.2
         version: 4.22.1
+      highlight.js:
+        specifier: 11.0.0
+        version: 11.0.0
+      marked:
+        specifier: ^14.0.0
+        version: 14.1.4
       node-pty:
         specifier: ^1.1.0
         version: 1.1.0
@@ -213,6 +222,10 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@highlightjs/cdn-assets@11.11.1':
+    resolution: {integrity: sha512-VEPdHzwelZ12hEX18BHduqxMZGolcUsrbeokHYxOUIm8X2+M7nx5QPtPeQgRxR9XjhdLv4/7DD5BWOlSrJ3k7Q==}
+    engines: {node: '>=12.0.0'}
+
   '@types/body-parser@1.19.6':
     resolution: {integrity: sha512-HLFeCYgz89uk22N5Qg3dvGvsv46B8GLvKKo1zKG4NybA8U2DiEO3w9lqGg29t/tfLRJpJ6iQxnVw4OnB7MoM9g==}
 
@@ -403,6 +416,10 @@ packages:
     resolution: {integrity: sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ==}
     engines: {node: '>= 0.4'}
 
+  highlight.js@11.0.0:
+    resolution: {integrity: sha512-ByaTMfsSuoqerTwemOgpIhfULEIaK52JJYhky/sK7/Yqc0+t7Uh5DHay9vIC94YXSupnQ1Vqfc9VXrYP4eXW3Q==}
+    engines: {node: '>=12.0.0'}
+
   http-errors@2.0.1:
     resolution: {integrity: sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ==}
     engines: {node: '>= 0.8'}
@@ -417,6 +434,11 @@ packages:
   ipaddr.js@1.9.1:
     resolution: {integrity: sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g==}
     engines: {node: '>= 0.10'}
+
+  marked@14.1.4:
+    resolution: {integrity: sha512-vkVZ8ONmUdPnjCKc5uTRvmkRbx4EAi2OkTOXmfTDhZz3OFqMNBM1oTTWwTr4HY4uAEojhzPf+Fy8F1DWa3Sndg==}
+    engines: {node: '>= 18'}
+    hasBin: true
 
   math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
@@ -678,6 +700,8 @@ snapshots:
   '@esbuild/win32-x64@0.27.3':
     optional: true
 
+  '@highlightjs/cdn-assets@11.11.1': {}
+
   '@types/body-parser@1.19.6':
     dependencies:
       '@types/connect': 3.4.38
@@ -934,6 +958,8 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
+  highlight.js@11.0.0: {}
+
   http-errors@2.0.1:
     dependencies:
       depd: 2.0.0
@@ -949,6 +975,8 @@ snapshots:
   inherits@2.0.4: {}
 
   ipaddr.js@1.9.1: {}
+
+  marked@14.1.4: {}
 
   math-intrinsics@1.1.0: {}
 

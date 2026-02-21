@@ -2,6 +2,8 @@ import { DOM, State, apiUrl, authedFetch, buildAuthHeaders } from './state.js';
 
 const FILES_LONG_PRESS_MS = 520;
 const FILES_AUTH_RETRY_DELAY_MS = 900;
+const FILES_TEXT_ZOOM_MIN = 0.5;
+const FILES_TEXT_ZOOM_MAX = 5;
 
 function decodeBase64Url(base64Url) {
   if (typeof base64Url !== 'string' || !base64Url) {
@@ -110,6 +112,14 @@ export function createFiles({ toast, openTerminalAtPath }) {
   let loading = false;
   let authRetryTimer = 0;
   let writeBlocked = false;
+  let searchQuery = '';
+  let editorDirty = false;
+  let editorOriginalContent = '';
+  let imgBlobUrl = '';
+  let mdRenderer = null;
+  let editorPinchState = null;
+  let editorPinchBound = false;
+  let editorTextZoom = 1;
 
   function isAuthFailureError(error) {
     const message = readErrorMessage(error).toLowerCase();
@@ -450,11 +460,11 @@ export function createFiles({ toast, openTerminalAtPath }) {
       return;
     }
 
-    const visibleEntries = showHiddenEntries ? entries : entries.filter((entry) => !isHiddenEntry(entry));
+    const visibleEntries = getFilteredEntries();
     if (visibleEntries.length === 0) {
       const emptyEl = document.createElement('p');
       emptyEl.className = 'files-empty';
-      emptyEl.textContent = '隐藏文件已关闭显示';
+      emptyEl.textContent = searchQuery ? '无匹配文件' : '隐藏文件已关闭显示';
       DOM.filesList.appendChild(emptyEl);
       return;
     }
@@ -485,6 +495,15 @@ export function createFiles({ toast, openTerminalAtPath }) {
       fragment.appendChild(row);
     });
     DOM.filesList.appendChild(fragment);
+  }
+
+  function getFilteredEntries() {
+    const base = showHiddenEntries ? entries : entries.filter((entry) => !isHiddenEntry(entry));
+    if (!searchQuery) {
+      return base;
+    }
+    const query = searchQuery.toLowerCase();
+    return base.filter((entry) => entry.name.toLowerCase().includes(query));
   }
 
   function isHiddenEntry(entry) {
@@ -534,10 +553,11 @@ export function createFiles({ toast, openTerminalAtPath }) {
       currentPath = typeof payload.path === 'string' ? payload.path : '.';
       parentPath = typeof payload.parent === 'string' ? payload.parent : null;
       entries = Array.isArray(payload.entries) ? payload.entries : [];
-      listNotice = null;
-      if (DOM.filesEditorWrap && !DOM.filesEditorWrap.hidden) {
-        DOM.filesEditorWrap.hidden = true;
+      searchQuery = '';
+      if (DOM.filesSearchInput) {
+        DOM.filesSearchInput.value = '';
       }
+      listNotice = null;
     } catch (error) {
       if (silentAuthRetry && isAuthFailureError(error)) {
         scheduleAuthRetry(requestPath);
@@ -555,17 +575,268 @@ export function createFiles({ toast, openTerminalAtPath }) {
     }
   }
 
+  const MD_EXT = /\.(md|markdown)$/i;
+  const IMG_EXTS = /\.(png|jpg|jpeg|gif|webp|svg)$/i;
+
+  function markDirty(isDirty) {
+    editorDirty = isDirty;
+    document.title = `${isDirty ? '● ' : ''}${DOM.filesEditorPath.textContent || 'C2P Controller'}`;
+  }
+
+  function resetEditorState() {
+    if (imgBlobUrl) {
+      URL.revokeObjectURL(imgBlobUrl);
+      imgBlobUrl = '';
+    }
+    editorOriginalContent = '';
+    DOM.filesEditor.value = '';
+    DOM.filesEditor.hidden = false;
+    DOM.filesMdPreview.innerHTML = '';
+    DOM.filesMdPreview.dataset.source = '';
+    DOM.filesMdPreview.hidden = true;
+    DOM.filesImgPreview.replaceChildren();
+    DOM.filesImgPreview.hidden = true;
+    DOM.filesMdToggleBtn.hidden = true;
+    DOM.filesMdToggleBtn.textContent = '预览';
+    DOM.filesEditorSaveBtn.disabled = writeBlocked;
+    resetEditorZoom();
+    markDirty(false);
+    document.title = 'C2P Controller';
+  }
+
+  function readTouchDistance(touchA, touchB) {
+    const dx = touchA.clientX - touchB.clientX;
+    const dy = touchA.clientY - touchB.clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function clampNumber(value, min, max) {
+    if (!Number.isFinite(value)) {
+      return min;
+    }
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function applyEditorTextZoom(nextZoom) {
+    const clamped = clampNumber(nextZoom, FILES_TEXT_ZOOM_MIN, FILES_TEXT_ZOOM_MAX);
+    editorTextZoom = Math.round(clamped * 100) / 100;
+    if (!DOM.filesEditorDialog) {
+      return;
+    }
+    DOM.filesEditorDialog.style.setProperty('--files-text-zoom', String(editorTextZoom));
+  }
+
+  function resetEditorZoom() {
+    editorPinchState = null;
+    applyEditorTextZoom(1);
+  }
+
+  function bindEditorPinchZoom() {
+    if (editorPinchBound || !DOM.filesEditorDialog) {
+      return;
+    }
+    editorPinchBound = true;
+
+    DOM.filesEditorDialog.addEventListener(
+      'touchstart',
+      (event) => {
+        if (!DOM.filesEditorDialog.open || event.touches.length !== 2) {
+          if (event.touches.length < 2) {
+            editorPinchState = null;
+          }
+          return;
+        }
+        if (DOM.filesImgPreview && !DOM.filesImgPreview.hidden) {
+          return;
+        }
+        const target = event.target;
+        const targetEl =
+          target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+        if (!targetEl || !targetEl.closest('.file-dialog-body')) {
+          return;
+        }
+        const distance = readTouchDistance(event.touches[0], event.touches[1]);
+        if (!Number.isFinite(distance) || distance <= 0) {
+          return;
+        }
+        editorPinchState = {
+          baseDistance: distance,
+          baseZoom: editorTextZoom
+        };
+        event.preventDefault();
+      },
+      { passive: false, capture: true }
+    );
+
+    DOM.filesEditorDialog.addEventListener(
+      'touchmove',
+      (event) => {
+        if (!editorPinchState || event.touches.length !== 2 || !DOM.filesEditorDialog.open) {
+          return;
+        }
+        if (DOM.filesImgPreview && !DOM.filesImgPreview.hidden) {
+          return;
+        }
+        const distance = readTouchDistance(event.touches[0], event.touches[1]);
+        if (!Number.isFinite(distance) || distance <= 0 || editorPinchState.baseDistance <= 0) {
+          return;
+        }
+        const scale = distance / editorPinchState.baseDistance;
+        applyEditorTextZoom(editorPinchState.baseZoom * scale);
+        event.preventDefault();
+      },
+      { passive: false, capture: true }
+    );
+
+    DOM.filesEditorDialog.addEventListener(
+      'touchend',
+      (event) => {
+        if (event.touches.length < 2) {
+          editorPinchState = null;
+        }
+      },
+      { passive: true }
+    );
+
+    DOM.filesEditorDialog.addEventListener(
+      'touchcancel',
+      () => {
+        editorPinchState = null;
+      },
+      { passive: true }
+    );
+
+    let iosGestureBaseZoom = 1;
+    const bindLegacyGestureZoom = (el) => {
+      if (!(el instanceof HTMLElement)) {
+        return;
+      }
+      el.addEventListener(
+        'gesturestart',
+        (event) => {
+          if (!DOM.filesEditorDialog.open || el.hidden || (DOM.filesImgPreview && !DOM.filesImgPreview.hidden)) {
+            return;
+          }
+          iosGestureBaseZoom = editorTextZoom;
+          event.preventDefault();
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        'gesturechange',
+        (event) => {
+          if (!DOM.filesEditorDialog.open || el.hidden || (DOM.filesImgPreview && !DOM.filesImgPreview.hidden)) {
+            return;
+          }
+          const scale = Number(event.scale);
+          if (!Number.isFinite(scale) || scale <= 0) {
+            return;
+          }
+          applyEditorTextZoom(iosGestureBaseZoom * scale);
+          event.preventDefault();
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        'gestureend',
+        () => {
+          iosGestureBaseZoom = editorTextZoom;
+        },
+        { passive: true }
+      );
+    };
+    bindLegacyGestureZoom(DOM.filesEditor);
+    bindLegacyGestureZoom(DOM.filesMdPreview);
+  }
+
+  function tryCloseDialog() {
+    if (editorDirty && !window.confirm('有未保存的更改，确认关闭？')) {
+      return;
+    }
+    DOM.filesEditorDialog.close();
+    resetEditorState();
+  }
+
+  function getMarkdownRenderer() {
+    if (!mdRenderer && window.marked && typeof window.marked.Renderer === 'function') {
+      mdRenderer = new window.marked.Renderer();
+      mdRenderer.html = () => '';
+    }
+    return mdRenderer;
+  }
+
+  function renderMarkdownPreview(mdText) {
+    const renderer = getMarkdownRenderer();
+    if (!renderer || !window.marked || typeof window.marked.parse !== 'function') {
+      return;
+    }
+    DOM.filesMdPreview.innerHTML = window.marked.parse(mdText, { renderer });
+    if (window.hljs && typeof window.hljs.highlightElement === 'function') {
+      DOM.filesMdPreview.querySelectorAll('pre code').forEach((blockEl) => window.hljs.highlightElement(blockEl));
+    }
+  }
+
+  async function openImagePreview(filePath) {
+    const response = await authedFetch(`/api/fs/download?path=${encodeURIComponent(filePath)}`);
+    if (!response.ok) {
+      toast.show('图片加载失败', 'warn');
+      return;
+    }
+    const blob = await response.blob();
+    if (imgBlobUrl) {
+      URL.revokeObjectURL(imgBlobUrl);
+    }
+    imgBlobUrl = URL.createObjectURL(blob);
+    const img = document.createElement('img');
+    img.src = imgBlobUrl;
+    img.alt = filePath;
+    DOM.filesImgPreview.replaceChildren(img);
+    DOM.filesEditor.hidden = true;
+    DOM.filesMdPreview.hidden = true;
+    DOM.filesImgPreview.hidden = false;
+    DOM.filesMdToggleBtn.hidden = true;
+    DOM.filesEditorSaveBtn.disabled = true;
+  }
+
   async function openFileForEdit(filePath) {
-    if (!DOM.filesEditorWrap || !DOM.filesEditor || !DOM.filesEditorPath) {
+    if (!DOM.filesEditorDialog || !DOM.filesEditor || !DOM.filesEditorPath) {
       return;
     }
     try {
-      const payload = await fetchJson('/api/fs/read', {
-        query: { path: filePath }
-      });
-      DOM.filesEditorPath.textContent = payload.path || filePath;
-      DOM.filesEditor.value = typeof payload.content === 'string' ? payload.content : '';
-      DOM.filesEditorWrap.hidden = false;
+      resetEditorState();
+      DOM.filesEditorPath.textContent = filePath;
+
+      if (IMG_EXTS.test(filePath)) {
+        await openImagePreview(filePath);
+        if (DOM.filesImgPreview.hidden) {
+          return;
+        }
+      } else {
+        const payload = await fetchJson('/api/fs/read', {
+          query: { path: filePath }
+        });
+        const content = typeof payload.content === 'string' ? payload.content : '';
+        editorOriginalContent = content;
+        DOM.filesEditorPath.textContent = payload.path || filePath;
+
+        if (MD_EXT.test(filePath)) {
+          DOM.filesMdPreview.dataset.source = content;
+          renderMarkdownPreview(content);
+          DOM.filesMdPreview.hidden = false;
+          DOM.filesEditor.hidden = true;
+          DOM.filesMdToggleBtn.hidden = false;
+          DOM.filesMdToggleBtn.textContent = '编辑';
+        } else {
+          DOM.filesEditor.value = content;
+          DOM.filesEditor.hidden = false;
+        }
+        DOM.filesEditorSaveBtn.disabled = writeBlocked;
+      }
+      const activeEl = document.activeElement;
+      if (activeEl instanceof HTMLElement) {
+        activeEl.blur();
+      }
+      DOM.filesEditorDialog.showModal();
     } catch (error) {
       const feedback = classifyFsError(error);
       if (feedback.kind === 'permission') {
@@ -742,14 +1013,18 @@ export function createFiles({ toast, openTerminalAtPath }) {
   }
 
   async function saveEditorFile() {
-    if (!DOM.filesEditorWrap || DOM.filesEditorWrap.hidden || !DOM.filesEditor || !DOM.filesEditorPath) {
+    if (!DOM.filesEditorDialog || !DOM.filesEditorDialog.open || !DOM.filesEditor || !DOM.filesEditorPath) {
       return;
     }
     if (isReadonlyToken()) {
       toast.show('只读模式不可写', 'warn');
       return;
     }
+    if (!DOM.filesImgPreview.hidden) {
+      return;
+    }
     const targetPath = DOM.filesEditorPath.textContent || '';
+    const content = DOM.filesEditor.hidden ? DOM.filesMdPreview.dataset.source || '' : DOM.filesEditor.value;
     try {
       await fetchJson('/api/fs/write', {
         method: 'POST',
@@ -758,9 +1033,11 @@ export function createFiles({ toast, openTerminalAtPath }) {
         },
         body: JSON.stringify({
           path: targetPath,
-          content: DOM.filesEditor.value
+          content
         })
       });
+      editorOriginalContent = content;
+      markDirty(false);
       toast.show('文件已保存', 'success');
       await refresh();
     } catch (error) {
@@ -1053,16 +1330,75 @@ export function createFiles({ toast, openTerminalAtPath }) {
   }
 
   function bindEditor() {
-    if (DOM.filesEditorCancelBtn && DOM.filesEditorWrap) {
-      DOM.filesEditorCancelBtn.addEventListener('click', () => {
-        DOM.filesEditorWrap.hidden = true;
-      });
+    if (!DOM.filesEditorDialog || !DOM.filesEditor || !DOM.filesMdPreview) {
+      return;
     }
-    if (DOM.filesEditorSaveBtn) {
-      DOM.filesEditorSaveBtn.addEventListener('click', () => {
+
+    bindEditorPinchZoom();
+
+    DOM.filesEditorCancelBtn.addEventListener('click', tryCloseDialog);
+    DOM.filesEditorSaveBtn.addEventListener('click', () => {
+      void saveEditorFile();
+    });
+
+    DOM.filesEditorDialog.addEventListener('click', (event) => {
+      if (event.target === DOM.filesEditorDialog) {
+        tryCloseDialog();
+      }
+    });
+    DOM.filesEditorDialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      tryCloseDialog();
+    });
+    DOM.filesEditorDialog.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 's') {
+        event.preventDefault();
         void saveEditorFile();
-      });
+      }
+    });
+
+    DOM.filesEditor.addEventListener('input', () => {
+      markDirty(DOM.filesEditor.value !== editorOriginalContent);
+    });
+    DOM.filesEditor.addEventListener('keydown', (event) => {
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        const { selectionStart, selectionEnd, value } = DOM.filesEditor;
+        DOM.filesEditor.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
+        DOM.filesEditor.selectionStart = selectionStart + 2;
+        DOM.filesEditor.selectionEnd = selectionStart + 2;
+        markDirty(true);
+      }
+    });
+
+    DOM.filesMdToggleBtn.addEventListener('click', () => {
+      const inPreview = !DOM.filesMdPreview.hidden;
+      if (inPreview) {
+        DOM.filesEditor.value = DOM.filesMdPreview.dataset.source || '';
+        DOM.filesEditor.hidden = false;
+        DOM.filesMdPreview.hidden = true;
+        DOM.filesMdToggleBtn.textContent = '预览';
+        markDirty(DOM.filesEditor.value !== editorOriginalContent);
+      } else {
+        const source = DOM.filesEditor.value;
+        DOM.filesMdPreview.dataset.source = source;
+        renderMarkdownPreview(source);
+        DOM.filesEditor.hidden = true;
+        DOM.filesMdPreview.hidden = false;
+        DOM.filesMdToggleBtn.textContent = '编辑';
+        markDirty(source !== editorOriginalContent);
+      }
+    });
+  }
+
+  function bindSearch() {
+    if (!DOM.filesSearchInput) {
+      return;
     }
+    DOM.filesSearchInput.addEventListener('input', (event) => {
+      searchQuery = event.target.value.trim();
+      render();
+    });
   }
 
   return {
@@ -1073,6 +1409,7 @@ export function createFiles({ toast, openTerminalAtPath }) {
       const silentAuthRetry = options && options.silentAuthRetry === true;
       bindToolbar();
       bindEditor();
+      bindSearch();
       bindListInteractions();
       void refresh('.', { silentAuthRetry });
     },

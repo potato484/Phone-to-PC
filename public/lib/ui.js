@@ -34,7 +34,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=28';
+const SERVICE_WORKER_URL = '/sw.js?v=47';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const AUTH_TOKEN_WARN_LEAD_MS = 5 * 60 * 1000;
@@ -46,6 +46,7 @@ const TERMINAL_VISUAL_BUFFER_PX = 96;
 const TERMINAL_VISUAL_BUFFER_WITH_KEYBOARD_PX = 132;
 const TERMINAL_VIEWPORT_BUFFER_RATIO = 0.18;
 const KEYBOARD_INSET_APPLY_DELAY_MS = 120;
+const DOCK_INPUT_PRESERVE_MS = 2000;
 const NON_TEXT_INPUT_TYPES = new Set([
   'button',
   'checkbox',
@@ -83,8 +84,56 @@ function isTerminalFocusTarget(target) {
   return target.classList.contains('xterm-helper-textarea') || !!target.closest('#terminal-wrap');
 }
 
+function isDockFocusTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  return !!target.closest('#dock');
+}
+
+function shouldPreserveDockInputFocus(target) {
+  return isDockFocusTarget(target) && isKeyboardInputTarget(target);
+}
+
+function resolveActiveDockInputElement() {
+  const active = document.activeElement;
+  if (shouldPreserveDockInputFocus(active)) {
+    return active;
+  }
+  if (State.lastDockInputElement && document.contains(State.lastDockInputElement)) {
+    return State.lastDockInputElement;
+  }
+  return null;
+}
+
+function restoreDockInputFocus(inputEl) {
+  if (!(inputEl instanceof HTMLElement)) {
+    return;
+  }
+  if (!document.contains(inputEl)) {
+    return;
+  }
+  const isTextInput = inputEl instanceof HTMLInputElement || inputEl instanceof HTMLTextAreaElement;
+  const selectionStart = isTextInput && Number.isFinite(inputEl.selectionStart) ? inputEl.selectionStart : null;
+  const selectionEnd = isTextInput && Number.isFinite(inputEl.selectionEnd) ? inputEl.selectionEnd : null;
+  try {
+    inputEl.focus({ preventScroll: true });
+  } catch {
+    inputEl.focus();
+  }
+  if (isTextInput && selectionStart !== null && selectionEnd !== null) {
+    try {
+      inputEl.setSelectionRange(selectionStart, selectionEnd);
+    } catch {
+      // ignore unsupported setSelectionRange for certain input types
+    }
+  }
+}
+
 export function createUi({ getControl, getTerm }) {
   let sessionCache = [];
+  let preserveDockInputUntilMs = 0;
+  State.lastDockInputElement = null;
   const Theme = createThemeManager();
 
   const Toast = {
@@ -203,8 +252,14 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
       const nextVisible = !!visible;
-      DOM.dock.classList.toggle('is-keyboard-visible', nextVisible);
-      if (nextVisible && DOM.dock.classList.contains('is-expanded')) {
+      const hasRecentDockInput =
+        preserveDockInputUntilMs > Date.now() &&
+        State.lastDockInputElement &&
+        document.contains(State.lastDockInputElement);
+      const focusInsideDock = isDockFocusTarget(document.activeElement) || hasRecentDockInput;
+      const useKeyboardDockMode = nextVisible && !focusInsideDock;
+      DOM.dock.classList.toggle('is-keyboard-visible', useKeyboardDockMode);
+      if (useKeyboardDockMode && DOM.dock.classList.contains('is-expanded')) {
         this.collapse();
         return;
       }
@@ -863,7 +918,38 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
       try {
-        await navigator.serviceWorker.register(SERVICE_WORKER_URL);
+        const registration = await navigator.serviceWorker.register(SERVICE_WORKER_URL);
+
+        const requestSkipWaiting = (worker) => {
+          if (!worker || typeof worker.postMessage !== 'function') {
+            return;
+          }
+          worker.postMessage({ type: 'SKIP_WAITING' });
+        };
+
+        if (registration.waiting) {
+          requestSkipWaiting(registration.waiting);
+        }
+        registration.addEventListener('updatefound', () => {
+          const installing = registration.installing;
+          if (!installing) {
+            return;
+          }
+          installing.addEventListener('statechange', () => {
+            if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+              requestSkipWaiting(installing);
+            }
+          });
+        });
+
+        let reloading = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          if (reloading) {
+            return;
+          }
+          reloading = true;
+          window.location.reload();
+        });
       } catch {
         StatusBar.setText('Service Worker 注册失败');
       }
@@ -876,7 +962,7 @@ export function createUi({ getControl, getTerm }) {
     visible: false,
 
     setVisible(visible, options = {}) {
-      const { skipMeasure = false, keepTerminalFocus = true } = options;
+      const { skipMeasure = false, keepTerminalFocus = true, preserveDockInputFocus = false } = options;
       const nextVisible = !!visible;
       const previousDockHeight = DOM.dock ? Math.ceil(DOM.dock.getBoundingClientRect().height) : 0;
       this.visible = nextVisible;
@@ -901,7 +987,7 @@ export function createUi({ getControl, getTerm }) {
         }
         const nextDockHeight = DOM.dock ? Math.ceil(DOM.dock.getBoundingClientRect().height) : previousDockHeight;
         const reserve = Dock.syncTerminalScrollReserve();
-        if (nextVisible) {
+        if (nextVisible && !preserveDockInputFocus) {
           const scrollDelta = Math.max(0, nextDockHeight - previousDockHeight, reserve);
           if (scrollDelta > 0) {
             window.scrollBy({
@@ -911,8 +997,10 @@ export function createUi({ getControl, getTerm }) {
             });
           }
         }
-        Dock.ensureTerminalVisible();
-        if (nextVisible) {
+        if (keepTerminalFocus && !preserveDockInputFocus) {
+          Dock.ensureTerminalVisible();
+        }
+        if (nextVisible && !preserveDockInputFocus) {
           Dock.ensureQuickKeysVisible();
         }
       });
@@ -996,20 +1084,108 @@ export function createUi({ getControl, getTerm }) {
       this.render();
       this.setVisible(false, { skipMeasure: true, keepTerminalFocus: false });
       if (DOM.quickKeysToggle) {
-        DOM.quickKeysToggle.addEventListener('pointerdown', (event) => {
+        const preserveDockInputFocus = (inputEl) => {
+          if (!(inputEl instanceof HTMLElement)) {
+            return;
+          }
+          State.lastDockInputElement = inputEl;
+          preserveDockInputUntilMs = Date.now() + DOCK_INPUT_PRESERVE_MS;
+          restoreDockInputFocus(inputEl);
+          const focusBack = () => {
+            if (!document.contains(inputEl)) {
+              return;
+            }
+            if (document.activeElement === inputEl) {
+              return;
+            }
+            restoreDockInputFocus(inputEl);
+          };
+          window.requestAnimationFrame(focusBack);
+          window.setTimeout(focusBack, 120);
+          window.setTimeout(focusBack, 260);
+        };
+        const getFocusedSearchInput = () => {
+          if (!DOM.filesSearchInput) {
+            return null;
+          }
+          return document.activeElement === DOM.filesSearchInput ? DOM.filesSearchInput : null;
+        };
+        const interceptWhenSearchFocused = (event) => {
+          const focusedSearchInput = getFocusedSearchInput();
+          if (!focusedSearchInput) {
+            return false;
+          }
           event.preventDefault();
-          this.togglePointerHandledUntilMs = Date.now() + 420;
-          this.toggle({ keepTerminalFocus: true });
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+          preserveDockInputFocus(focusedSearchInput);
+          return true;
+        };
+
+        DOM.quickKeysToggle.addEventListener('pointerdown', interceptWhenSearchFocused, { capture: true });
+        DOM.quickKeysToggle.addEventListener('mousedown', interceptWhenSearchFocused, { capture: true });
+        DOM.quickKeysToggle.addEventListener('touchstart', interceptWhenSearchFocused, {
+          capture: true,
+          passive: false
         });
-        DOM.quickKeysToggle.addEventListener('click', () => {
+        DOM.quickKeys.addEventListener('pointerdown', interceptWhenSearchFocused, { capture: true });
+        DOM.quickKeys.addEventListener('mousedown', interceptWhenSearchFocused, { capture: true });
+        DOM.quickKeys.addEventListener('touchstart', interceptWhenSearchFocused, { capture: true, passive: false });
+
+        const onQuickKeysTogglePress = (event) => {
           if (this.togglePointerHandledUntilMs > Date.now()) {
             return;
           }
-          this.toggle({ keepTerminalFocus: true });
+          const focusedSearchInput = getFocusedSearchInput();
+          if (focusedSearchInput) {
+            event.preventDefault();
+            event.stopPropagation();
+            preserveDockInputFocus(focusedSearchInput);
+            return;
+          }
+          const dockInputEl = resolveActiveDockInputElement();
+          const preserveInputFocus = !!dockInputEl;
+          event.preventDefault();
+          this.togglePointerHandledUntilMs = Date.now() + 420;
+          this.toggle({ keepTerminalFocus: !preserveInputFocus, preserveDockInputFocus: preserveInputFocus });
+          if (preserveInputFocus) {
+            preserveDockInputFocus(dockInputEl);
+          }
+        };
+        DOM.quickKeysToggle.addEventListener('pointerdown', onQuickKeysTogglePress);
+        DOM.quickKeysToggle.addEventListener('mousedown', onQuickKeysTogglePress);
+        DOM.quickKeysToggle.addEventListener('touchstart', onQuickKeysTogglePress, { passive: false });
+        DOM.quickKeysToggle.addEventListener('click', (event) => {
+          if (this.togglePointerHandledUntilMs > Date.now()) {
+            return;
+          }
+          const focusedSearchInput = getFocusedSearchInput();
+          if (focusedSearchInput) {
+            event.preventDefault();
+            event.stopPropagation();
+            preserveDockInputFocus(focusedSearchInput);
+            return;
+          }
+          const dockInputEl = resolveActiveDockInputElement();
+          const preserveInputFocus = !!dockInputEl;
+          event.preventDefault();
+          this.toggle({ keepTerminalFocus: !preserveInputFocus, preserveDockInputFocus: preserveInputFocus });
+          if (preserveInputFocus) {
+            preserveDockInputFocus(dockInputEl);
+          }
         });
       }
 
       DOM.quickKeys.addEventListener('pointerdown', (event) => {
+        if (DOM.filesSearchInput && document.activeElement === DOM.filesSearchInput) {
+          event.preventDefault();
+          event.stopPropagation();
+          preserveDockInputUntilMs = Date.now() + DOCK_INPUT_PRESERVE_MS;
+          restoreDockInputFocus(DOM.filesSearchInput);
+          return;
+        }
         const button = event.target.closest('.quick-key-btn');
         if (!button) {
           return;
@@ -1018,12 +1194,23 @@ export function createUi({ getControl, getTerm }) {
         if (!key) {
           return;
         }
+        const dockInputEl = resolveActiveDockInputElement();
         event.preventDefault();
         this.markPointerHandled(key);
         this.runKeyById(key);
+        if (dockInputEl) {
+          preserveDockInputFocus(dockInputEl);
+        }
       });
 
       DOM.quickKeys.addEventListener('click', (event) => {
+        if (DOM.filesSearchInput && document.activeElement === DOM.filesSearchInput) {
+          event.preventDefault();
+          event.stopPropagation();
+          preserveDockInputUntilMs = Date.now() + DOCK_INPUT_PRESERVE_MS;
+          restoreDockInputFocus(DOM.filesSearchInput);
+          return;
+        }
         const button = event.target.closest('.quick-key-btn');
         if (!button) {
           return;
@@ -1035,7 +1222,12 @@ export function createUi({ getControl, getTerm }) {
         if (this.wasPointerHandledRecently(key)) {
           return;
         }
+        const dockInputEl = resolveActiveDockInputElement();
+        event.preventDefault();
         this.runKeyById(key);
+        if (dockInputEl) {
+          preserveDockInputFocus(dockInputEl);
+        }
       });
     }
   };
@@ -1167,6 +1359,9 @@ export function createUi({ getControl, getTerm }) {
         }
       } else {
         window.requestAnimationFrame(() => {
+          if (shouldPreserveDockInputFocus(document.activeElement)) {
+            return;
+          }
           Dock.ensureQuickKeysVisible();
         });
       }
@@ -1181,6 +1376,10 @@ export function createUi({ getControl, getTerm }) {
         }, KEYBOARD_INSET_APPLY_DELAY_MS);
       };
       window.addEventListener('focusin', (event) => {
+        if (shouldPreserveDockInputFocus(event.target)) {
+          State.lastDockInputElement = event.target;
+          preserveDockInputUntilMs = Date.now() + DOCK_INPUT_PRESERVE_MS;
+        }
         if (!isKeyboardInputTarget(event.target)) {
           return;
         }
@@ -1189,6 +1388,26 @@ export function createUi({ getControl, getTerm }) {
       window.addEventListener('focusout', (event) => {
         if (!isKeyboardInputTarget(event.target)) {
           return;
+        }
+        const nextFocus = event.relatedTarget;
+        if (
+          event.target === DOM.filesSearchInput &&
+          nextFocus instanceof Element &&
+          (nextFocus.closest('#quick-keys-toggle') || nextFocus.closest('#quick-keys'))
+        ) {
+          preserveDockInputUntilMs = Date.now() + DOCK_INPUT_PRESERVE_MS;
+          restoreDockInputFocus(DOM.filesSearchInput);
+          return;
+        }
+        if (event.target === DOM.filesSearchInput && preserveDockInputUntilMs > Date.now()) {
+          restoreDockInputFocus(DOM.filesSearchInput);
+          return;
+        }
+        if (preserveDockInputUntilMs > Date.now() && isDockFocusTarget(event.target)) {
+          return;
+        }
+        if (State.lastDockInputElement === event.target) {
+          State.lastDockInputElement = null;
         }
         scheduleDelayedInsetSync();
       });

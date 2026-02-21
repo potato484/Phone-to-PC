@@ -134,9 +134,31 @@ export function createThemeManager() {
     scheduleMetaThemeColorSync(metaThemeColor, root);
   }
 
+  function syncHljsTheme() {
+    const themeLink = hasDocument ? document.getElementById('hljs-theme') : null;
+    if (!themeLink) {
+      return;
+    }
+    let isDark = false;
+    if (preferences.theme === 'dark') {
+      isDark = true;
+    } else if (preferences.theme === 'light') {
+      isDark = false;
+    } else {
+      const systemThemeQuery =
+        mqlTheme ||
+        (typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+          ? window.matchMedia('(prefers-color-scheme: light)')
+          : null);
+      isDark = systemThemeQuery ? !systemThemeQuery.matches : false;
+    }
+    themeLink.href = isDark ? '/vendor/hljs/github-dark.min.css' : '/vendor/hljs/github.min.css';
+  }
+
   function apply() {
     applyPreferencesToRoot(root, preferences);
     syncMetaThemeColor();
+    syncHljsTheme();
   }
 
   function setPreferences(next) {
@@ -204,6 +226,7 @@ export function createThemeManager() {
       ) {
         syncMetaThemeColor();
       }
+      syncHljsTheme();
     };
 
     listen(mqlTheme, systemChangeHandler);

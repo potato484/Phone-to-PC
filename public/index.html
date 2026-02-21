@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=yes, maximum-scale=5, interactive-widget=resizes-content"
     />
     <meta name="theme-color" content="#1e1e2e" />
     <title>C2P Controller</title>
@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <link rel="stylesheet" href="/tokens.css" />
     <link rel="stylesheet" href="/style.css" />
+    <link id="hljs-theme" rel="stylesheet" href="/vendor/hljs/github.min.css" />
   </head>
   <body>
     <div class="app">
@@ -103,17 +104,17 @@
               </button>
               <input id="files-upload-input" type="file" multiple hidden />
             </div>
-            <div id="files-list" class="files-list" aria-live="polite"></div>
-            <div id="files-editor-wrap" class="files-editor-wrap" hidden>
-              <p class="files-editor-path">
-                编辑: <code id="files-editor-path"></code>
-              </p>
-              <textarea id="files-editor" class="files-editor" spellcheck="false"></textarea>
-              <div class="files-editor-actions">
-                <button id="files-editor-save-btn" class="btn" type="button">保存</button>
-                <button id="files-editor-cancel-btn" class="btn" type="button">关闭</button>
-              </div>
+            <div class="files-search-bar">
+              <input
+                id="files-search-input"
+                class="files-search-input"
+                type="search"
+                placeholder="搜索文件名..."
+                autocomplete="off"
+                spellcheck="false"
+              />
             </div>
+            <div id="files-list" class="files-list" aria-live="polite"></div>
           </section>
 
           <section id="monitor-panel" class="dock-card monitor-card" aria-label="系统监控">
@@ -200,10 +201,27 @@
     </div>
 
     <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+    <dialog id="files-editor-dialog" class="file-dialog">
+      <div class="file-dialog-header">
+        <span id="files-editor-path" class="file-dialog-title"></span>
+        <div class="file-dialog-actions">
+          <button id="files-md-toggle-btn" class="btn btn-sm" type="button" hidden>预览</button>
+          <button id="files-editor-save-btn" class="btn btn-sm" type="button">保存</button>
+          <button id="files-editor-cancel-btn" class="btn btn-sm" type="button" aria-label="关闭">✕</button>
+        </div>
+      </div>
+      <div class="file-dialog-body">
+        <textarea id="files-editor" class="files-editor" spellcheck="false"></textarea>
+        <div id="files-md-preview" class="files-md-preview" hidden></div>
+        <div id="files-img-preview" class="files-img-preview" hidden></div>
+      </div>
+    </dialog>
 
     <script src="/vendor/xterm.js"></script>
     <script src="/vendor/xterm-addon-fit.js"></script>
     <script src="/vendor/xterm-addon-webgl.js"></script>
+    <script src="/vendor/marked.min.js"></script>
+    <script src="/vendor/hljs/highlight.min.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

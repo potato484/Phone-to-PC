@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v28';
+const CACHE_NAME = 'c2p-v47';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -20,7 +20,11 @@ const APP_SHELL_ASSETS = [
   '/vendor/xterm.js',
   '/vendor/xterm-addon-fit.js',
   '/vendor/xterm-addon-attach.js',
-  '/vendor/xterm-addon-webgl.js'
+  '/vendor/xterm-addon-webgl.js',
+  '/vendor/marked.min.js',
+  '/vendor/hljs/highlight.min.js',
+  '/vendor/hljs/github.min.css',
+  '/vendor/hljs/github-dark.min.css'
 ];
 
 function shouldBypassRequest(url, request) {
@@ -60,6 +64,14 @@ self.addEventListener('activate', (event) => {
       )
       .then(() => self.clients.claim())
   );
+});
+
+self.addEventListener('message', (event) => {
+  const payload = event && event.data;
+  if (!payload || payload.type !== 'SKIP_WAITING') {
+    return;
+  }
+  self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {
