@@ -21,6 +21,7 @@ import {
   createWsAuthMessage,
   decodeTerminalFrame,
   encodeTerminalFrame,
+  getSessionOffset,
   setSessionOffset,
   shortenSessionId,
   textDecoder,
@@ -30,6 +31,10 @@ import {
 
 const DEFAULT_FONT_SIZE = 14;
 const RECONNECT_PROGRESS_TICK_MS = 80;
+const INITIAL_ATTACH_SANITIZE_WINDOW_MS = 120000;
+const INITIAL_ATTACH_ALT_SCREEN_ENTER_RE = /\x1b(?:\x1b)?\[\?(?:47|1047|1049)(?:;[0-9]+)*h/g;
+const INITIAL_ATTACH_CLEAR_SCROLLBACK_RE = /\x1b(?:\x1b)?\[3J/g;
+const BLOCKED_TERMINAL_PRIVATE_MODES = new Set([47, 1047, 1048, 1049]);
 
 function clampFontSize(size) {
   if (!Number.isFinite(size)) {
@@ -44,11 +49,31 @@ function withReconnectJitter(baseDelayMs) {
   return Math.max(300, safeBase + jitter);
 }
 
+function sanitizeInitialAttachData(data, sanitizeUntilMs) {
+  if (typeof data !== 'string' || !data || data.indexOf('\x1b') < 0) {
+    return data;
+  }
+  if (!Number.isFinite(sanitizeUntilMs) || sanitizeUntilMs <= 0 || Date.now() > sanitizeUntilMs) {
+    return data;
+  }
+  return data
+    .replace(INITIAL_ATTACH_ALT_SCREEN_ENTER_RE, '')
+    .replace(INITIAL_ATTACH_CLEAR_SCROLLBACK_RE, '');
+}
+
+function shouldBlockPrivateModeParams(params) {
+  if (!Array.isArray(params) || params.length === 0) {
+    return false;
+  }
+  return params.some((value) => BLOCKED_TERMINAL_PRIVATE_MODES.has(Number(value)));
+}
+
 export function createTerm({ getControl, statusBar, toast, onActiveSessionChange }) {
   const panes = new Map();
   const paneOrder = [];
   let paneCounter = 0;
   let activePaneId = '';
+  let touchScrollModePaneId = '';
   let reconnectProgressTimer = 0;
 
   function getPane(paneId) {
@@ -67,6 +92,36 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       return;
     }
     pane.rootEl.dataset.connection = state;
+  }
+
+  function isPaneTouchScrollModeEnabled(pane) {
+    return !!(pane && pane.id && pane.id === touchScrollModePaneId);
+  }
+
+  function syncTouchScrollModeUi() {
+    panes.forEach((pane) => {
+      const enabled = isPaneTouchScrollModeEnabled(pane);
+      if (pane.rootEl) {
+        pane.rootEl.classList.toggle('is-touch-scroll-mode', enabled);
+      }
+      if (pane.scrollToggleBtnEl) {
+        pane.scrollToggleBtnEl.classList.toggle('is-active', enabled);
+        pane.scrollToggleBtnEl.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        pane.scrollToggleBtnEl.setAttribute('aria-label', enabled ? '退出滚动模式' : '进入滚动模式');
+        pane.scrollToggleBtnEl.title = enabled ? '退出滚动模式' : '进入滚动模式';
+      }
+    });
+    document.documentElement.classList.toggle('is-terminal-scroll-mode', !!touchScrollModePaneId);
+  }
+
+  function setPaneTouchScrollMode(pane, enabled) {
+    if (!pane) {
+      return false;
+    }
+    const nextEnabled = !!enabled;
+    touchScrollModePaneId = nextEnabled ? pane.id : touchScrollModePaneId === pane.id ? '' : touchScrollModePaneId;
+    syncTouchScrollModeUi();
+    return true;
   }
 
   function updatePaneTitle(pane) {
@@ -171,9 +226,13 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       return;
     }
     activePaneId = pane.id;
+    if (touchScrollModePaneId && touchScrollModePaneId !== pane.id) {
+      touchScrollModePaneId = pane.id;
+    }
     panes.forEach((entry) => {
       entry.rootEl.classList.toggle('is-active', entry.id === pane.id);
     });
+    syncTouchScrollModeUi();
     if (options.focus !== false) {
       pane.terminal.focus();
     }
@@ -192,9 +251,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       }
       pane.index = index + 1;
       updatePaneTitle(pane);
-      if (pane.closeBtnEl) {
-        pane.closeBtnEl.hidden = panes.size <= 1;
-      }
     });
 
     DOM.terminalGrid.dataset.paneCount = String(panes.size);
@@ -288,6 +344,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (!data) {
       return true;
     }
+    pane.initialAttachSanitizeUntil = 0;
 
     if (data.length <= TERMINAL_INPUT_DIRECT_CHARS && !pane.inputQueue) {
       sendPaneTerminalInput(pane, socket, data);
@@ -416,10 +473,12 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (!keepReconnectDelay) {
       pane.reconnectDelayMs = 1000;
     }
+    pane.initialAttachSanitizeUntil = Date.now() + INITIAL_ATTACH_SANITIZE_WINDOW_MS;
 
-    let effectiveReplayFrom = 0;
-    if (Number.isFinite(replayFrom) && replayFrom > 0) {
-      effectiveReplayFrom = Math.floor(replayFrom);
+    const hasExplicitReplayFrom = Number.isFinite(replayFrom) && replayFrom >= 0;
+    let effectiveReplayFrom = hasExplicitReplayFrom ? Math.floor(replayFrom) : getSessionOffset(sessionId);
+    if (!Number.isFinite(effectiveReplayFrom) || effectiveReplayFrom < 0) {
+      effectiveReplayFrom = 0;
     }
     setSessionOffset(sessionId, effectiveReplayFrom);
 
@@ -433,10 +492,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     pane.binaryEnabled = supportsBinaryCodec;
     pane.awaitingAuth = true;
 
-    const extraParams = { session: sessionId };
-    if (effectiveReplayFrom > 0) {
-      extraParams.replayFrom = effectiveReplayFrom;
-    }
+    const extraParams = {
+      session: sessionId,
+      replayFrom: effectiveReplayFrom
+    };
     extraParams.cols = pane.terminal.cols;
     extraParams.rows = pane.terminal.rows;
     if (supportsBinaryCodec) {
@@ -517,7 +576,12 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         }
       }
       if (data) {
-        queuePaneOutput(pane, data, { sessionId, logBytes });
+        const sanitizedData = sanitizeInitialAttachData(data, pane.initialAttachSanitizeUntil);
+        if (sanitizedData) {
+          queuePaneOutput(pane, sanitizedData, { sessionId, logBytes });
+        } else if (logBytes > 0) {
+          addSessionOffset(sessionId, logBytes);
+        }
       }
     };
 
@@ -529,6 +593,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       pane.connected = false;
       pane.binaryEnabled = false;
       pane.awaitingAuth = false;
+      pane.initialAttachSanitizeUntil = 0;
       resetPaneIoBuffers(pane);
       if (event.code === 4401) {
         window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
@@ -568,7 +633,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
     await connectPane(pane, pane.sessionId, {
       clearTerminal: true,
-      replayFrom: 0,
+      replayFrom: getSessionOffset(pane.sessionId),
       keepReconnectDelay: true,
       cwd: pane.cwd
     });
@@ -616,6 +681,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     pane.connected = false;
     pane.binaryEnabled = false;
     pane.awaitingAuth = false;
+    pane.initialAttachSanitizeUntil = 0;
     pane.lastResizeSessionId = '';
     pane.lastResizeCols = 0;
     pane.lastResizeRows = 0;
@@ -648,13 +714,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     titleEl.className = 'terminal-pane-title';
     headerEl.appendChild(titleEl);
 
-    const closeBtnEl = document.createElement('button');
-    closeBtnEl.type = 'button';
-    closeBtnEl.className = 'terminal-pane-close';
-    closeBtnEl.textContent = '×';
-    closeBtnEl.title = '关闭面板';
-    closeBtnEl.setAttribute('aria-label', '关闭面板');
-    headerEl.appendChild(closeBtnEl);
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'terminal-pane-actions';
+    headerEl.appendChild(actionsEl);
 
     const bodyEl = document.createElement('div');
     bodyEl.className = 'terminal-pane-body';
@@ -670,6 +732,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     const terminal = new TerminalCtor({
       cursorBlink: true,
       convertEol: true,
+      scrollback: 50000,
+      rightClickSelectsWord: true,
+      macOptionClickForcesSelection: true,
       fontFamily: 'IBM Plex Mono, Menlo, Consolas, monospace',
       fontSize: clampFontSize(State.terminalFontSize || DEFAULT_FONT_SIZE),
       theme: {
@@ -701,6 +766,30 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     terminal.loadAddon(fitAddon);
     terminal.open(terminalHostEl);
 
+    const parserGuardDisposables = [];
+    if (
+      terminal &&
+      terminal.parser &&
+      typeof terminal.parser.registerCsiHandler === 'function'
+    ) {
+      const registerCsiGuard = (identifier, handler) => {
+        try {
+          const disposable = terminal.parser.registerCsiHandler(identifier, handler);
+          if (disposable && typeof disposable.dispose === 'function') {
+            parserGuardDisposables.push(disposable);
+          }
+        } catch {
+          // Ignore parser registration failures and keep terminal functional.
+        }
+      };
+      registerCsiGuard({ prefix: '?', final: 'h' }, (params) => shouldBlockPrivateModeParams(params));
+      registerCsiGuard({ prefix: '?', final: 'l' }, (params) => shouldBlockPrivateModeParams(params));
+      registerCsiGuard(
+        { final: 'J' },
+        (params) => Array.isArray(params) && params.some((value) => Number(value) === 3)
+      );
+    }
+
     let webglAddon = null;
     if (WebglAddonCtor) {
       try {
@@ -725,11 +814,11 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       index: paneOrder.length + 1,
       rootEl,
       titleEl,
-      closeBtnEl,
       terminalHostEl,
       terminal,
       fitAddon,
       webglAddon,
+      parserGuardDisposables,
       socket: null,
       inputDisposable: null,
       inputQueue: '',
@@ -745,6 +834,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       reconnectDelayActive: 0,
       reconnectStartedAt: 0,
       reconnectTimer: 0,
+      initialAttachSanitizeUntil: 0,
       connectSeq: 0,
       sessionId: '',
       cwd: '',
@@ -753,27 +843,62 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       lastResizeRows: 0
     };
 
+    if (typeof terminal.attachCustomKeyEventHandler === 'function') {
+      terminal.attachCustomKeyEventHandler((event) => {
+        const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+        const hasPrimaryModifier = event.ctrlKey || event.metaKey;
+        const selectionText =
+          hasPrimaryModifier && !event.altKey && key === 'c' && typeof terminal.getSelection === 'function'
+            ? terminal.getSelection() || ''
+            : '';
+
+        if (selectionText) {
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(selectionText).catch(() => {});
+            return false;
+          }
+          return true;
+        }
+
+        const shouldPasteFromPrimaryModifier = hasPrimaryModifier && key === 'v' && !event.altKey;
+        const shouldPasteFromShiftInsert =
+          key === 'insert' && event.shiftKey && !hasPrimaryModifier && !event.altKey;
+        if (!shouldPasteFromPrimaryModifier && !shouldPasteFromShiftInsert) {
+          return true;
+        }
+        if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
+          return true;
+        }
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (!text) {
+              return;
+            }
+            sendDataOnPane(pane, text);
+          })
+          .catch(() => {});
+        return false;
+      });
+    }
+
     pane.inputDisposable = terminal.onData((data) => {
       setActivePane(pane.id);
       sendDataOnPane(pane, data);
     });
 
-    rootEl.addEventListener('click', () => {
-      setActivePane(pane.id);
-    });
-
-    closeBtnEl.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (panes.size <= 1) {
-        toast.show('至少保留一个面板', 'warn');
-        return;
-      }
-      removePane(pane.id);
+    rootEl.addEventListener('click', (event) => {
+      const target = event.target;
+      const shouldFocus =
+        target instanceof Element &&
+        !!target.closest('.terminal-pane-terminal, .xterm, .xterm-helper-textarea') &&
+        !isPaneTouchScrollModeEnabled(pane);
+      setActivePane(pane.id, { focus: shouldFocus });
     });
 
     panes.set(pane.id, pane);
     paneOrder.push(pane.id);
+    syncTouchScrollModeUi();
     setPaneConnectionState(pane, 'idle');
     updatePaneTitle(pane);
     updatePaneOrderingAndLayout();
@@ -801,6 +926,17 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       pane.webglAddon.dispose();
       pane.webglAddon = null;
     }
+    if (Array.isArray(pane.parserGuardDisposables) && pane.parserGuardDisposables.length > 0) {
+      pane.parserGuardDisposables.forEach((disposable) => {
+        if (disposable && typeof disposable.dispose === 'function') {
+          disposable.dispose();
+        }
+      });
+      pane.parserGuardDisposables.length = 0;
+    }
+    if (touchScrollModePaneId === pane.id) {
+      touchScrollModePaneId = '';
+    }
     pane.terminal.dispose();
     pane.rootEl.remove();
     panes.delete(paneId);
@@ -816,6 +952,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     } else {
       syncLegacyStateFromActivePane();
     }
+    syncTouchScrollModeUi();
     updatePaneOrderingAndLayout();
     return true;
   }
@@ -849,6 +986,162 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     return removedCount;
   }
 
+  function getPaneViewportElement(pane) {
+    if (!pane || !pane.rootEl) {
+      return null;
+    }
+    const viewport = pane.rootEl.querySelector('.xterm-viewport');
+    return viewport instanceof HTMLElement ? viewport : null;
+  }
+
+  function findPaneByViewportElement(viewportEl) {
+    if (!(viewportEl instanceof HTMLElement)) {
+      return null;
+    }
+    let matchedPane = null;
+    panes.forEach((pane) => {
+      if (matchedPane) {
+        return;
+      }
+      const paneViewport = getPaneViewportElement(pane);
+      if (paneViewport && paneViewport === viewportEl) {
+        matchedPane = pane;
+      }
+    });
+    return matchedPane;
+  }
+
+  function readPaneViewportY(pane) {
+    if (!pane || !pane.terminal || !pane.terminal.buffer || !pane.terminal.buffer.active) {
+      return Number.NaN;
+    }
+    const viewportY = Number(pane.terminal.buffer.active.viewportY);
+    return Number.isFinite(viewportY) ? viewportY : Number.NaN;
+  }
+
+  function scrollPaneByLines(pane, deltaLines) {
+    if (!pane || !pane.terminal || typeof pane.terminal.scrollLines !== 'function') {
+      return false;
+    }
+    const safeDelta = Number.isFinite(deltaLines) ? Math.trunc(deltaLines) : 0;
+    if (!safeDelta) {
+      return false;
+    }
+
+    const beforeViewportY = readPaneViewportY(pane);
+    const viewportEl = getPaneViewportElement(pane);
+    const beforeScrollTop = viewportEl ? viewportEl.scrollTop : Number.NaN;
+
+    pane.terminal.scrollLines(safeDelta);
+
+    const afterViewportY = readPaneViewportY(pane);
+    if (Number.isFinite(beforeViewportY) && Number.isFinite(afterViewportY) && beforeViewportY !== afterViewportY) {
+      return true;
+    }
+    if (viewportEl) {
+      const terminalRows = Number.isFinite(pane.terminal.rows) ? pane.terminal.rows : 0;
+      const estimatedLineHeight = terminalRows > 0 ? viewportEl.clientHeight / terminalRows : 0;
+      const fallbackLineHeight = estimatedLineHeight > 0 ? estimatedLineHeight : 18;
+      const fallbackDeltaPx = Math.max(20, Math.round(Math.abs(safeDelta) * fallbackLineHeight));
+      viewportEl.scrollTop += safeDelta > 0 ? fallbackDeltaPx : -fallbackDeltaPx;
+      if (!Number.isFinite(beforeScrollTop) || viewportEl.scrollTop !== beforeScrollTop) {
+        return true;
+      }
+    }
+    if (!Number.isFinite(beforeViewportY) || !Number.isFinite(afterViewportY)) {
+      return true;
+    }
+    return false;
+  }
+
+  function clampIndex(value, maxInclusive) {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+    return Math.max(0, Math.min(maxInclusive, Math.floor(value)));
+  }
+
+  function resolveActiveCellFromPoint(clientX, clientY) {
+    const pane = getActivePane();
+    if (!pane || !pane.terminal || !pane.rootEl) {
+      return null;
+    }
+    const screenEl = pane.rootEl.querySelector('.xterm-screen');
+    if (!(screenEl instanceof HTMLElement)) {
+      return null;
+    }
+    const rect = screenEl.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || pane.terminal.cols <= 0 || pane.terminal.rows <= 0) {
+      return null;
+    }
+    const safeX = Number(clientX);
+    const safeY = Number(clientY);
+    if (!Number.isFinite(safeX) || !Number.isFinite(safeY)) {
+      return null;
+    }
+    const relX = Math.max(0, Math.min(rect.width - 0.001, safeX - rect.left));
+    const relY = Math.max(0, Math.min(rect.height - 0.001, safeY - rect.top));
+    const col = clampIndex((relX / rect.width) * pane.terminal.cols, pane.terminal.cols - 1);
+    const viewportRow = clampIndex((relY / rect.height) * pane.terminal.rows, pane.terminal.rows - 1);
+    const viewportY = Number(
+      pane.terminal.buffer &&
+        pane.terminal.buffer.active &&
+        Number.isFinite(pane.terminal.buffer.active.viewportY)
+        ? pane.terminal.buffer.active.viewportY
+        : 0
+    );
+    const maxBufferRow = Number(
+      pane.terminal.buffer &&
+        pane.terminal.buffer.active &&
+        Number.isFinite(pane.terminal.buffer.active.length)
+        ? Math.max(0, pane.terminal.buffer.active.length - 1)
+        : pane.terminal.rows - 1
+    );
+    const row = clampIndex(viewportY + viewportRow, maxBufferRow);
+    return {
+      col,
+      row
+    };
+  }
+
+  function compareCells(a, b) {
+    if (a.row === b.row) {
+      return a.col - b.col;
+    }
+    return a.row - b.row;
+  }
+
+  function selectActiveRange(anchorCell, focusCell) {
+    const pane = getActivePane();
+    if (!pane || !pane.terminal || typeof pane.terminal.select !== 'function') {
+      return false;
+    }
+    if (!anchorCell || !focusCell) {
+      return false;
+    }
+    const cols = Math.max(1, pane.terminal.cols);
+    const maxBufferRow = Number(
+      pane.terminal.buffer &&
+        pane.terminal.buffer.active &&
+        Number.isFinite(pane.terminal.buffer.active.length)
+        ? Math.max(0, pane.terminal.buffer.active.length - 1)
+        : pane.terminal.rows - 1
+    );
+    const anchor = {
+      col: clampIndex(anchorCell.col, cols - 1),
+      row: clampIndex(anchorCell.row, maxBufferRow)
+    };
+    const focus = {
+      col: clampIndex(focusCell.col, cols - 1),
+      row: clampIndex(focusCell.row, maxBufferRow)
+    };
+    const start = compareCells(anchor, focus) <= 0 ? anchor : focus;
+    const end = compareCells(anchor, focus) <= 0 ? focus : anchor;
+    const length = Math.max(1, (end.row - start.row) * cols + (end.col - start.col) + 1);
+    pane.terminal.select(start.col, start.row, length);
+    return true;
+  }
+
   return {
     init() {
       if (!TerminalCtor || !FitAddonCtor || !DOM.terminalWrap || !DOM.terminalGrid) {
@@ -863,7 +1156,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
           statusBar.setText('终端初始化失败');
           return;
         }
-        setActivePane(firstPane.id);
+        setActivePane(firstPane.id, { focus: false });
       }
 
       if (window.ResizeObserver && DOM.terminalWrap) {
@@ -943,7 +1236,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         if (!pane) {
           return;
         }
-        setActivePane(pane.id);
+        setActivePane(pane.id, { focus: false });
       }
       await connectPane(pane, sessionId, options);
       if (pane.id === activePaneId) {
@@ -965,7 +1258,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       if (pane.sessionId !== sessionId) {
         await connectPane(pane, sessionId, {
           clearTerminal: true,
-          replayFrom: 0,
+          replayFrom: getSessionOffset(sessionId),
           keepReconnectDelay: true
         });
       } else {
@@ -1017,7 +1310,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       if (!pane) {
         return false;
       }
-      setActivePane(pane.id);
+      setActivePane(pane.id, { focus: false });
       void connectPane(pane, sessionId, {
         clearTerminal: true,
         cwd: options.cwd
@@ -1091,6 +1384,67 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       }
       pane.terminal.focus();
       return true;
+    },
+
+    setActivePaneById(paneId, options = {}) {
+      if (!paneId || !getPane(paneId)) {
+        return false;
+      }
+      setActivePane(paneId, options);
+      return true;
+    },
+
+    removePaneById(paneId, options = {}) {
+      if (!paneId) {
+        return false;
+      }
+      return removePane(paneId, {
+        allowEmpty: !!options.allowEmpty
+      });
+    },
+
+    isActivePaneTouchScrollModeEnabled() {
+      const pane = getActivePane();
+      return isPaneTouchScrollModeEnabled(pane);
+    },
+
+    setActivePaneTouchScrollMode(enabled) {
+      const pane = getActivePane();
+      if (!pane) {
+        return false;
+      }
+      return setPaneTouchScrollMode(pane, enabled);
+    },
+
+    toggleActivePaneTouchScrollMode() {
+      const pane = getActivePane();
+      if (!pane) {
+        return false;
+      }
+      const nextEnabled = !isPaneTouchScrollModeEnabled(pane);
+      return setPaneTouchScrollMode(pane, nextEnabled);
+    },
+
+    getActivePaneViewportElement() {
+      return getPaneViewportElement(getActivePane());
+    },
+
+    resolveActiveCellFromClientPoint(clientX, clientY) {
+      return resolveActiveCellFromPoint(clientX, clientY);
+    },
+
+    selectActiveRange(anchorCell, focusCell) {
+      return selectActiveRange(anchorCell, focusCell);
+    },
+
+    scrollActivePaneByLines(deltaLines) {
+      const pane = getActivePane();
+      return scrollPaneByLines(pane, deltaLines);
+    },
+
+    scrollPaneByViewportElement(viewportEl, deltaLines) {
+      const pane = findPaneByViewportElement(viewportEl);
+      return scrollPaneByLines(pane, deltaLines);
     },
 
     scrollActivePaneNearBottom(contextLines = 0) {
