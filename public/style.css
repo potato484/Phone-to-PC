@@ -5,7 +5,7 @@
   --dock-height: 180px;
   --terminal-scroll-reserve: 0px;
   --quick-keys-min-visible-height: 96px;
-  --session-tab-delete-width: 84px;
+  --session-tab-delete-width: 44px;
   --session-tabs-max-height: clamp(112px, 24vh, 220px);
 }
 
@@ -40,6 +40,18 @@ button, input, select {
 
 button { cursor: pointer; }
 button:active { transform: scale(0.95); transition: transform 100ms var(--ease-spring); }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 select {
   padding: 0 10px;
@@ -120,6 +132,7 @@ select {
   padding: 10px;
   padding-bottom: calc(10px + var(--terminal-scroll-reserve));
   touch-action: pan-x pan-y;
+  overscroll-behavior-y: contain;
 }
 
 .terminal-reconnect {
@@ -185,6 +198,15 @@ select {
 }
 .terminal-pane-title::before { content: ""; width: 7px; height: 7px; flex-shrink: 0; border-radius: 999px; background: var(--surface-higher); }
 
+.terminal-pane-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.terminal-pane-actions:empty {
+  display: none;
+}
+
 .terminal-pane-close {
   min-height: 44px;
   width: 44px;
@@ -197,16 +219,78 @@ select {
   font-size: 16px;
 }
 
+.terminal-pane-scroll-toggle {
+  min-height: 44px;
+  width: 44px;
+  border-radius: 12px;
+  border-color: var(--border-subtle);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  padding: 0;
+  line-height: 1;
+  font-size: 15px;
+  font-weight: 700;
+}
+.terminal-pane-scroll-button {
+  min-height: 44px;
+  width: 44px;
+  border-radius: 12px;
+  border-color: var(--border-subtle);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  padding: 0;
+  line-height: 1;
+  font-size: 17px;
+  font-weight: 700;
+}
+.terminal-pane-scroll-toggle.is-active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.terminal-pane.is-touch-scroll-mode {
+  border-color: var(--accent);
+}
+.terminal-pane.is-touch-scroll-mode .terminal-pane-body {
+  overscroll-behavior: contain;
+}
+.terminal-pane.is-touch-scroll-mode .terminal-pane-terminal,
+.terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm,
+.terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm-viewport {
+  touch-action: pan-y;
+}
+.terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm-viewport {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
 .terminal-pane-body {
   min-height: 0;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
-  overscroll-behavior-y: auto;
+  overscroll-behavior-y: contain;
   touch-action: pan-x pan-y;
 }
 .terminal-pane-terminal { width: 100%; min-width: 960px; min-height: 96px; height: 100%; }
+.terminal-pane-terminal,
+.terminal-pane-terminal .xterm,
+.terminal-pane-terminal .xterm * {
+  -webkit-touch-callout: none;
+}
+.terminal-pane-terminal .xterm-helper-textarea {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+html.is-terminal-scroll-mode,
+html.is-terminal-scroll-mode body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 
 .dock {
   position: sticky;
@@ -247,12 +331,13 @@ select {
 }
 
 .session-tabs {
-  display: grid;
-  grid-auto-rows: minmax(44px, auto);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   max-height: var(--session-tabs-max-height);
   min-height: 0;
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: auto;
   padding: 2px 0 6px;
   -webkit-overflow-scrolling: touch;
@@ -266,21 +351,20 @@ select {
 
 /* 3.3 微交互：Session Tab */
 .session-tab {
-  width: 100%;
+  width: 44px;
+  height: 44px;
   min-height: 44px;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
-  padding: 0 8px;
-  border-radius: 8px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-muted);
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 14px;
   position: relative;
   z-index: 1;
   transform: translateX(var(--swipe-offset, 0px));
@@ -289,8 +373,37 @@ select {
 }
 .session-tab:focus-visible { outline: 2px solid var(--accent); }
 .session-tab.is-active { border-color: var(--accent); background: var(--accent-dim); color: var(--text); }
+.session-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6em;
+  line-height: 1;
+  font-size: 12px;
+  font-weight: 700;
+}
+.session-tab[data-session-index]::after {
+  content: attr(data-session-index);
+  position: absolute;
+  right: 4px;
+  bottom: 3px;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--text-subtle);
+}
+.session-tab.is-active[data-session-index]::after {
+  color: var(--accent);
+}
 
-.session-tab-item { position: relative; border-radius: 8px; overflow: hidden; --swipe-offset: 0px; }
+.session-tab-item {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border-radius: 12px;
+  overflow: hidden;
+  --swipe-offset: 0px;
+}
 .session-tab-item.is-swiping .session-tab, .session-tab-item.is-swiping .session-tab-delete { transition: none; }
 .session-tab-item.is-swipe-open { --swipe-offset: calc(var(--session-tab-delete-width) * -1); }
 
@@ -301,37 +414,52 @@ select {
   min-height: 44px;
   border: 1px solid var(--danger);
   border-left: 0;
-  border-radius: 0;
+  border-radius: 0 12px 12px 0;
   background: var(--danger-dim);
   color: var(--danger);
-  font-size: 11px;
-  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
   transform: translateX(calc(100% + var(--swipe-offset, 0px)));
   transition: transform 180ms var(--ease-out), opacity 160ms ease;
 }
 .session-tab-item.is-delete-pending .session-tab-delete, .session-tab-delete:disabled { opacity: 0.58; cursor: not-allowed; }
 .session-tab-add {
-  width: 100%;
-  min-width: 0;
-  justify-self: stretch;
-  justify-content: center;
-  text-align: center;
   border-style: dashed;
   color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
+}
+
+.session-toolbar-icon {
+  flex: 0 0 auto;
 }
 
 .quick-keys-toggle {
-  width: 100%;
-  margin-top: 6px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 0;
+  border-radius: 12px;
   background: var(--surface);
   border-color: var(--border);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 15px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .quick-keys-toggle:active { transform: none; border-color: var(--accent); }
+.quick-keys-toggle.is-active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
 
 .quick-keys {
   display: none;
@@ -735,6 +863,11 @@ select {
   background: var(--surface);
   color: var(--text);
   font-size: 13px;
+}
+.touch-context-btn.is-danger {
+  border-color: var(--danger);
+  background: var(--danger-dim);
+  color: var(--danger);
 }
 
 @keyframes toast-in {
