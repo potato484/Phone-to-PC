@@ -14,6 +14,7 @@ const TWO_FINGER_PINCH_LOCK_THRESHOLD_PX = 8;
 const TWO_FINGER_PINCH_DOMINANCE_RATIO = 1.15;
 const TWO_FINGER_PARALLEL_MOVE_THRESHOLD_PX = 2;
 const TWO_FINGER_SCROLL_LINE_PX = 14;
+const SINGLE_FINGER_SCROLL_MOVE_EPSILON_PX = 0.5;
 const TOUCH_SELECTION_AUTO_SCROLL_EDGE_PX = 28;
 const TOUCH_SELECTION_AUTO_SCROLL_INTERVAL_MS = 60;
 const GESTURE_DEBUG_STORAGE_KEY = 'c2p_debug_gestures';
@@ -722,6 +723,9 @@ export function createGestures({ getTerm, toast }) {
     const dy = currentY - singleFingerScrollState.lastY;
     singleFingerScrollState.lastY = currentY;
     let consumedVertical = false;
+    if (!consumedHorizontal && Math.abs(dy) < SINGLE_FINGER_SCROLL_MOVE_EPSILON_PX) {
+      return false;
+    }
 
     const viewportEl =
       singleFingerScrollState.viewportEl instanceof HTMLElement && document.contains(singleFingerScrollState.viewportEl)
@@ -1059,6 +1063,9 @@ export function createGestures({ getTerm, toast }) {
       'touchmove',
       (event) => {
         const touches = event.touches;
+        if (!singleFingerScrollState && !touchSelectionState && !twoFingerState && !swipeStart) {
+          return;
+        }
         if (singleFingerScrollState && touches.length === 1) {
           const lockNativeScroll = !!singleFingerScrollState.blockNativeScroll;
           clearLongPress();
@@ -1207,6 +1214,14 @@ export function createGestures({ getTerm, toast }) {
         const dy = touch.clientY - swipeStart.y;
         const absDx = Math.abs(dx);
         const absDy = Math.abs(dy);
+        if (
+          !longPressTimer &&
+          !directionLock &&
+          absDx < DIRECTION_LOCK_THRESHOLD_PX &&
+          absDy < DIRECTION_LOCK_THRESHOLD_PX
+        ) {
+          return;
+        }
         const horizontalScrollUpdate = swipeStart.horizontalScrollTarget
           ? computeHorizontalScrollUpdate(
               swipeStart.horizontalScrollTarget,

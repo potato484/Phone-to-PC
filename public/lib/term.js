@@ -35,6 +35,18 @@ const INITIAL_ATTACH_SANITIZE_WINDOW_MS = 120000;
 const INITIAL_ATTACH_ALT_SCREEN_ENTER_RE = /\x1b(?:\x1b)?\[\?(?:47|1047|1049)(?:;[0-9]+)*h/g;
 const INITIAL_ATTACH_CLEAR_SCROLLBACK_RE = /\x1b(?:\x1b)?\[3J/g;
 const BLOCKED_TERMINAL_PRIVATE_MODES = new Set([47, 1047, 1048, 1049]);
+const MOBILE_SCROLLBACK = 12000;
+const DESKTOP_SCROLLBACK = 30000;
+const TERMINAL_WRITE_BATCH_TARGET_BYTES = 24 * 1024;
+
+function resolveTerminalScrollback() {
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    if (window.matchMedia('(pointer: coarse), (max-width: 900px)').matches) {
+      return MOBILE_SCROLLBACK;
+    }
+  }
+  return DESKTOP_SCROLLBACK;
+}
 
 function clampFontSize(size) {
   if (!Number.isFinite(size)) {
@@ -306,10 +318,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (!force && State.zoomActive) {
       return;
     }
-    if (!force && State.keyboardVisible) {
-      State.pendingResizeAfterKeyboard = true;
-      return;
-    }
 
     panes.forEach((pane) => {
       if (!pane.fitAddon || !pane.terminal) {
@@ -324,6 +332,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (pane.inputRafId) {
       window.cancelAnimationFrame(pane.inputRafId);
       pane.inputRafId = 0;
+    }
+    if (pane.writeDrainRafId) {
+      window.cancelAnimationFrame(pane.writeDrainRafId);
+      pane.writeDrainRafId = 0;
     }
     pane.inputQueue = '';
     pane.writeQueue.length = 0;
@@ -351,6 +363,25 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     pane.inputQueue = '';
   }
 
+  function shouldBypassPaneInputBatching(pane) {
+    if (
+      !pane ||
+      typeof window === 'undefined' ||
+      typeof window.matchMedia !== 'function' ||
+      !window.matchMedia('(pointer: coarse), (max-width: 900px)').matches
+    ) {
+      return false;
+    }
+    const active = document.activeElement;
+    if (!(active instanceof Element)) {
+      return false;
+    }
+    if (active.classList.contains('xterm-helper-textarea')) {
+      return true;
+    }
+    return !!active.closest(`.terminal-pane[data-pane-id="${pane.id}"]`);
+  }
+
   function sendDataOnPane(pane, data) {
     const socket = pane.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN || !pane.sessionId || !pane.connected) {
@@ -361,7 +392,22 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
     pane.initialAttachSanitizeUntil = 0;
 
-    if (data.length <= TERMINAL_INPUT_DIRECT_CHARS && !pane.inputQueue) {
+    if (shouldBypassPaneInputBatching(pane)) {
+      if (pane.inputRafId) {
+        window.cancelAnimationFrame(pane.inputRafId);
+        pane.inputRafId = 0;
+      }
+      flushPaneQueuedInput(pane, socket);
+      sendPaneTerminalInput(pane, socket, data);
+      return true;
+    }
+
+    if (data.length <= TERMINAL_INPUT_DIRECT_CHARS) {
+      if (pane.inputRafId) {
+        window.cancelAnimationFrame(pane.inputRafId);
+        pane.inputRafId = 0;
+      }
+      flushPaneQueuedInput(pane, socket);
       sendPaneTerminalInput(pane, socket, data);
       return true;
     }
@@ -399,11 +445,61 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     return true;
   }
 
+  function schedulePaneOutputDrain(pane) {
+    if (pane.writeDrainRafId) {
+      return;
+    }
+    pane.writeDrainRafId = window.requestAnimationFrame(() => {
+      pane.writeDrainRafId = 0;
+      drainPaneOutput(pane);
+    });
+  }
+
+  function takePaneOutputBatch(pane) {
+    const firstChunk = pane.writeQueue.shift();
+    if (!firstChunk) {
+      return null;
+    }
+
+    const dataParts = [firstChunk.data];
+    let queueBytes = firstChunk.queueBytes;
+    let logBytes = firstChunk.logBytes;
+    let sessionId = firstChunk.sessionId;
+
+    while (pane.writeQueue.length > 0 && queueBytes < TERMINAL_WRITE_BATCH_TARGET_BYTES) {
+      const nextChunk = pane.writeQueue[0];
+      if (!nextChunk) {
+        pane.writeQueue.shift();
+        continue;
+      }
+      if (
+        queueBytes >= TERMINAL_WRITE_BATCH_TARGET_BYTES / 2 &&
+        queueBytes + nextChunk.queueBytes > TERMINAL_WRITE_BATCH_TARGET_BYTES
+      ) {
+        break;
+      }
+      pane.writeQueue.shift();
+      dataParts.push(nextChunk.data);
+      queueBytes += nextChunk.queueBytes;
+      logBytes += nextChunk.logBytes;
+      if (!sessionId && nextChunk.sessionId) {
+        sessionId = nextChunk.sessionId;
+      }
+    }
+
+    return {
+      data: dataParts.length === 1 ? dataParts[0] : dataParts.join(''),
+      queueBytes,
+      logBytes,
+      sessionId
+    };
+  }
+
   function drainPaneOutput(pane) {
     if (!pane.terminal || pane.writeInProgress) {
       return;
     }
-    const chunk = pane.writeQueue.shift();
+    const chunk = takePaneOutputBatch(pane);
     if (!chunk) {
       if (pane.writeBackpressured && pane.writeQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
         pane.writeBackpressured = false;
@@ -420,6 +516,13 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       }
       if (pane.writeBackpressured && pane.writeQueuedBytes <= TERMINAL_WRITE_LOW_WATER_BYTES) {
         pane.writeBackpressured = false;
+      }
+      if (pane.writeQueue.length === 0) {
+        return;
+      }
+      if (pane.writeBackpressured) {
+        schedulePaneOutputDrain(pane);
+        return;
       }
       drainPaneOutput(pane);
     });
@@ -439,6 +542,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     pane.writeQueuedBytes += queueEntry.queueBytes;
     if (!pane.writeBackpressured && pane.writeQueuedBytes >= TERMINAL_WRITE_HIGH_WATER_BYTES) {
       pane.writeBackpressured = true;
+    }
+    if (pane.writeBackpressured) {
+      schedulePaneOutputDrain(pane);
+      return;
     }
     drainPaneOutput(pane);
   }
@@ -747,7 +854,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     const terminal = new TerminalCtor({
       cursorBlink: true,
       convertEol: true,
-      scrollback: 50000,
+      scrollback: resolveTerminalScrollback(),
       rightClickSelectsWord: true,
       macOptionClickForcesSelection: true,
       fontFamily: 'IBM Plex Mono, Menlo, Consolas, monospace',
@@ -841,6 +948,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       writeQueue: [],
       writeQueuedBytes: 0,
       writeInProgress: false,
+      writeDrainRafId: 0,
       writeBackpressured: false,
       connected: false,
       binaryEnabled: false,
@@ -898,7 +1006,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
 
     pane.inputDisposable = terminal.onData((data) => {
-      setActivePane(pane.id);
+      if (activePaneId !== pane.id) {
+        setActivePane(pane.id, { focus: false });
+      }
       sendDataOnPane(pane, data);
     });
 
@@ -1248,10 +1358,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         return;
       }
       if (!force && State.zoomActive) {
-        return;
-      }
-      if (!force && State.keyboardVisible) {
-        State.pendingResizeAfterKeyboard = true;
         return;
       }
 
