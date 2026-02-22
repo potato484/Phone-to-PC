@@ -41,7 +41,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=60';
+const SERVICE_WORKER_URL = '/sw.js?v=75';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const SESSION_TAB_FOCUS_SUPPRESS_MS = 700;

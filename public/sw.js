@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v60';
+const CACHE_NAME = 'c2p-v75';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -7,6 +7,9 @@ const APP_SHELL_ASSETS = [
   '/app.js',
   '/lib/state.js',
   '/lib/term.js',
+  '/lib/terminal-clear-policy.js',
+  '/lib/terminal-input-policy.js',
+  '/lib/terminal-replay-drop-policy.js',
   '/lib/control.js',
   '/lib/ui.js',
   '/lib/theme.js',
