@@ -16,8 +16,7 @@ import {
   readPersistedAccessToken,
   readTokenFromHash,
   setActionButtonsEnabled,
-  setSignalState,
-  shortenSessionId
+  setSignalState
 } from './state.js';
 import { createThemeManager } from './theme.js';
 import {
@@ -376,6 +375,17 @@ export function createUi({ getControl, getTerm }) {
     }
   };
 
+  function resolveSessionDisplayName(sessionId) {
+    if (!sessionId) {
+      return '';
+    }
+    const index = sessionCache.findIndex((entry) => entry && entry.id === sessionId);
+    if (index >= 0) {
+      return `终端${index + 1}`;
+    }
+    return '当前终端';
+  }
+
   const StatusBar = {
     setControl(state) {
       const cls = state === 'online' ? 'is-online' : state === 'warn' ? 'is-warn' : 'is-offline';
@@ -406,12 +416,17 @@ export function createUi({ getControl, getTerm }) {
       if (!sessionId) {
         DOM.sessionPill.hidden = true;
         DOM.sessionPill.dataset.sessionId = '';
+        DOM.sessionPill.title = '复制会话 ID';
+        DOM.sessionPill.setAttribute('aria-label', '复制会话 ID');
         scheduleUiStatePersist();
         return;
       }
+      const sessionLabel = resolveSessionDisplayName(sessionId);
       DOM.sessionPill.hidden = false;
       DOM.sessionPill.dataset.sessionId = sessionId;
-      DOM.sessionPill.textContent = `会话 ${shortenSessionId(sessionId)}`;
+      DOM.sessionPill.textContent = sessionLabel;
+      DOM.sessionPill.title = `${sessionLabel}（点击复制会话 ID）`;
+      DOM.sessionPill.setAttribute('aria-label', `${sessionLabel}，点击复制会话 ID`);
       scheduleUiStatePersist();
     }
   };
@@ -964,7 +979,7 @@ export function createUi({ getControl, getTerm }) {
       });
       term.scheduleResize();
       if (showStatusText) {
-        StatusBar.setText(`已切换到会话 ${shortenSessionId(sessionId)}`);
+        StatusBar.setText(`已切换到${resolveSessionDisplayName(sessionId)}`);
       }
     },
 
@@ -1009,7 +1024,7 @@ export function createUi({ getControl, getTerm }) {
         StatusBar.setCwd(session.cwd);
       }
       this.renderActiveState();
-      StatusBar.setText(`会话 ${shortenSessionId(sessionId)} 已在新面板打开`);
+      StatusBar.setText(`已在新面板打开${resolveSessionDisplayName(sessionId)}`);
       return true;
     },
 
@@ -1325,6 +1340,9 @@ export function createUi({ getControl, getTerm }) {
       DOM.sessionTabs.appendChild(fragment);
       DOM.sessionTabs.hidden = false;
       this.renderActiveState();
+      if (State.currentSessionId) {
+        StatusBar.setSession(State.currentSessionId);
+      }
       Dock.scheduleMeasure();
       return sessions;
     }

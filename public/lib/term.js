@@ -23,7 +23,6 @@ import {
   encodeTerminalFrame,
   getSessionOffset,
   setSessionOffset,
-  shortenSessionId,
   persistTerminalFontSize,
   readPersistedTerminalFontSize,
   textDecoder,
@@ -675,7 +674,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
 
     if (pane.id === activePaneId) {
       statusBar.setTerminal('warn');
-      statusBar.setText(`正在附加会话 ${shortenSessionId(sessionId)}...`);
+      statusBar.setText('正在连接终端...');
       syncLegacyStateFromActivePane();
     }
 
@@ -690,7 +689,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       setPaneConnectionState(pane, 'connecting');
       if (pane.id === activePaneId) {
         statusBar.setTerminal('warn');
-        statusBar.setText(`会话 ${shortenSessionId(sessionId)} 鉴权中...`);
+        statusBar.setText('正在验证终端连接...');
         syncLegacyStateFromActivePane();
       }
       socket.send(createWsAuthMessage());
@@ -719,7 +718,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         setPaneConnectionState(pane, 'online');
         if (pane.id === activePaneId) {
           statusBar.setTerminal('online');
-          statusBar.setText(`会话 ${shortenSessionId(sessionId)} 已附加`);
+          statusBar.setText('终端已连接');
           syncLegacyStateFromActivePane();
         }
         sendResizeForPane(pane);
