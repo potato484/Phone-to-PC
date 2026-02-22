@@ -13,7 +13,6 @@ export const DOM = {
   sideActions: document.getElementById('side-actions'),
   sideActionsToggle: document.getElementById('side-actions-toggle'),
   sideActionsMenu: document.getElementById('side-actions-menu'),
-  terminalScrollModeToggle: document.getElementById('terminal-scroll-mode-toggle'),
   spawnSessionBtn: document.getElementById('spawn-session-btn'),
   dock: document.getElementById('dock'),
   dockHandle: document.getElementById('dock-handle'),

@@ -258,52 +258,6 @@ select {
   font-size: 16px;
 }
 
-.terminal-pane-scroll-toggle {
-  min-height: 44px;
-  width: 44px;
-  border-radius: 12px;
-  border-color: var(--border-subtle);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-muted);
-  padding: 0;
-  line-height: 1;
-  font-size: 15px;
-  font-weight: 700;
-}
-.terminal-pane-scroll-button {
-  min-height: 44px;
-  width: 44px;
-  border-radius: 12px;
-  border-color: var(--border-subtle);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text);
-  padding: 0;
-  line-height: 1;
-  font-size: 17px;
-  font-weight: 700;
-}
-.terminal-pane-scroll-toggle.is-active {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-  color: var(--accent);
-}
-.terminal-pane.is-touch-scroll-mode {
-  border-color: var(--accent);
-}
-.terminal-pane.is-touch-scroll-mode .terminal-pane-body {
-  overscroll-behavior: contain;
-}
-.terminal-pane.is-touch-scroll-mode .terminal-pane-terminal,
-.terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm,
-.terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm-viewport {
-  touch-action: none;
-}
-.terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm-viewport {
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior-y: contain;
-}
-
 .terminal-pane-body {
   min-height: 0;
   overflow-x: hidden;
@@ -323,12 +277,6 @@ select {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
-}
-
-html.is-terminal-scroll-mode,
-html.is-terminal-scroll-mode body {
-  overflow: hidden;
-  overscroll-behavior: none;
 }
 
 .dock {
