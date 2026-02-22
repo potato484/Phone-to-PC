@@ -58,18 +58,20 @@ function parseServerCliOptions(args: string[]): ServerCliOptions {
   return options;
 }
 
-function resolveDefaultWorkingDirectory(rawCwd: string | undefined): string {
-  const fallbackCwd = (() => {
-    const homeDir = os.homedir();
-    try {
-      if (homeDir && fs.statSync(homeDir).isDirectory()) {
-        return homeDir;
-      }
-    } catch {
-      // ignore and fall back to process cwd
+function resolveHomeDirectoryFallback(): string {
+  const homeDir = os.homedir();
+  try {
+    if (homeDir && fs.statSync(homeDir).isDirectory()) {
+      return homeDir;
     }
-    return process.cwd();
-  })();
+  } catch {
+    // ignore and fall back to process cwd
+  }
+  return process.cwd();
+}
+
+function resolveDefaultWorkingDirectory(rawCwd: string | undefined): string {
+  const fallbackCwd = resolveHomeDirectoryFallback();
 
   if (!rawCwd || rawCwd.trim().length === 0) {
     return fallbackCwd;
@@ -100,6 +102,7 @@ function parseAccessTokenScope(value: unknown): AccessTokenScope {
 
 const cliOptions = parseServerCliOptions(process.argv.slice(2));
 const defaultWorkingDirectory = resolveDefaultWorkingDirectory(cliOptions.cwd);
+const defaultTerminalWorkingDirectory = resolveHomeDirectoryFallback();
 const port = Number(process.env.PORT ?? 3000);
 
 const store = new C2PStore();
@@ -117,7 +120,7 @@ const auditLogger = new AuditLogger({
 });
 const metrics = new MetricsRegistry();
 
-const ptyManager = new PtyManager(defaultWorkingDirectory);
+const ptyManager = new PtyManager(defaultTerminalWorkingDirectory);
 
 if (!ptyManager.isReady()) {
   console.warn('[c2p] warn: tmux not available, terminal sessions will not be ready');
@@ -453,6 +456,7 @@ server.listen(port, async () => {
 
   console.log(`[c2p] listening on ${port}`);
   console.log(`[c2p] default cwd: ${defaultWorkingDirectory}`);
+  console.log(`[c2p] terminal default cwd: ${defaultTerminalWorkingDirectory}`);
   console.log(`[c2p] sqlite: ${store.getDbPath()}`);
   console.log(`[c2p] audit dir: ${auditLogger.getDir()}`);
   console.log(`[c2p] local bootstrap: ${localUrl}`);

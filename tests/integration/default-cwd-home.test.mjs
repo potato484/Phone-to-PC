@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { statSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -292,6 +292,83 @@ test('server defaults runtime and spawn cwd to home when --cwd is omitted', asyn
 
     const spawned = await waitForJson((payload) => payload.type === 'spawned' && typeof payload.cwd === 'string');
     assert.equal(path.resolve(spawned.cwd), expectedDefaultCwd);
+
+    ws.close();
+    await once(ws, 'close');
+  } finally {
+    await stopServer(server);
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('spawn cwd still defaults to home when --cwd is provided', async (t) => {
+  if (!(await canListenLoopback())) {
+    t.skip('loopback listen is blocked in current sandbox');
+    return;
+  }
+
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'c2p-default-cwd-with-flag-it-'));
+  const workspaceDir = path.join(runtimeDir, 'workspace');
+  await mkdir(workspaceDir, { recursive: true });
+
+  const fakeStatePath = path.join(runtimeDir, 'fake-tmux-state.json');
+  const port = await getFreePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const expectedTerminalCwd = path.resolve(resolveExpectedDefaultCwd(runtimeDir));
+
+  const server = spawn(process.execPath, [serverEntry, `--cwd=${workspaceDir}`], {
+    cwd: runtimeDir,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      TUNNEL: 'off',
+      C2P_TMUX_BIN: fakeTmuxPath,
+      FAKE_TMUX_STATE_FILE: fakeStatePath,
+      C2P_ALLOW_EMPTY_ORIGIN: '1'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  try {
+    await waitForHealth(baseUrl, server);
+    const bootstrapToken = await readBootstrapToken(runtimeDir);
+    const accessToken = await exchangeAccessToken(baseUrl, bootstrapToken);
+
+    const runtimeResponse = await fetch(`${baseUrl}/api/runtime`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+    assert.equal(runtimeResponse.status, 200);
+    const runtimePayload = await runtimeResponse.json();
+    assert.equal(path.resolve(runtimePayload.cwd), path.resolve(workspaceDir));
+
+    const ws = await openWebSocket(`ws://127.0.0.1:${port}/ws/control`);
+    const waitForJson = createJsonWaiter(ws);
+
+    ws.send(
+      JSON.stringify({
+        type: 'auth',
+        token: accessToken,
+        client: {
+          ua: 'node-integration-test',
+          version: 1
+        }
+      })
+    );
+    await waitForJson((payload) => payload.type === 'auth.ok');
+
+    ws.send(
+      JSON.stringify({
+        type: 'spawn',
+        cli: 'shell',
+        cols: 120,
+        rows: 36
+      })
+    );
+
+    const spawned = await waitForJson((payload) => payload.type === 'spawned' && typeof payload.cwd === 'string');
+    assert.equal(path.resolve(spawned.cwd), expectedTerminalCwd);
 
     ws.close();
     await once(ws, 'close');
