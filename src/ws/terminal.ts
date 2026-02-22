@@ -20,9 +20,10 @@ interface TerminalChannelDeps {
   wsAuthFailureLimiter: MemoryRateLimiter;
 }
 
-const TERMINAL_SEND_BATCH_MS = 16;
-const TERMINAL_SEND_HIGH_WATER_BYTES = 64 * 1024;
-const TERMINAL_SEND_LOW_WATER_BYTES = 32 * 1024;
+const TERMINAL_SEND_BATCH_MS = 8;
+const TERMINAL_SEND_HIGH_WATER_BYTES = 192 * 1024;
+const TERMINAL_SEND_LOW_WATER_BYTES = 96 * 1024;
+const TERMINAL_SEND_FLUSH_MAX_BYTES = 96 * 1024;
 const TERMINAL_REPLAY_CHUNK_BYTES = 64 * 1024;
 const TERMINAL_FRAME_HEADER_BYTES = 5;
 const TERMINAL_FRAME_TYPE_OUTPUT = 1;
@@ -296,6 +297,35 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
         drainTimer = setTimeout(checkDrain, TERMINAL_SEND_BATCH_MS);
       };
 
+      const dequeueFlushPayload = (): Buffer | null => {
+        if (sendQueue.length === 0) {
+          return null;
+        }
+        const batch: Buffer[] = [];
+        let batchBytes = 0;
+        while (sendQueue.length > 0 && batchBytes < TERMINAL_SEND_FLUSH_MAX_BYTES) {
+          const nextChunk = sendQueue[0];
+          if (!nextChunk || nextChunk.byteLength <= 0) {
+            sendQueue.shift();
+            continue;
+          }
+          if (batchBytes > 0 && batchBytes + nextChunk.byteLength > TERMINAL_SEND_FLUSH_MAX_BYTES) {
+            break;
+          }
+          sendQueue.shift();
+          batch.push(nextChunk);
+          batchBytes += nextChunk.byteLength;
+          if (batchBytes >= TERMINAL_SEND_FLUSH_MAX_BYTES) {
+            break;
+          }
+        }
+        if (batchBytes <= 0) {
+          return null;
+        }
+        queuedBytes = Math.max(0, queuedBytes - batchBytes);
+        return batch.length === 1 ? batch[0] : Buffer.concat(batch, batchBytes);
+      };
+
       const flushQueue = (): void => {
         if (ws.readyState !== WebSocket.OPEN || sendQueue.length === 0) {
           return;
@@ -306,9 +336,12 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
           return;
         }
 
-        const payload = Buffer.concat(sendQueue, queuedBytes);
-        sendQueue.length = 0;
-        queuedBytes = 0;
+        const payload = dequeueFlushPayload();
+        if (!payload) {
+          maybeReleaseFlowControl();
+          updateBufferedMetric();
+          return;
+        }
         const outbound = binaryCodec
           ? encodeTerminalFrame(TERMINAL_FRAME_TYPE_OUTPUT, sessionHash, payload)
           : payload.toString('utf8');
