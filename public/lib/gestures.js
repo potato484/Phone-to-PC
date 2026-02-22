@@ -958,7 +958,6 @@ export function createGestures({ getTerm, toast }) {
           }
           const center = readTouchCenter(touches[0], touches[1]);
           const distance = touchDistance(touches[0], touches[1]);
-          const term = getTerm();
           twoFingerState = {
             mode: '',
             startCenterX: center.x,
@@ -967,7 +966,6 @@ export function createGestures({ getTerm, toast }) {
             centerY: center.y,
             startDistance: distance,
             distance,
-            baseFontSize: term && typeof term.getFontSize === 'function' ? term.getFontSize() : 14,
             pendingScrollPx: 0,
             viewportEl: resolveTerminalViewport(event.target),
             touchALastX: touches[0].clientX,
@@ -975,7 +973,6 @@ export function createGestures({ getTerm, toast }) {
             touchBLastX: touches[1].clientX,
             touchBLastY: touches[1].clientY
           };
-          event.preventDefault();
           return;
         }
         if (touches.length !== 1) {
@@ -1143,21 +1140,9 @@ export function createGestures({ getTerm, toast }) {
           }
 
           if (twoFingerState.mode === 'pinch') {
-            const term = getTerm();
-            if (
-              term &&
-              typeof term.scaleFont === 'function' &&
-              Number.isFinite(distance) &&
-              distance > 0 &&
-              twoFingerState.startDistance > 0
-            ) {
-              const scale = distance / twoFingerState.startDistance;
-              term.scaleFont(twoFingerState.baseFontSize, scale);
-            }
             twoFingerState.centerX = center.x;
             twoFingerState.centerY = center.y;
             twoFingerState.distance = distance;
-            event.preventDefault();
             return;
           }
 
@@ -1191,13 +1176,7 @@ export function createGestures({ getTerm, toast }) {
             }
             if (consumed) {
               event.preventDefault();
-            } else {
-              // Keep blocking native pinch/page scroll in two-finger mode.
-              event.preventDefault();
             }
-          } else {
-            // Gesture direction is still ambiguous. Block browser default to avoid accidental page zoom.
-            event.preventDefault();
           }
 
           twoFingerState.centerX = center.x;

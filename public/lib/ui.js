@@ -5,6 +5,7 @@ import {
   KILL_REQUEST_TIMEOUT_MS,
   QUICK_KEY_SEQUENCES,
   State,
+  ZOOM_RESIZE_MIN_INTERVAL_MS,
   ZOOM_SCALE_EPSILON,
   ZOOM_SETTLE_MS,
   apiUrl,
@@ -23,6 +24,7 @@ import {
   clampScrollDeltaToRemaining,
   shouldAutoAlignKeyboardViewport
 } from './viewport-scroll-policy.js';
+import { shouldScheduleZoomResize } from './viewport-zoom-policy.js';
 
 const QUICK_KEY_ROWS = [
   [
@@ -1817,6 +1819,35 @@ export function createUi({ getControl, getTerm }) {
     lastAppliedViewportHeight: 0,
     lastAppliedViewportWidth: 0,
 
+    clearZoomResizeRaf() {
+      if (!State.zoomResizeRafId) {
+        return;
+      }
+      window.cancelAnimationFrame(State.zoomResizeRafId);
+      State.zoomResizeRafId = 0;
+    },
+
+    scheduleZoomResize() {
+      if (State.zoomResizeRafId) {
+        return;
+      }
+      State.zoomResizeRafId = window.requestAnimationFrame(() => {
+        State.zoomResizeRafId = 0;
+        const now = Date.now();
+        if (
+          State.zoomResizeLastRunAt > 0 &&
+          now - State.zoomResizeLastRunAt < ZOOM_RESIZE_MIN_INTERVAL_MS
+        ) {
+          return;
+        }
+        State.zoomResizeLastRunAt = now;
+        const term = getTerm();
+        if (term) {
+          term.scheduleResize(true);
+        }
+      });
+    },
+
     clearZoomSettleTimer() {
       if (!State.zoomSettleTimer) {
         return;
@@ -1832,6 +1863,7 @@ export function createUi({ getControl, getTerm }) {
         if (!window.visualViewport) {
           State.zoomActive = false;
           State.zoomNoticeShown = false;
+          State.zoomLastScale = 1;
           return;
         }
         const scale = Number(window.visualViewport.scale) || 1;
@@ -1840,6 +1872,7 @@ export function createUi({ getControl, getTerm }) {
         }
         State.zoomActive = false;
         State.zoomNoticeShown = false;
+        State.zoomLastScale = 1;
         this.applyInset('zoom-settle');
         const term = getTerm();
         if (term) {
@@ -1866,8 +1899,11 @@ export function createUi({ getControl, getTerm }) {
     applyInset(reason = 'unknown') {
       if (!window.visualViewport) {
         this.clearZoomSettleTimer();
+        this.clearZoomResizeRaf();
         State.zoomActive = false;
         State.zoomNoticeShown = false;
+        State.zoomResizeLastRunAt = 0;
+        State.zoomLastScale = 1;
         this.lastAppliedViewportHeight = 0;
         this.lastAppliedViewportWidth = 0;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
@@ -1880,27 +1916,46 @@ export function createUi({ getControl, getTerm }) {
 
       const viewport = window.visualViewport;
       const scale = Number(viewport.scale) || 1;
+      const viewportHeight = Math.max(0, Math.round(Number(viewport.height) || window.innerHeight || 0));
+      const viewportWidth = Math.max(0, Math.round(Number(viewport.width) || window.innerWidth || 0));
       const zoomed = Math.abs(scale - 1) > ZOOM_SCALE_EPSILON;
       if (zoomed) {
+        const shouldResize = shouldScheduleZoomResize({
+          currentScale: scale,
+          previousScale: State.zoomLastScale || 1,
+          viewportWidth,
+          viewportHeight,
+          previousViewportWidth: this.lastAppliedViewportWidth,
+          previousViewportHeight: this.lastAppliedViewportHeight,
+          scaleEpsilon: ZOOM_SCALE_EPSILON
+        });
         State.zoomActive = true;
-        this.lastAppliedViewportHeight = 0;
-        this.lastAppliedViewportWidth = 0;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
         State.pendingResizeAfterKeyboard = false;
         keyboardAlignmentScope = '';
         this.syncKeyboardVisibility(false);
         if (!State.zoomNoticeShown) {
           State.zoomNoticeShown = true;
-          Toast.show('检测到页面缩放，已暂停终端重排', 'warn');
+          Toast.show('检测到页面缩放，正在自适配终端布局', 'warn');
         }
         this.scheduleZoomSettleCheck();
+        if (shouldResize) {
+          this.scheduleZoomResize();
+        }
+        this.lastAppliedViewportHeight = viewportHeight;
+        this.lastAppliedViewportWidth = viewportWidth;
+        State.zoomLastScale = scale;
+        Dock.scheduleMeasure();
         return;
       }
 
+      const wasZoomActive = State.zoomActive;
       this.clearZoomSettleTimer();
+      this.clearZoomResizeRaf();
       State.zoomActive = false;
-      const viewportHeight = Math.max(0, Math.round(Number(viewport.height) || window.innerHeight || 0));
-      const viewportWidth = Math.max(0, Math.round(Number(viewport.width) || window.innerWidth || 0));
+      State.zoomNoticeShown = false;
+      State.zoomResizeLastRunAt = 0;
+      State.zoomLastScale = 1;
       const activeElement = document.activeElement;
       const inputFocused = isKeyboardInputTarget(activeElement);
       if (!inputFocused || !State.viewportStableHeight) {
@@ -1920,10 +1975,13 @@ export function createUi({ getControl, getTerm }) {
       }
       const viewportHeightChanged = Math.abs(viewportHeight - this.lastAppliedViewportHeight) > 1;
       const viewportWidthChanged = Math.abs(viewportWidth - this.lastAppliedViewportWidth) > 1;
-      if (reason !== 'zoom-settle' && (keyboardChanged || viewportHeightChanged || viewportWidthChanged)) {
+      const shouldResizeTerminal =
+        reason !== 'zoom-settle' &&
+        (keyboardChanged || viewportHeightChanged || viewportWidthChanged || wasZoomActive);
+      if (shouldResizeTerminal) {
         const term = getTerm();
         if (term) {
-          term.scheduleResize(keyboardChanged);
+          term.scheduleResize(keyboardChanged || wasZoomActive);
         }
       }
       const activeScope = resolveKeyboardAlignmentScope(activeElement);

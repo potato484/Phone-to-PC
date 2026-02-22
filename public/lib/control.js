@@ -4,16 +4,31 @@ import {
   CONTROL_PROTOCOL_VERSION,
   State,
   createWsAuthMessage,
+  fetchSessionLogBytes,
+  getSessionOffset,
   persistTokenExpiry,
   setActionButtonsEnabled,
   setSessionOffset,
   wsUrl
 } from './state.js';
+import { bootstrapSessionReplayOffset } from './session-replay-offset-policy.js';
 
 function withReconnectJitter(baseDelayMs) {
   const safeBase = Math.max(300, Math.floor(baseDelayMs));
   const jitter = Math.round(safeBase * ((Math.random() * 0.4) - 0.2));
   return Math.max(300, safeBase + jitter);
+}
+
+async function reconnectSessionWithBootstrappedOffset(term, sessionId) {
+  if (!sessionId) {
+    return;
+  }
+  await bootstrapSessionReplayOffset(sessionId, {
+    getSessionOffset,
+    setSessionOffset,
+    fetchSessionLogBytes
+  });
+  await term.reconnect(sessionId);
 }
 
 export function createControl({ term, sessionTabs, statusBar, toast, actions, qualityMonitor }) {
@@ -155,8 +170,9 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
               (!State.terminalSocket || State.terminalSocket.readyState === WebSocket.CLOSED) &&
               !State.terminalReconnectTimer;
             if (canReconnect) {
-              void term.reconnect(activeSession.id);
-              term.scheduleResize();
+              void reconnectSessionWithBootstrappedOffset(term, activeSession.id).finally(() => {
+                term.scheduleResize();
+              });
             }
           }
         } else if (sessions.length > 0 && isFirstSessionsMessage) {
@@ -170,8 +186,9 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
             statusBar.setCwd(latest.cwd);
           }
           setActionButtonsEnabled(true);
-          void term.reconnect(latest.id);
-          term.scheduleResize();
+          void reconnectSessionWithBootstrappedOffset(term, latest.id).finally(() => {
+            term.scheduleResize();
+          });
         } else if (sessions.length > 0) {
           setActionButtonsEnabled(false);
         } else if (isFirstSessionsMessage) {

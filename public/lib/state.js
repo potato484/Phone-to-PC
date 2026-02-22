@@ -176,6 +176,7 @@ export const QUICK_KEY_SEQUENCES = {
 export const KEYBOARD_VISIBLE_THRESHOLD_PX = 80;
 export const ZOOM_SCALE_EPSILON = 0.02;
 export const ZOOM_SETTLE_MS = 260;
+export const ZOOM_RESIZE_MIN_INTERVAL_MS = 120;
 export const TERMINAL_FONT_SIZE_MIN = 10;
 export const TERMINAL_FONT_SIZE_MAX = 28;
 export const TERMINAL_MAX_PANES = 4;
@@ -270,6 +271,9 @@ export const State = {
   zoomActive: false,
   zoomNoticeShown: false,
   zoomSettleTimer: 0,
+  zoomResizeRafId: 0,
+  zoomResizeLastRunAt: 0,
+  zoomLastScale: 1,
   lastResizeSessionId: '',
   lastResizeCols: 0,
   lastResizeRows: 0,
