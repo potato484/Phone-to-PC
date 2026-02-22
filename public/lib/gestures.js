@@ -633,8 +633,8 @@ export function createGestures({ getTerm, toast }) {
       singleFingerRejectReason = 'target-not-element';
       return false;
     }
-    if (target.closest('.terminal-pane-actions, .terminal-pane-header')) {
-      singleFingerRejectReason = 'target-in-pane-header';
+    if (target.closest('.terminal-pane-actions')) {
+      singleFingerRejectReason = 'target-in-pane-actions';
       return false;
     }
     const paneBodyEl = target.closest('.terminal-pane-body');
@@ -991,7 +991,7 @@ export function createGestures({ getTerm, toast }) {
 
         twoFingerState = null;
         const touch = touches[0];
-        if (beginSingleFingerScrollMode(touch, event.target)) {
+        if (startedInTerminal && beginSingleFingerScrollMode(touch, event.target)) {
           resetSwipeTracking();
           clearLongPress();
           if (startedInTerminal) {
@@ -1027,6 +1027,10 @@ export function createGestures({ getTerm, toast }) {
                   : ''
                 : ''
           });
+          event.preventDefault();
+          resetSwipeTracking();
+          endSingleFingerScrollMode();
+          return;
         }
         endSingleFingerScrollMode();
         const horizontalScrollTarget = startedInTerminal ? null : resolveHorizontalScrollTarget(event.target);
