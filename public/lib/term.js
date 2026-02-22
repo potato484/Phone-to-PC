@@ -296,9 +296,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       return;
     }
     activePaneId = pane.id;
-    if (touchScrollModePaneId && touchScrollModePaneId !== pane.id) {
-      touchScrollModePaneId = pane.id;
-    }
     panes.forEach((entry) => {
       entry.rootEl.classList.toggle('is-active', entry.id === pane.id);
     });

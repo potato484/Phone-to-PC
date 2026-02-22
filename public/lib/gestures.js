@@ -3,6 +3,11 @@ import {
   computeHorizontalScrollUpdate,
   resolveDirectionLock
 } from './gesture-scroll-policy.js';
+import {
+  computePinchScale,
+  shouldAllowSingleFingerTerminalScroll,
+  shouldApplyPinchScale
+} from './gesture-mode-policy.js';
 
 const DIRECTION_LOCK_THRESHOLD_PX = 8;
 const LONG_PRESS_MS = 420;
@@ -12,6 +17,8 @@ const VERTICAL_RECOVER_RATIO = 1.15;
 const TWO_FINGER_SCROLL_LOCK_THRESHOLD_PX = 6;
 const TWO_FINGER_PINCH_LOCK_THRESHOLD_PX = 8;
 const TWO_FINGER_PINCH_DOMINANCE_RATIO = 1.15;
+const TWO_FINGER_PINCH_SCALE_EPSILON = 0.015;
+const TWO_FINGER_PINCH_UPDATE_MIN_INTERVAL_MS = 24;
 const TWO_FINGER_PARALLEL_MOVE_THRESHOLD_PX = 2;
 const TWO_FINGER_SCROLL_LINE_PX = 14;
 const SINGLE_FINGER_SCROLL_MOVE_EPSILON_PX = 0.5;
@@ -640,6 +647,10 @@ export function createGestures({ getTerm, toast }) {
     const paneBodyEl = target.closest('.terminal-pane-body');
     const paneEl = paneBodyEl instanceof HTMLElement ? paneBodyEl.closest('.terminal-pane') : target.closest('.terminal-pane');
     const paneInTouchScrollMode = paneEl instanceof HTMLElement && paneEl.classList.contains('is-touch-scroll-mode');
+    if (!shouldAllowSingleFingerTerminalScroll(paneInTouchScrollMode)) {
+      singleFingerRejectReason = 'scroll-mode-disabled';
+      return false;
+    }
     const viewportEl =
       resolveTerminalViewport(target) ||
       (typeof term.getActivePaneViewportElement === 'function' ? term.getActivePaneViewportElement() : null);
@@ -651,20 +662,11 @@ export function createGestures({ getTerm, toast }) {
       paneBodyEl instanceof HTMLElement &&
       beginSingleFingerScrollStateFromResolvedTargets(touch, viewportEl, horizontalScrollTarget, true)
     ) {
-      if (!paneInTouchScrollMode) {
-        singleFingerFallbackUsed = true;
-        debugGesture('single-finger-start-mode-bypass', {
-          paneId: paneEl && paneEl.dataset ? paneEl.dataset.paneId || '' : '',
-          targetTag: target.tagName || '',
-          targetClass: target.className || ''
-        });
-      } else {
-        debugGesture('single-finger-start', {
-          fallback: false,
-          paneId: paneEl && paneEl.dataset ? paneEl.dataset.paneId || '' : '',
-          hasHorizontalTarget: !!horizontalScrollTarget
-        });
-      }
+      debugGesture('single-finger-start', {
+        fallback: false,
+        paneId: paneEl && paneEl.dataset ? paneEl.dataset.paneId || '' : '',
+        hasHorizontalTarget: !!horizontalScrollTarget
+      });
       return true;
     }
 
@@ -956,6 +958,9 @@ export function createGestures({ getTerm, toast }) {
             twoFingerState = null;
             return;
           }
+          const term = getTerm();
+          const baseFontSize =
+            term && typeof term.getFontSize === 'function' ? Number(term.getFontSize()) : Number.NaN;
           const center = readTouchCenter(touches[0], touches[1]);
           const distance = touchDistance(touches[0], touches[1]);
           twoFingerState = {
@@ -971,7 +976,10 @@ export function createGestures({ getTerm, toast }) {
             touchALastX: touches[0].clientX,
             touchALastY: touches[0].clientY,
             touchBLastX: touches[1].clientX,
-            touchBLastY: touches[1].clientY
+            touchBLastY: touches[1].clientY,
+            baseFontSize: Number.isFinite(baseFontSize) && baseFontSize > 0 ? baseFontSize : 0,
+            lastAppliedScale: 1,
+            lastAppliedAtMs: 0
           };
           return;
         }
@@ -1013,6 +1021,7 @@ export function createGestures({ getTerm, toast }) {
             term && typeof term.isActivePaneTouchScrollModeEnabled === 'function'
               ? term.isActivePaneTouchScrollModeEnabled()
               : false;
+          const shouldAllowSelectionFallback = singleFingerRejectReason === 'scroll-mode-disabled';
           debugGesture('single-finger-start-rejected', {
             reason: singleFingerRejectReason || 'unknown',
             activePaneTouchScrollModeEnabled,
@@ -1024,10 +1033,12 @@ export function createGestures({ getTerm, toast }) {
                   : ''
                 : ''
           });
-          event.preventDefault();
-          resetSwipeTracking();
-          endSingleFingerScrollMode();
-          return;
+          if (!shouldAllowSelectionFallback) {
+            event.preventDefault();
+            resetSwipeTracking();
+            endSingleFingerScrollMode();
+            return;
+          }
         }
         endSingleFingerScrollMode();
         const horizontalScrollTarget = startedInTerminal ? null : resolveHorizontalScrollTarget(event.target);
@@ -1140,9 +1151,38 @@ export function createGestures({ getTerm, toast }) {
           }
 
           if (twoFingerState.mode === 'pinch') {
+            const term = getTerm();
+            const scale = computePinchScale(twoFingerState.startDistance, distance);
+            const nowMs = Date.now();
+            const baseFontSize =
+              Number.isFinite(twoFingerState.baseFontSize) && twoFingerState.baseFontSize > 0
+                ? twoFingerState.baseFontSize
+                : term && typeof term.getFontSize === 'function'
+                  ? Number(term.getFontSize())
+                  : 0;
+            if (
+              term &&
+              typeof term.scaleFont === 'function' &&
+              Number.isFinite(baseFontSize) &&
+              baseFontSize > 0 &&
+              shouldApplyPinchScale({
+                scale,
+                lastScale: twoFingerState.lastAppliedScale,
+                nowMs,
+                lastAppliedAtMs: twoFingerState.lastAppliedAtMs,
+                scaleEpsilon: TWO_FINGER_PINCH_SCALE_EPSILON,
+                minIntervalMs: TWO_FINGER_PINCH_UPDATE_MIN_INTERVAL_MS
+              })
+            ) {
+              term.scaleFont(baseFontSize, scale);
+              twoFingerState.baseFontSize = baseFontSize;
+              twoFingerState.lastAppliedScale = scale;
+              twoFingerState.lastAppliedAtMs = nowMs;
+            }
             twoFingerState.centerX = center.x;
             twoFingerState.centerY = center.y;
             twoFingerState.distance = distance;
+            event.preventDefault();
             return;
           }
 
