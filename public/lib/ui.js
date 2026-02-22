@@ -1815,6 +1815,7 @@ export function createUi({ getControl, getTerm }) {
 
   const Viewport = {
     lastAppliedViewportHeight: 0,
+    lastAppliedViewportWidth: 0,
 
     clearZoomSettleTimer() {
       if (!State.zoomSettleTimer) {
@@ -1868,6 +1869,7 @@ export function createUi({ getControl, getTerm }) {
         State.zoomActive = false;
         State.zoomNoticeShown = false;
         this.lastAppliedViewportHeight = 0;
+        this.lastAppliedViewportWidth = 0;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
         State.viewportStableHeight = Math.max(0, window.innerHeight || 0);
         keyboardAlignmentScope = '';
@@ -1882,6 +1884,7 @@ export function createUi({ getControl, getTerm }) {
       if (zoomed) {
         State.zoomActive = true;
         this.lastAppliedViewportHeight = 0;
+        this.lastAppliedViewportWidth = 0;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
         State.pendingResizeAfterKeyboard = false;
         keyboardAlignmentScope = '';
@@ -1897,6 +1900,7 @@ export function createUi({ getControl, getTerm }) {
       this.clearZoomSettleTimer();
       State.zoomActive = false;
       const viewportHeight = Math.max(0, Math.round(Number(viewport.height) || window.innerHeight || 0));
+      const viewportWidth = Math.max(0, Math.round(Number(viewport.width) || window.innerWidth || 0));
       const activeElement = document.activeElement;
       const inputFocused = isKeyboardInputTarget(activeElement);
       if (!inputFocused || !State.viewportStableHeight) {
@@ -1915,7 +1919,8 @@ export function createUi({ getControl, getTerm }) {
         keyboardAlignmentScope = '';
       }
       const viewportHeightChanged = Math.abs(viewportHeight - this.lastAppliedViewportHeight) > 1;
-      if (keyboardChanged || viewportHeightChanged) {
+      const viewportWidthChanged = Math.abs(viewportWidth - this.lastAppliedViewportWidth) > 1;
+      if (reason !== 'zoom-settle' && (keyboardChanged || viewportHeightChanged || viewportWidthChanged)) {
         const term = getTerm();
         if (term) {
           term.scheduleResize(keyboardChanged);
@@ -1947,6 +1952,7 @@ export function createUi({ getControl, getTerm }) {
         });
       }
       this.lastAppliedViewportHeight = viewportHeight;
+      this.lastAppliedViewportWidth = viewportWidth;
       Dock.scheduleMeasure();
     },
 

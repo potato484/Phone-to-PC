@@ -24,6 +24,8 @@ import {
   getSessionOffset,
   setSessionOffset,
   shortenSessionId,
+  persistTerminalFontSize,
+  readPersistedTerminalFontSize,
   textDecoder,
   textEncoder,
   wsUrl
@@ -34,10 +36,13 @@ const RECONNECT_PROGRESS_TICK_MS = 80;
 const INITIAL_ATTACH_SANITIZE_WINDOW_MS = 120000;
 const INITIAL_ATTACH_ALT_SCREEN_ENTER_RE = /\x1b(?:\x1b)?\[\?(?:47|1047|1049)(?:;[0-9]+)*h/g;
 const INITIAL_ATTACH_CLEAR_SCROLLBACK_RE = /\x1b(?:\x1b)?\[3J/g;
+const INITIAL_ATTACH_RESET_RE = /\x1bc/g;
 const BLOCKED_TERMINAL_PRIVATE_MODES = new Set([47, 1047, 1048, 1049]);
 const MOBILE_SCROLLBACK = 12000;
 const DESKTOP_SCROLLBACK = 30000;
 const TERMINAL_WRITE_BATCH_TARGET_BYTES = 24 * 1024;
+const TERMINAL_CLEAR_SCREEN_SEQUENCE = '\x1b[2J\x1b[H';
+const ENABLE_WEBGL_RENDERER = false;
 
 function resolveTerminalScrollback() {
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
@@ -70,14 +75,52 @@ function sanitizeInitialAttachData(data, sanitizeUntilMs) {
   }
   return data
     .replace(INITIAL_ATTACH_ALT_SCREEN_ENTER_RE, '')
-    .replace(INITIAL_ATTACH_CLEAR_SCROLLBACK_RE, '');
+    .replace(INITIAL_ATTACH_CLEAR_SCROLLBACK_RE, '')
+    .replace(INITIAL_ATTACH_RESET_RE, '');
+}
+
+function normalizeParserParams(params) {
+  if (Array.isArray(params)) {
+    return params;
+  }
+  if (!params || typeof params !== 'object') {
+    return [];
+  }
+  if (typeof params.toArray === 'function') {
+    try {
+      const values = params.toArray();
+      return Array.isArray(values) ? values : [];
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(params.params)) {
+    return params.params;
+  }
+  if (typeof params.length === 'number' && typeof params.get === 'function') {
+    const values = [];
+    for (let index = 0; index < params.length; index += 1) {
+      values.push(params.get(index));
+    }
+    return values;
+  }
+  return [];
 }
 
 function shouldBlockPrivateModeParams(params) {
-  if (!Array.isArray(params) || params.length === 0) {
+  const parsedValues = normalizeParserParams(params);
+  if (parsedValues.length === 0) {
     return false;
   }
-  return params.some((value) => BLOCKED_TERMINAL_PRIVATE_MODES.has(Number(value)));
+  return parsedValues.some((value) => BLOCKED_TERMINAL_PRIVATE_MODES.has(Number(value)));
+}
+
+function shouldBlockClearScrollbackParams(params) {
+  const parsedValues = normalizeParserParams(params);
+  if (parsedValues.length === 0) {
+    return false;
+  }
+  return parsedValues.some((value) => Number(value) === 3);
 }
 
 export function createTerm({ getControl, statusBar, toast, onActiveSessionChange }) {
@@ -315,16 +358,13 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
   }
 
   function fitAllPanes(force = false) {
-    if (!force && State.zoomActive) {
-      return;
-    }
-
     panes.forEach((pane) => {
       if (!pane.fitAddon || !pane.terminal) {
         return;
       }
       pane.fitAddon.fit();
       sendResizeForPane(pane);
+      schedulePaneRefresh(pane);
     });
   }
 
@@ -336,6 +376,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (pane.writeDrainRafId) {
       window.cancelAnimationFrame(pane.writeDrainRafId);
       pane.writeDrainRafId = 0;
+    }
+    if (pane.renderRefreshRafId) {
+      window.cancelAnimationFrame(pane.renderRefreshRafId);
+      pane.renderRefreshRafId = 0;
     }
     pane.inputQueue = '';
     pane.writeQueue.length = 0;
@@ -455,6 +499,23 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     });
   }
 
+  function schedulePaneRefresh(pane) {
+    if (!pane || !pane.terminal || pane.renderRefreshRafId) {
+      return;
+    }
+    pane.renderRefreshRafId = window.requestAnimationFrame(() => {
+      pane.renderRefreshRafId = 0;
+      if (!pane.terminal || typeof pane.terminal.refresh !== 'function') {
+        return;
+      }
+      const rows = Number.isFinite(pane.terminal.rows) ? pane.terminal.rows : 0;
+      if (rows <= 0) {
+        return;
+      }
+      pane.terminal.refresh(0, rows - 1);
+    });
+  }
+
   function takePaneOutputBatch(pane) {
     const firstChunk = pane.writeQueue.shift();
     if (!firstChunk) {
@@ -511,6 +572,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     pane.writeQueuedBytes = Math.max(0, pane.writeQueuedBytes - chunk.queueBytes);
     pane.terminal.write(chunk.data, () => {
       pane.writeInProgress = false;
+      schedulePaneRefresh(pane);
       if (chunk.sessionId && chunk.logBytes > 0) {
         addSessionOffset(chunk.sessionId, chunk.logBytes);
       }
@@ -563,6 +625,17 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
   }
 
+  function clearPaneTerminal(pane) {
+    if (!pane || !pane.terminal) {
+      return;
+    }
+    pane.terminal.write(TERMINAL_CLEAR_SCREEN_SEQUENCE);
+    if (typeof pane.terminal.scrollToBottom === 'function') {
+      pane.terminal.scrollToBottom();
+    }
+    schedulePaneRefresh(pane);
+  }
+
   async function connectPane(pane, sessionId, options = {}) {
     if (!pane || !pane.terminal || !sessionId) {
       return;
@@ -590,7 +663,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     setPaneConnectionState(pane, 'connecting');
 
     if (clearTerminal) {
-      pane.terminal.write('\x1bc');
+      clearPaneTerminal(pane);
     }
     if (!keepReconnectDelay) {
       pane.reconnectDelayMs = 1000;
@@ -906,14 +979,21 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       };
       registerCsiGuard({ prefix: '?', final: 'h' }, (params) => shouldBlockPrivateModeParams(params));
       registerCsiGuard({ prefix: '?', final: 'l' }, (params) => shouldBlockPrivateModeParams(params));
-      registerCsiGuard(
-        { final: 'J' },
-        (params) => Array.isArray(params) && params.some((value) => Number(value) === 3)
-      );
+      registerCsiGuard({ final: 'J' }, (params) => shouldBlockClearScrollbackParams(params));
+      if (typeof terminal.parser.registerEscHandler === 'function') {
+        try {
+          const disposable = terminal.parser.registerEscHandler({ final: 'c' }, () => true);
+          if (disposable && typeof disposable.dispose === 'function') {
+            parserGuardDisposables.push(disposable);
+          }
+        } catch {
+          // Ignore parser registration failures and keep terminal functional.
+        }
+      }
     }
 
     let webglAddon = null;
-    if (WebglAddonCtor) {
+    if (ENABLE_WEBGL_RENDERER && WebglAddonCtor) {
       try {
         webglAddon = new WebglAddonCtor();
         terminal.loadAddon(webglAddon);
@@ -949,6 +1029,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       writeQueuedBytes: 0,
       writeInProgress: false,
       writeDrainRafId: 0,
+      renderRefreshRafId: 0,
       writeBackpressured: false,
       connected: false,
       binaryEnabled: false,
@@ -1323,7 +1404,12 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         toast.show('xterm.js 本地资源加载失败', 'danger');
         return;
       }
+      const persistedFontSize = readPersistedTerminalFontSize();
+      if (persistedFontSize > 0) {
+        State.terminalFontSize = persistedFontSize;
+      }
       State.terminalFontSize = clampFontSize(State.terminalFontSize || DEFAULT_FONT_SIZE);
+      persistTerminalFontSize(State.terminalFontSize);
       if (panes.size === 0) {
         const firstPane = createPane();
         if (!firstPane) {
@@ -1355,9 +1441,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
 
     scheduleResize(force = false) {
       if (panes.size === 0) {
-        return;
-      }
-      if (!force && State.zoomActive) {
         return;
       }
 
@@ -1514,7 +1597,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       State.terminalFontSize = nextSize;
       panes.forEach((pane) => {
         pane.terminal.options.fontSize = nextSize;
+        schedulePaneRefresh(pane);
       });
+      persistTerminalFontSize(nextSize);
       this.scheduleResize(true);
       return nextSize;
     },

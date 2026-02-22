@@ -64,6 +64,7 @@ export const DOM = {
 
 export const TOKEN_STORAGE_KEY = 'c2p_token';
 export const TOKEN_EXPIRES_AT_STORAGE_KEY = 'c2p_token_expires_at';
+export const TERMINAL_FONT_SIZE_STORAGE_KEY = 'c2p_terminal_font_size';
 
 function safeStorageGet(storage, key) {
   if (!storage) {
@@ -192,6 +193,46 @@ export const TERMINAL_BINARY_CODEC = 'binary-v1';
 export const TERMINAL_FRAME_HEADER_BYTES = 5;
 export const TERMINAL_FRAME_TYPE_OUTPUT = 1;
 export const TERMINAL_FRAME_TYPE_INPUT = 2;
+
+function normalizePersistedTerminalFontSize(rawValue) {
+  const parsed = Number.parseInt(String(rawValue || ''), 10);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  const clamped = Math.max(TERMINAL_FONT_SIZE_MIN, Math.min(TERMINAL_FONT_SIZE_MAX, Math.round(parsed)));
+  return Number.isFinite(clamped) ? clamped : 0;
+}
+
+export function persistTerminalFontSize(fontSize) {
+  const normalized = normalizePersistedTerminalFontSize(fontSize);
+  if (!normalized) {
+    safeStorageRemove(window.sessionStorage, TERMINAL_FONT_SIZE_STORAGE_KEY);
+    safeStorageRemove(window.localStorage, TERMINAL_FONT_SIZE_STORAGE_KEY);
+    return;
+  }
+  const value = String(normalized);
+  safeStorageSet(window.sessionStorage, TERMINAL_FONT_SIZE_STORAGE_KEY, value);
+  safeStorageSet(window.localStorage, TERMINAL_FONT_SIZE_STORAGE_KEY, value);
+}
+
+export function readPersistedTerminalFontSize() {
+  const sessionValue = normalizePersistedTerminalFontSize(
+    safeStorageGet(window.sessionStorage, TERMINAL_FONT_SIZE_STORAGE_KEY)
+  );
+  if (sessionValue > 0) {
+    return sessionValue;
+  }
+
+  const fallbackValue = normalizePersistedTerminalFontSize(
+    safeStorageGet(window.localStorage, TERMINAL_FONT_SIZE_STORAGE_KEY)
+  );
+  if (fallbackValue <= 0) {
+    return 0;
+  }
+
+  safeStorageSet(window.sessionStorage, TERMINAL_FONT_SIZE_STORAGE_KEY, String(fallbackValue));
+  return fallbackValue;
+}
 
 export const textDecoder = new TextDecoder();
 export const textEncoder = new TextEncoder();
