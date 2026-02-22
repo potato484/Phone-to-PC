@@ -87,6 +87,7 @@ bash scripts/install.sh --install-dir /opt/c2p --service-user "$USER"
 
 2. 启动工作目录（建议）
 - 通过 `--cwd` 指定文件管理根目录，避免暴露不必要路径
+- 终端新会话默认仍从 Linux 用户目录 `~` 启动
 - 示例：`pnpm start -- --cwd=/home/your-user/workspace`
 
 ### 按需配置
