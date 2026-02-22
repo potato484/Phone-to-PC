@@ -19,6 +19,10 @@ import {
   shortenSessionId
 } from './state.js';
 import { createThemeManager } from './theme.js';
+import {
+  clampScrollDeltaToRemaining,
+  shouldAutoAlignKeyboardViewport
+} from './viewport-scroll-policy.js';
 
 const QUICK_KEY_ROWS = [
   [
@@ -153,6 +157,16 @@ function shouldPreserveDockInputFocus(target) {
   return isDockFocusTarget(target) && isKeyboardInputTarget(target);
 }
 
+function resolveKeyboardAlignmentScope(target) {
+  if (shouldPreserveDockInputFocus(target)) {
+    return 'dock-input';
+  }
+  if (isTerminalFocusTarget(target)) {
+    return 'terminal';
+  }
+  return 'other';
+}
+
 function resolveActiveDockInputElement() {
   const active = document.activeElement;
   if (shouldPreserveDockInputFocus(active)) {
@@ -212,6 +226,7 @@ export function createUi({ getControl, getTerm }) {
   let sessionCache = [];
   let preserveDockInputUntilMs = 0;
   let uiStateWriteTimer = 0;
+  let keyboardAlignmentScope = '';
   State.lastDockInputElement = null;
   const Theme = createThemeManager();
 
@@ -391,12 +406,22 @@ export function createUi({ getControl, getTerm }) {
     },
 
     syncTerminalScrollReserve() {
-      if (!DOM.dock || !DOM.quickKeys || !DOM.dock.classList.contains('is-quick-keys-visible')) {
+      if (!DOM.dock) {
         document.documentElement.style.setProperty('--terminal-scroll-reserve', '0px');
         return 0;
       }
-      document.documentElement.style.setProperty('--terminal-scroll-reserve', '0px');
-      return 0;
+      const keyboardDockMode = DOM.dock.classList.contains('is-keyboard-visible');
+      if (!keyboardDockMode && !State.keyboardVisible) {
+        document.documentElement.style.setProperty('--terminal-scroll-reserve', '0px');
+        return 0;
+      }
+
+      const dockRect = DOM.dock.getBoundingClientRect();
+      const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      const visibleDockHeight = Math.max(0, Math.min(dockRect.height, viewportHeight - Math.max(0, dockRect.top)));
+      const reserve = Math.max(0, Math.ceil(visibleDockHeight || dockRect.height || 0));
+      document.documentElement.style.setProperty('--terminal-scroll-reserve', `${reserve}px`);
+      return reserve;
     },
 
     scheduleMeasure() {
@@ -453,10 +478,14 @@ export function createUi({ getControl, getTerm }) {
 
     ensureTerminalVisible() {
       if (DOM.terminalWrap) {
-        DOM.terminalWrap.scrollIntoView({
-          block: 'nearest',
-          inline: 'nearest'
-        });
+        const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        const rect = DOM.terminalWrap.getBoundingClientRect();
+        if (rect.top < 0 || rect.bottom > viewportHeight) {
+          DOM.terminalWrap.scrollIntoView({
+            block: 'nearest',
+            inline: 'nearest'
+          });
+        }
       }
       const term = getTerm();
       if (term && typeof term.scrollActivePaneNearBottom === 'function') {
@@ -1174,9 +1203,17 @@ export function createUi({ getControl, getTerm }) {
         const reserve = Dock.syncTerminalScrollReserve();
         if (nextVisible && !preserveDockInputFocus) {
           const scrollDelta = Math.max(0, nextDockHeight - previousDockHeight, reserve);
-          if (scrollDelta > 0) {
+          const scrollingEl = document.scrollingElement;
+          const clampedScrollDelta = scrollingEl
+            ? clampScrollDeltaToRemaining(scrollDelta, {
+                scrollTop: scrollingEl.scrollTop,
+                scrollHeight: scrollingEl.scrollHeight,
+                clientHeight: scrollingEl.clientHeight
+              })
+            : scrollDelta;
+          if (clampedScrollDelta > 0) {
             window.scrollBy({
-              top: scrollDelta,
+              top: Math.ceil(clampedScrollDelta),
               left: 0,
               behavior: 'auto'
             });
@@ -1482,7 +1519,7 @@ export function createUi({ getControl, getTerm }) {
         }
         State.zoomActive = false;
         State.zoomNoticeShown = false;
-        this.applyInset();
+        this.applyInset('zoom-settle');
         const term = getTerm();
         if (term) {
           term.scheduleResize(true);
@@ -1505,7 +1542,7 @@ export function createUi({ getControl, getTerm }) {
       return changed;
     },
 
-    applyInset() {
+    applyInset(reason = 'unknown') {
       if (!window.visualViewport) {
         this.clearZoomSettleTimer();
         State.zoomActive = false;
@@ -1513,6 +1550,7 @@ export function createUi({ getControl, getTerm }) {
         this.lastAppliedViewportHeight = 0;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
         State.viewportStableHeight = Math.max(0, window.innerHeight || 0);
+        keyboardAlignmentScope = '';
         this.syncKeyboardVisibility(false);
         Dock.scheduleMeasure();
         return;
@@ -1526,6 +1564,7 @@ export function createUi({ getControl, getTerm }) {
         this.lastAppliedViewportHeight = 0;
         document.documentElement.style.setProperty('--dock-bottom-offset', '0px');
         State.pendingResizeAfterKeyboard = false;
+        keyboardAlignmentScope = '';
         this.syncKeyboardVisibility(false);
         if (!State.zoomNoticeShown) {
           State.zoomNoticeShown = true;
@@ -1538,7 +1577,8 @@ export function createUi({ getControl, getTerm }) {
       this.clearZoomSettleTimer();
       State.zoomActive = false;
       const viewportHeight = Math.max(0, Math.round(Number(viewport.height) || window.innerHeight || 0));
-      const inputFocused = isKeyboardInputTarget(document.activeElement);
+      const activeElement = document.activeElement;
+      const inputFocused = isKeyboardInputTarget(activeElement);
       if (!inputFocused || !State.viewportStableHeight) {
         State.viewportStableHeight = viewportHeight;
       }
@@ -1551,20 +1591,39 @@ export function createUi({ getControl, getTerm }) {
       const bottomOffset = keyboardFromInset ? Math.round(keyboardOffset) : 0;
       document.documentElement.style.setProperty('--dock-bottom-offset', `${bottomOffset}px`);
       const keyboardChanged = this.syncKeyboardVisibility(nextKeyboardVisible);
-      const viewportHeightChanged = Math.abs(viewportHeight - this.lastAppliedViewportHeight) > 1;
       if (!nextKeyboardVisible) {
-        if (keyboardChanged || viewportHeightChanged) {
-          const term = getTerm();
-          if (term) {
-            term.scheduleResize(keyboardChanged);
-          }
+        keyboardAlignmentScope = '';
+      }
+      const viewportHeightChanged = Math.abs(viewportHeight - this.lastAppliedViewportHeight) > 1;
+      if (keyboardChanged || viewportHeightChanged) {
+        const term = getTerm();
+        if (term) {
+          term.scheduleResize(keyboardChanged);
         }
-      } else {
+      }
+      const activeScope = resolveKeyboardAlignmentScope(activeElement);
+      const shouldAutoAlign = shouldAutoAlignKeyboardViewport({
+        keyboardVisible: nextKeyboardVisible,
+        keyboardChanged,
+        reason,
+        activeScope,
+        lastAlignedScope: keyboardAlignmentScope
+      });
+      if (shouldAutoAlign) {
+        keyboardAlignmentScope = activeScope;
         window.requestAnimationFrame(() => {
-          if (shouldPreserveDockInputFocus(document.activeElement)) {
+          if (!State.keyboardVisible) {
+            return;
+          }
+          const nextActiveScope = resolveKeyboardAlignmentScope(document.activeElement);
+          if (nextActiveScope === 'dock-input') {
+            Dock.ensureQuickKeysVisible();
             return;
           }
           Dock.ensureQuickKeysVisible();
+          if (nextActiveScope === 'terminal') {
+            Dock.ensureTerminalVisible();
+          }
         });
       }
       this.lastAppliedViewportHeight = viewportHeight;
@@ -1572,10 +1631,10 @@ export function createUi({ getControl, getTerm }) {
     },
 
     bind() {
-      this.applyInset();
-      const scheduleDelayedInsetSync = () => {
+      this.applyInset('init');
+      const scheduleDelayedInsetSync = (reason) => {
         window.setTimeout(() => {
-          this.applyInset();
+          this.applyInset(reason);
         }, KEYBOARD_INSET_APPLY_DELAY_MS);
       };
       window.addEventListener('focusin', (event) => {
@@ -1586,7 +1645,7 @@ export function createUi({ getControl, getTerm }) {
         if (!isKeyboardInputTarget(event.target)) {
           return;
         }
-        scheduleDelayedInsetSync();
+        scheduleDelayedInsetSync('focusin');
       });
       window.addEventListener('focusout', (event) => {
         if (!isKeyboardInputTarget(event.target)) {
@@ -1612,7 +1671,7 @@ export function createUi({ getControl, getTerm }) {
         if (State.lastDockInputElement === event.target) {
           State.lastDockInputElement = null;
         }
-        scheduleDelayedInsetSync();
+        scheduleDelayedInsetSync('focusout');
       });
       if (DOM.terminalWrap) {
         DOM.terminalWrap.addEventListener(
@@ -1622,7 +1681,7 @@ export function createUi({ getControl, getTerm }) {
               if (!isTerminalFocusTarget(document.activeElement)) {
                 return;
               }
-              this.applyInset();
+              this.applyInset('pointerup');
             }, KEYBOARD_INSET_APPLY_DELAY_MS);
           },
           { passive: true }
@@ -1634,14 +1693,14 @@ export function createUi({ getControl, getTerm }) {
       window.visualViewport.addEventListener(
         'resize',
         () => {
-          this.applyInset();
+          this.applyInset('viewport-resize');
         },
         { passive: true }
       );
       window.visualViewport.addEventListener(
         'scroll',
         () => {
-          this.applyInset();
+          this.applyInset('viewport-scroll');
         },
         { passive: true }
       );

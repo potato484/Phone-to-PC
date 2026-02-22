@@ -23,6 +23,14 @@ html, body {
 body {
   overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  html,
+  body {
+    overscroll-behavior-y: none;
+  }
 }
 
 /* 3.1 微交互：按钮 Spring 反馈 */
@@ -129,6 +137,7 @@ select {
   gap: 8px;
   padding: 10px;
   padding-bottom: calc(10px + var(--terminal-scroll-reserve));
+  scroll-margin-bottom: calc(10px + var(--terminal-scroll-reserve));
   touch-action: pan-x pan-y;
   overscroll-behavior-y: contain;
 }
@@ -265,14 +274,14 @@ select {
 
 .terminal-pane-body {
   min-height: 0;
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
   overscroll-behavior-y: contain;
   touch-action: pan-x pan-y;
 }
-.terminal-pane-terminal { width: 100%; min-width: 960px; min-height: 96px; height: 100%; }
+.terminal-pane-terminal { width: 100%; min-width: 0; max-width: 100%; min-height: 96px; height: 100%; }
 .terminal-pane-terminal,
 .terminal-pane-terminal .xterm,
 .terminal-pane-terminal .xterm * {
@@ -307,6 +316,7 @@ html.is-terminal-scroll-mode body {
   bottom: 0;
   z-index: 10;
   margin-top: 8px;
+  min-height: calc(46px + var(--safe-bottom));
   padding: 8px 10px calc(10px + var(--safe-bottom));
   box-shadow: none;
 }
