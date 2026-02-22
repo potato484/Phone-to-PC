@@ -21,18 +21,34 @@ test('bootstrapSessionReplayOffset keeps existing positive offset', async () => 
   assert.equal(setCalls, 0);
 });
 
-test('bootstrapSessionReplayOffset initializes from latest log bytes when offset missing', async () => {
+test('bootstrapSessionReplayOffset initializes from recent tail when offset missing', async () => {
   const setHistory = [];
   const result = await bootstrapSessionReplayOffset('session-b', {
     getSessionOffset: () => 0,
     fetchSessionLogBytes: async () => 8192,
+    replayTailBytes: 4096,
     setSessionOffset: (sessionId, offset) => {
       setHistory.push([sessionId, offset]);
     }
   });
 
-  assert.equal(result, 8192);
-  assert.deepEqual(setHistory, [['session-b', 8192]]);
+  assert.equal(result, 4096);
+  assert.deepEqual(setHistory, [['session-b', 4096]]);
+});
+
+test('bootstrapSessionReplayOffset falls back to zero when log size is smaller than tail', async () => {
+  const setHistory = [];
+  const result = await bootstrapSessionReplayOffset('session-small', {
+    getSessionOffset: () => 0,
+    fetchSessionLogBytes: async () => 1024,
+    replayTailBytes: 4096,
+    setSessionOffset: (sessionId, offset) => {
+      setHistory.push([sessionId, offset]);
+    }
+  });
+
+  assert.equal(result, 0);
+  assert.deepEqual(setHistory, [['session-small', 0]]);
 });
 
 test('bootstrapSessionReplayOffset tolerates fetch failures', async () => {

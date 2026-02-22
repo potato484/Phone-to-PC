@@ -6,6 +6,8 @@ function toSafeOffset(value) {
   return Math.floor(parsed);
 }
 
+const DEFAULT_REPLAY_TAIL_BYTES = 64 * 1024;
+
 export async function bootstrapSessionReplayOffset(sessionId, adapters = {}) {
   if (!sessionId) {
     return 0;
@@ -16,6 +18,10 @@ export async function bootstrapSessionReplayOffset(sessionId, adapters = {}) {
     typeof adapters.setSessionOffset === 'function' ? adapters.setSessionOffset : () => {};
   const fetchSessionLogBytes =
     typeof adapters.fetchSessionLogBytes === 'function' ? adapters.fetchSessionLogBytes : async () => 0;
+  const replayTailBytes = Math.max(
+    0,
+    toSafeOffset(adapters.replayTailBytes) || DEFAULT_REPLAY_TAIL_BYTES
+  );
 
   const currentOffset = toSafeOffset(getSessionOffset(sessionId));
   if (currentOffset > 0) {
@@ -30,8 +36,9 @@ export async function bootstrapSessionReplayOffset(sessionId, adapters = {}) {
   }
 
   if (logBytes > 0) {
-    setSessionOffset(sessionId, logBytes);
-    return logBytes;
+    const replayFrom = Math.max(0, logBytes - replayTailBytes);
+    setSessionOffset(sessionId, replayFrom);
+    return replayFrom;
   }
   return 0;
 }

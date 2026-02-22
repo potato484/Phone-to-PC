@@ -3,6 +3,7 @@ import {
   CONTROL_CLIENT_CAPABILITIES,
   CONTROL_PROTOCOL_VERSION,
   State,
+  TERMINAL_REPLAY_TAIL_BYTES,
   createWsAuthMessage,
   fetchSessionLogBytes,
   getSessionOffset,
@@ -26,7 +27,8 @@ async function reconnectSessionWithBootstrappedOffset(term, sessionId) {
   await bootstrapSessionReplayOffset(sessionId, {
     getSessionOffset,
     setSessionOffset,
-    fetchSessionLogBytes
+    fetchSessionLogBytes,
+    replayTailBytes: TERMINAL_REPLAY_TAIL_BYTES
   });
   await term.reconnect(sessionId);
 }
