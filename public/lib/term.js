@@ -30,6 +30,7 @@ import {
   textEncoder,
   wsUrl
 } from './state.js';
+import { resolveMobileTerminalScrollback } from './terminal-scrollback-policy.js';
 
 const DEFAULT_FONT_SIZE = 14;
 const RECONNECT_PROGRESS_TICK_MS = 80;
@@ -38,7 +39,6 @@ const INITIAL_ATTACH_ALT_SCREEN_ENTER_RE = /\x1b(?:\x1b)?\[\?(?:47|1047|1049)(?:
 const INITIAL_ATTACH_CLEAR_SCROLLBACK_RE = /\x1b(?:\x1b)?\[3J/g;
 const INITIAL_ATTACH_RESET_RE = /\x1bc/g;
 const BLOCKED_TERMINAL_PRIVATE_MODES = new Set([47, 1047, 1048, 1049]);
-const MOBILE_SCROLLBACK = 12000;
 const DESKTOP_SCROLLBACK = 30000;
 const TERMINAL_WRITE_BATCH_TARGET_BYTES = 24 * 1024;
 const TERMINAL_CLEAR_SCREEN_SEQUENCE = '\x1b[2J\x1b[H';
@@ -47,7 +47,8 @@ const ENABLE_WEBGL_RENDERER = false;
 function resolveTerminalScrollback() {
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
     if (window.matchMedia('(pointer: coarse), (max-width: 900px)').matches) {
-      return MOBILE_SCROLLBACK;
+      const deviceMemory = typeof navigator !== 'undefined' ? Number(navigator.deviceMemory) : Number.NaN;
+      return resolveMobileTerminalScrollback(deviceMemory);
     }
   }
   return DESKTOP_SCROLLBACK;
@@ -190,6 +191,21 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     const nextEnabled = !!enabled;
     touchScrollModePaneId = nextEnabled ? pane.id : touchScrollModePaneId === pane.id ? '' : touchScrollModePaneId;
     syncTouchScrollModeUi();
+    if (nextEnabled) {
+      // Ensure viewport metrics are ready immediately after entering touch scroll mode.
+      schedulePaneRefresh(pane);
+      window.requestAnimationFrame(() => {
+        if (!pane || !panes.has(pane.id) || !isPaneTouchScrollModeEnabled(pane)) {
+          return;
+        }
+        if (!pane.terminal || !pane.fitAddon) {
+          return;
+        }
+        pane.fitAddon.fit();
+        sendResizeForPane(pane);
+        schedulePaneRefresh(pane);
+      });
+    }
     return true;
   }
 
@@ -824,7 +840,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       return;
     }
     await connectPane(pane, pane.sessionId, {
-      clearTerminal: true,
+      clearTerminal: false,
       replayFrom: getSessionOffset(pane.sessionId),
       keepReconnectDelay: true,
       cwd: pane.cwd
