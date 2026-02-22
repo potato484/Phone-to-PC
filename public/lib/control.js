@@ -5,6 +5,7 @@ import {
   State,
   TERMINAL_REPLAY_TAIL_BYTES,
   createWsAuthMessage,
+  fetchSessionReplayOffset,
   fetchSessionLogBytes,
   getSessionOffset,
   persistTokenExpiry,
@@ -12,6 +13,7 @@ import {
   setSessionOffset,
   wsUrl
 } from './state.js';
+import { writeClipboardText } from './clipboard.js';
 import { bootstrapSessionReplayOffset } from './session-replay-offset-policy.js';
 
 function withReconnectJitter(baseDelayMs) {
@@ -27,6 +29,7 @@ async function reconnectSessionWithBootstrappedOffset(term, sessionId) {
   await bootstrapSessionReplayOffset(sessionId, {
     getSessionOffset,
     setSessionOffset,
+    fetchSessionReplayOffset,
     fetchSessionLogBytes,
     replayTailBytes: TERMINAL_REPLAY_TAIL_BYTES
   });
@@ -209,9 +212,7 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         typeof payload.text === 'string' &&
         payload.text
       ) {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          void navigator.clipboard.writeText(payload.text).catch(() => {});
-        }
+        void writeClipboardText(payload.text);
         return;
       }
 

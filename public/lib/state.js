@@ -493,6 +493,38 @@ export async function fetchSessionLogBytes(sessionId) {
   }
 }
 
+export async function fetchSessionReplayOffset(sessionId, tailBytes = TERMINAL_REPLAY_TAIL_BYTES) {
+  if (!sessionId) {
+    return null;
+  }
+  const safeTailBytes =
+    Number.isFinite(tailBytes) && tailBytes > 0 ? Math.floor(tailBytes) : TERMINAL_REPLAY_TAIL_BYTES;
+  const query = new URLSearchParams({
+    tailBytes: String(safeTailBytes)
+  });
+  try {
+    const response = await authedFetch(
+      apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/replay-offset?${query.toString()}`)
+    );
+    if (!response.ok) {
+      return null;
+    }
+    const payload = await response.json();
+    if (!payload || typeof payload !== 'object') {
+      return null;
+    }
+    const replayFrom = Number.parseInt(String(payload.replayFrom), 10);
+    const logBytes = Number.parseInt(String(payload.logBytes), 10);
+    return {
+      replayFrom: Number.isFinite(replayFrom) && replayFrom >= 0 ? Math.floor(replayFrom) : 0,
+      logBytes: Number.isFinite(logBytes) && logBytes >= 0 ? Math.floor(logBytes) : 0,
+      aligned: payload.aligned === true
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function setActionButtonsEnabled(enabled) {
   void enabled;
 }

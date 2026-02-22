@@ -10,6 +10,7 @@ const TMUX_SESSION_PREFIX = 'c2p-';
 const TMUX_POLL_INTERVAL_MS = 1500;
 const ATTACH_KILL_ESCALATION_DELAY_MS = 1200;
 const TMUX_KILL_TIMEOUT_MS = 1200;
+const TMUX_DEFAULT_TERMINAL = 'tmux-256color';
 const FLOW_CONTROL_PAUSE = '\u0013';
 const FLOW_CONTROL_RESUME = '\u0011';
 const OSC52_START = '\u001b]52;';
@@ -18,6 +19,8 @@ const OSC52_ST = '\u001b\\';
 const OSC52_MAX_CARRY_CHARS = 8192;
 const OSC52_MAX_TEXT_BYTES = 128 * 1024;
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9-]+$/;
+const DEFAULT_REPLAY_TAIL_BYTES = 64 * 1024;
+const REPLAY_OFFSET_ALIGN_SCAN_MAX_BYTES = 8 * 1024;
 const TMUX_STATUS_BAR_MODE = (process.env.C2P_TMUX_STATUS_BAR ?? 'hide').trim().toLowerCase();
 
 function shouldHideTmuxStatusBar(): boolean {
@@ -220,6 +223,87 @@ function parseOsc52Clipboard(data: string, carry: string): { clipboardTexts: str
     clipboardTexts,
     carry: nextCarry
   };
+}
+
+function normalizeTailBytes(value: unknown, fallback = DEFAULT_REPLAY_TAIL_BYTES): number {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
+function resolveAlignedReplayOffset(
+  logPath: string,
+  replayStart: number,
+  logBytes: number
+): { replayFrom: number; aligned: boolean } {
+  if (replayStart <= 0 || logBytes <= 0 || replayStart >= logBytes) {
+    return {
+      replayFrom: Math.max(0, Math.min(logBytes, replayStart)),
+      aligned: true
+    };
+  }
+
+  const scanBytes = Math.min(REPLAY_OFFSET_ALIGN_SCAN_MAX_BYTES, logBytes - replayStart);
+  if (scanBytes <= 0) {
+    return {
+      replayFrom: replayStart,
+      aligned: false
+    };
+  }
+
+  const buffer = Buffer.alloc(scanBytes);
+  let bytesRead = 0;
+  let fd = -1;
+  try {
+    fd = fs.openSync(logPath, 'r');
+    bytesRead = fs.readSync(fd, buffer, 0, scanBytes, replayStart);
+  } catch {
+    return {
+      replayFrom: replayStart,
+      aligned: false
+    };
+  } finally {
+    if (fd >= 0) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore close errors
+      }
+    }
+  }
+
+  if (bytesRead <= 0) {
+    return {
+      replayFrom: replayStart,
+      aligned: false
+    };
+  }
+
+  const newlineIndex = buffer.subarray(0, bytesRead).indexOf(0x0a);
+  if (newlineIndex < 0) {
+    return {
+      replayFrom: replayStart,
+      aligned: false
+    };
+  }
+
+  return {
+    replayFrom: Math.min(logBytes, replayStart + newlineIndex + 1),
+    aligned: true
+  };
+}
+
+export function resolveReplayOffsetForLogFile(
+  logPath: string,
+  logBytes: number,
+  tailBytes: number
+): { replayFrom: number; aligned: boolean } {
+  const safeLogBytes = Number.isFinite(logBytes) ? Math.max(0, Math.floor(logBytes)) : 0;
+  const safeTailBytes = normalizeTailBytes(tailBytes);
+  const replayStart = Math.max(0, safeLogBytes - safeTailBytes);
+  return resolveAlignedReplayOffset(logPath, replayStart, safeLogBytes);
 }
 
 function readExecErrorMessage(error: unknown): string {
@@ -527,6 +611,18 @@ export class PtyManager {
     });
   }
 
+  private applySessionTerminalOptions(sessionId: string): void {
+    const sessionTarget = toTmuxSessionName(sessionId);
+    this.runTmux(['set-option', '-t', sessionTarget, 'default-terminal', TMUX_DEFAULT_TERMINAL], {
+      allowFailure: true,
+      allowNoServer: true
+    });
+    this.runTmux(['set-environment', '-t', sessionTarget, 'TERM', TMUX_DEFAULT_TERMINAL], {
+      allowFailure: true,
+      allowNoServer: true
+    });
+  }
+
   private addOrUpdateSession(info: SessionInfo): void {
     const logPath = this.resolveSessionLogPath(info.id);
     if (!logPath) {
@@ -538,6 +634,7 @@ export class PtyManager {
       },
       logPath
     });
+    this.applySessionTerminalOptions(info.id);
     this.applySessionDisplayOptions(info.id);
     this.ensureSessionLogPipe(info.id, logPath);
   }
@@ -915,6 +1012,22 @@ export class PtyManager {
     } catch {
       return 0;
     }
+  }
+
+  resolveReplayOffset(sessionId: string, tailBytes: number): { replayFrom: number; logBytes: number; aligned: boolean } | null {
+    const logPath = this.getLogPath(sessionId);
+    if (!logPath) {
+      return null;
+    }
+
+    const logBytes = this.getLogBytes(sessionId);
+    const alignedOffset = resolveReplayOffsetForLogFile(logPath, logBytes, tailBytes);
+
+    return {
+      replayFrom: alignedOffset.replayFrom,
+      logBytes,
+      aligned: alignedOffset.aligned
+    };
   }
 
   hasSession(sessionId: string): boolean {

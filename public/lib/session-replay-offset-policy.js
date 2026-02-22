@@ -18,6 +18,8 @@ export async function bootstrapSessionReplayOffset(sessionId, adapters = {}) {
     typeof adapters.setSessionOffset === 'function' ? adapters.setSessionOffset : () => {};
   const fetchSessionLogBytes =
     typeof adapters.fetchSessionLogBytes === 'function' ? adapters.fetchSessionLogBytes : async () => 0;
+  const fetchSessionReplayOffset =
+    typeof adapters.fetchSessionReplayOffset === 'function' ? adapters.fetchSessionReplayOffset : async () => null;
   const replayTailBytes = Math.max(
     0,
     toSafeOffset(adapters.replayTailBytes) || DEFAULT_REPLAY_TAIL_BYTES
@@ -26,6 +28,17 @@ export async function bootstrapSessionReplayOffset(sessionId, adapters = {}) {
   const currentOffset = toSafeOffset(getSessionOffset(sessionId));
   if (currentOffset > 0) {
     return currentOffset;
+  }
+
+  try {
+    const replayOffset = await fetchSessionReplayOffset(sessionId, replayTailBytes);
+    if (replayOffset && typeof replayOffset === 'object') {
+      const replayFrom = toSafeOffset(replayOffset.replayFrom);
+      setSessionOffset(sessionId, replayFrom);
+      return replayFrom;
+    }
+  } catch {
+    // fallback to byte-tail policy below
   }
 
   let logBytes = 0;

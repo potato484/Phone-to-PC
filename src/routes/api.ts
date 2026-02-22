@@ -13,6 +13,9 @@ import type { C2PStore } from '../store.js';
 const FS_UPLOAD_LIMIT_BYTES = 100 * 1024 * 1024;
 const FS_READ_LIMIT_BYTES = 2 * 1024 * 1024;
 const FS_UPLOAD_MIN_FREE_BYTES = 1 * 1024 * 1024 * 1024;
+const SESSION_REPLAY_TAIL_BYTES_DEFAULT = 64 * 1024;
+const SESSION_REPLAY_TAIL_BYTES_MIN = 1;
+const SESSION_REPLAY_TAIL_BYTES_MAX = 4 * 1024 * 1024;
 
 interface CpuSnapshot {
   idle: number;
@@ -53,6 +56,18 @@ function readStringQuery(value: unknown): string | undefined {
     return typeof value[0] === 'string' ? value[0] : undefined;
   }
   return undefined;
+}
+
+function readReplayTailBytesQuery(value: unknown): number {
+  const rawValue = readStringQuery(value);
+  if (!rawValue) {
+    return SESSION_REPLAY_TAIL_BYTES_DEFAULT;
+  }
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return SESSION_REPLAY_TAIL_BYTES_DEFAULT;
+  }
+  return Math.max(SESSION_REPLAY_TAIL_BYTES_MIN, Math.min(SESSION_REPLAY_TAIL_BYTES_MAX, Math.floor(parsed)));
 }
 
 function readStringBodyField(body: unknown, key: string): string | undefined {
@@ -365,6 +380,17 @@ export function registerApiRoutes(app: Application, deps: ApiRouteDeps): void {
 
   app.get('/api/sessions', (_req: Request, res: Response) => {
     res.json({ sessions: ptyManager.listSessions() });
+  });
+
+  app.get('/api/sessions/:id/replay-offset', (req: Request, res: Response) => {
+    const sessionId = typeof req.params.id === 'string' ? req.params.id : '';
+    const tailBytes = readReplayTailBytesQuery(req.query.tailBytes);
+    const replay = ptyManager.resolveReplayOffset(sessionId, tailBytes);
+    if (!replay) {
+      res.status(404).json({ error: 'session log not found' });
+      return;
+    }
+    res.json(replay);
   });
 
   app.head('/api/sessions/:id/log', (req: Request, res: Response) => {
