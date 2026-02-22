@@ -40,9 +40,27 @@
               <span id="terminal-reconnect-fill" class="terminal-reconnect-fill"></span>
             </div>
           </div>
+          <div id="terminal-grid" class="terminal-grid" aria-live="polite"></div>
+        </section>
+      </main>
+
+      <aside id="side-actions" class="side-actions" aria-label="快捷操作">
+        <button
+          id="side-actions-toggle"
+          class="side-actions-toggle"
+          type="button"
+          aria-controls="side-actions-menu"
+          aria-expanded="false"
+          aria-pressed="false"
+          aria-label="展开快捷操作"
+          title="展开快捷操作"
+        >
+          ☰
+        </button>
+        <div id="side-actions-menu" class="side-actions-menu" hidden>
           <button
             id="quick-keys-toggle"
-            class="quick-keys-toggle is-terminal-nearby"
+            class="quick-keys-toggle side-action-btn"
             type="button"
             aria-controls="quick-keys"
             aria-expanded="false"
@@ -50,18 +68,25 @@
           >
             ⌨
           </button>
-          <div id="terminal-grid" class="terminal-grid" aria-live="polite"></div>
-        </section>
-      </main>
+          <button
+            id="spawn-session-btn"
+            class="side-action-btn"
+            type="button"
+            aria-label="添加新终端"
+            title="添加新终端"
+          >
+            +
+          </button>
+          <button id="dock-handle" class="dock-handle side-action-btn" type="button" aria-expanded="false" aria-pressed="false">
+            ⚙
+          </button>
+        </div>
+      </aside>
 
       <section id="dock" class="dock" aria-label="底部控制坞">
         <div id="session-tabs" class="session-tabs" role="tablist" aria-label="活跃会话" hidden></div>
 
         <div id="quick-keys" class="quick-keys" role="group" aria-label="快捷键"></div>
-
-        <button id="dock-handle" class="dock-handle" type="button" aria-expanded="false" aria-pressed="false">
-          ⚙
-        </button>
 
         <div id="dock-panel" class="dock-panel">
           <section class="dock-card files-card" aria-label="文件管理">

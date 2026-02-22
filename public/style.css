@@ -30,6 +30,34 @@ body {
   html,
   body {
     overscroll-behavior-y: none;
+    overflow: hidden;
+  }
+  .app {
+    min-height: 100vh;
+    min-height: 100dvh;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+  }
+  .workspace {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+  #terminal-wrap {
+    height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+  }
+  .terminal-grid {
+    min-height: 0;
+  }
+  .dock {
+    max-height: min(58dvh, 560px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
   }
 }
 
@@ -129,9 +157,13 @@ select {
   white-space: nowrap;
 }
 
-.workspace { flex: 1 0 auto; }
+.workspace {
+  flex: 1 0 auto;
+  min-height: 0;
+}
 
 #terminal-wrap {
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -408,15 +440,21 @@ html.is-terminal-scroll-mode body {
   border-radius: 12px;
 }
 .session-tab-item.is-delete-pending .session-tab { opacity: 0.58; }
-.session-tab-add {
-  border-style: dashed;
-  color: var(--text);
+.side-actions {
+  position: fixed;
+  left: max(8px, calc(env(safe-area-inset-left, 0px) + 8px));
+  bottom: calc(12px + var(--safe-bottom));
+  z-index: 26;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.session-toolbar-icon {
-  flex: 0 0 auto;
-}
-
+.side-actions-toggle,
+.side-action-btn,
 .quick-keys-toggle,
 .dock-handle {
   width: 44px;
@@ -436,21 +474,32 @@ html.is-terminal-scroll-mode body {
   align-items: center;
   justify-content: center;
 }
+.side-actions-toggle {
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--border-subtle);
+  touch-action: none;
+  cursor: grab;
+}
+.side-actions.is-dragging .side-actions-toggle { cursor: grabbing; }
+.side-actions-menu {
+  display: grid;
+  gap: 8px;
+}
+.side-actions-menu[hidden] {
+  display: none !important;
+}
+.side-actions-toggle:active,
+.side-action-btn:active,
 .quick-keys-toggle:active,
 .dock-handle:active {
   transform: none;
   border-color: var(--accent);
 }
+.side-actions-toggle.is-active,
 .quick-keys-toggle.is-active,
 .dock-handle.is-active {
   border-color: var(--accent);
   background: var(--accent-dim);
   color: var(--accent);
-}
-.quick-keys-toggle.is-terminal-nearby {
-  align-self: flex-start;
-  z-index: 2;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--border-subtle);
 }
 
 .quick-keys {
@@ -990,6 +1039,22 @@ html.is-terminal-scroll-mode body {
   }
   .session-tabs { gap: 6px; }
   .files-toolbar { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .side-actions {
+    left: max(6px, calc(env(safe-area-inset-left, 0px) + 6px));
+    bottom: calc(10px + var(--safe-bottom));
+    gap: 6px;
+  }
+  .side-actions-toggle,
+  .side-action-btn,
+  .quick-keys-toggle,
+  .dock-handle {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+    min-height: 40px;
+    border-radius: 10px;
+    font-size: 14px;
+  }
   .quick-keys {
     right: max(6px, calc(env(safe-area-inset-right, 0px) + 6px));
     padding: 5px;

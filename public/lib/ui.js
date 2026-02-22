@@ -39,7 +39,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=58';
+const SERVICE_WORKER_URL = '/sw.js?v=60';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const SESSION_TAB_FOCUS_SUPPRESS_MS = 700;
@@ -49,6 +49,12 @@ const QUICK_KEYS_TOGGLE_TEXT_SHOW = '显示快捷键';
 const QUICK_KEYS_TOGGLE_TEXT_HIDE = '隐藏快捷键';
 const DOCK_TOGGLE_TEXT_SHOW = '展开控制面板';
 const DOCK_TOGGLE_TEXT_HIDE = '收起控制面板';
+const SIDE_ACTIONS_TOGGLE_TEXT_SHOW = '展开快捷操作';
+const SIDE_ACTIONS_TOGGLE_TEXT_HIDE = '收起快捷操作';
+const SIDE_ACTIONS_POSITION_STORAGE_KEY = 'c2p_side_actions_pos_v1';
+const SIDE_ACTIONS_DRAG_THRESHOLD_PX = 8;
+const SIDE_ACTIONS_VIEWPORT_MARGIN_PX = 6;
+const SIDE_ACTIONS_CLICK_SUPPRESS_MS = 320;
 const TERMINAL_CONTEXT_LINES = 8;
 const KEYBOARD_INSET_APPLY_DELAY_MS = 120;
 const DOCK_INPUT_PRESERVE_MS = 2000;
@@ -105,6 +111,19 @@ function syncDockHandleVisual(button, expanded) {
   button.setAttribute('aria-label', nextExpanded ? DOCK_TOGGLE_TEXT_HIDE : DOCK_TOGGLE_TEXT_SHOW);
   button.title = nextExpanded ? DOCK_TOGGLE_TEXT_HIDE : DOCK_TOGGLE_TEXT_SHOW;
   button.setAttribute('aria-pressed', nextExpanded ? 'true' : 'false');
+  button.classList.toggle('is-active', nextExpanded);
+}
+
+function syncSideActionsToggleVisual(button, expanded) {
+  if (!button) {
+    return;
+  }
+  const nextExpanded = !!expanded;
+  button.textContent = nextExpanded ? '✕' : '☰';
+  button.setAttribute('aria-label', nextExpanded ? SIDE_ACTIONS_TOGGLE_TEXT_HIDE : SIDE_ACTIONS_TOGGLE_TEXT_SHOW);
+  button.title = nextExpanded ? SIDE_ACTIONS_TOGGLE_TEXT_HIDE : SIDE_ACTIONS_TOGGLE_TEXT_SHOW;
+  button.setAttribute('aria-pressed', nextExpanded ? 'true' : 'false');
+  button.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
   button.classList.toggle('is-active', nextExpanded);
 }
 
@@ -410,16 +429,13 @@ export function createUi({ getControl, getTerm }) {
         document.documentElement.style.setProperty('--terminal-scroll-reserve', '0px');
         return 0;
       }
-      const keyboardDockMode = DOM.dock.classList.contains('is-keyboard-visible');
-      if (!keyboardDockMode && !State.keyboardVisible) {
-        document.documentElement.style.setProperty('--terminal-scroll-reserve', '0px');
-        return 0;
-      }
-
       const dockRect = DOM.dock.getBoundingClientRect();
       const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      const visibleDockHeight = Math.max(0, Math.min(dockRect.height, viewportHeight - Math.max(0, dockRect.top)));
-      const reserve = Math.max(0, Math.ceil(visibleDockHeight || dockRect.height || 0));
+      const visibleDockHeight = Math.max(
+        0,
+        Math.min(dockRect.bottom, viewportHeight) - Math.max(dockRect.top, 0)
+      );
+      const reserve = Math.max(0, Math.ceil(visibleDockHeight));
       document.documentElement.style.setProperty('--terminal-scroll-reserve', `${reserve}px`);
       return reserve;
     },
@@ -443,6 +459,9 @@ export function createUi({ getControl, getTerm }) {
         return;
       }
       const nextVisible = !!visible;
+      if (nextVisible) {
+        SideActions.collapse();
+      }
       const hasRecentDockInput =
         preserveDockInputUntilMs > Date.now() &&
         State.lastDockInputElement &&
@@ -533,10 +552,6 @@ export function createUi({ getControl, getTerm }) {
       if (!DOM.dock || !DOM.dockHandle) {
         return;
       }
-      if (DOM.sessionTabs && !DOM.sessionTabs.contains(DOM.dockHandle)) {
-        DOM.sessionTabs.appendChild(DOM.dockHandle);
-        DOM.sessionTabs.hidden = false;
-      }
       syncDockHandleVisual(DOM.dockHandle, DOM.dock.classList.contains('is-expanded'));
       DOM.dockHandle.addEventListener('click', () => this.toggle());
 
@@ -570,7 +585,337 @@ export function createUi({ getControl, getTerm }) {
         },
         { passive: true }
       );
+      window.addEventListener(
+        'scroll',
+        () => {
+          this.syncTerminalScrollReserve();
+        },
+        { passive: true }
+      );
       this.scheduleMeasure();
+    }
+  };
+
+  const SideActions = {
+    expanded: false,
+    dragState: null,
+    suppressToggleUntilMs: 0,
+
+    readStoredPosition() {
+      try {
+        const raw = window.localStorage.getItem(SIDE_ACTIONS_POSITION_STORAGE_KEY);
+        if (!raw) {
+          return null;
+        }
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') {
+          return null;
+        }
+        const left = Number(parsed.left);
+        const top = Number(parsed.top);
+        if (!Number.isFinite(left) || !Number.isFinite(top)) {
+          return null;
+        }
+        return { left, top };
+      } catch {
+        return null;
+      }
+    },
+
+    writeStoredPosition(position) {
+      if (!position) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(
+          SIDE_ACTIONS_POSITION_STORAGE_KEY,
+          JSON.stringify({
+            left: Math.round(position.left),
+            top: Math.round(position.top)
+          })
+        );
+      } catch {
+        // Ignore storage write failures.
+      }
+    },
+
+    clampPosition(position, size = {}) {
+      const margin = SIDE_ACTIONS_VIEWPORT_MARGIN_PX;
+      const viewportWidth = Math.max(
+        0,
+        Math.round(window.visualViewport ? Number(window.visualViewport.width) || window.innerWidth : window.innerWidth)
+      );
+      const viewportHeight = Math.max(
+        0,
+        Math.round(
+          window.visualViewport ? Number(window.visualViewport.height) || window.innerHeight : window.innerHeight
+        )
+      );
+      const width = Number.isFinite(size.width) && size.width > 0 ? size.width : 44;
+      const height = Number.isFinite(size.height) && size.height > 0 ? size.height : 44;
+      const minLeft = margin;
+      const minTop = margin;
+      const maxLeft = Math.max(minLeft, viewportWidth - width - margin);
+      const maxTop = Math.max(minTop, viewportHeight - height - margin);
+      return {
+        left: Math.min(Math.max(minLeft, Number(position.left) || 0), maxLeft),
+        top: Math.min(Math.max(minTop, Number(position.top) || 0), maxTop)
+      };
+    },
+
+    applyPosition(position, options = {}) {
+      if (!DOM.sideActions || !position) {
+        return null;
+      }
+      const rect = DOM.sideActions.getBoundingClientRect();
+      const clamped = this.clampPosition(position, {
+        width: Number.isFinite(options.width) ? options.width : rect.width,
+        height: Number.isFinite(options.height) ? options.height : rect.height
+      });
+      DOM.sideActions.style.left = `${Math.round(clamped.left)}px`;
+      DOM.sideActions.style.top = `${Math.round(clamped.top)}px`;
+      DOM.sideActions.style.right = 'auto';
+      DOM.sideActions.style.bottom = 'auto';
+      if (options.persist) {
+        this.writeStoredPosition(clamped);
+      }
+      return clamped;
+    },
+
+    restorePosition() {
+      const stored = this.readStoredPosition();
+      if (!stored) {
+        return;
+      }
+      this.applyPosition(stored, { persist: false });
+    },
+
+    nudgeIntoViewport(options = {}) {
+      if (!DOM.sideActions) {
+        return;
+      }
+      if (!DOM.sideActions.style.left || !DOM.sideActions.style.top) {
+        return;
+      }
+      const rect = DOM.sideActions.getBoundingClientRect();
+      this.applyPosition(
+        {
+          left: rect.left,
+          top: rect.top
+        },
+        { persist: !!options.persist, width: rect.width, height: rect.height }
+      );
+    },
+
+    setExpanded(expanded) {
+      const nextExpanded = !!expanded;
+      this.expanded = nextExpanded;
+      if (DOM.sideActions) {
+        DOM.sideActions.classList.toggle('is-expanded', nextExpanded);
+      }
+      if (DOM.sideActionsMenu) {
+        DOM.sideActionsMenu.hidden = !nextExpanded;
+      }
+      syncSideActionsToggleVisual(DOM.sideActionsToggle, nextExpanded);
+    },
+
+    collapse() {
+      this.setExpanded(false);
+    },
+
+    toggle() {
+      this.setExpanded(!this.expanded);
+    },
+
+    beginDrag(event) {
+      if (!DOM.sideActions || !DOM.sideActionsToggle) {
+        return;
+      }
+      if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) {
+        return;
+      }
+      if (typeof event.button === 'number' && event.button !== 0) {
+        return;
+      }
+      const rect = DOM.sideActions.getBoundingClientRect();
+      this.dragState = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        originLeft: rect.left,
+        originTop: rect.top,
+        width: rect.width || 44,
+        height: rect.height || 44,
+        dragging: false
+      };
+      try {
+        DOM.sideActionsToggle.setPointerCapture(event.pointerId);
+      } catch {
+        // Ignore pointer capture failures.
+      }
+    },
+
+    updateDrag(event) {
+      const dragState = this.dragState;
+      if (!dragState || dragState.pointerId !== event.pointerId) {
+        return false;
+      }
+      const deltaX = event.clientX - dragState.startX;
+      const deltaY = event.clientY - dragState.startY;
+      if (!dragState.dragging) {
+        const distance = Math.hypot(deltaX, deltaY);
+        if (distance < SIDE_ACTIONS_DRAG_THRESHOLD_PX) {
+          return false;
+        }
+        dragState.dragging = true;
+        this.suppressToggleUntilMs = Date.now() + SIDE_ACTIONS_CLICK_SUPPRESS_MS;
+        this.collapse();
+        if (DOM.sideActions) {
+          DOM.sideActions.classList.add('is-dragging');
+          const collapsedRect = DOM.sideActions.getBoundingClientRect();
+          dragState.width = collapsedRect.width || dragState.width;
+          dragState.height = collapsedRect.height || dragState.height;
+        }
+      }
+      this.applyPosition(
+        {
+          left: dragState.originLeft + deltaX,
+          top: dragState.originTop + deltaY
+        },
+        {
+          persist: false,
+          width: dragState.width,
+          height: dragState.height
+        }
+      );
+      event.preventDefault();
+      return true;
+    },
+
+    endDrag(event) {
+      const dragState = this.dragState;
+      if (!dragState) {
+        return;
+      }
+      if (event && dragState.pointerId !== event.pointerId) {
+        return;
+      }
+      this.dragState = null;
+      if (DOM.sideActions) {
+        DOM.sideActions.classList.remove('is-dragging');
+      }
+      if (dragState.dragging) {
+        this.nudgeIntoViewport({ persist: true });
+      }
+      if (DOM.sideActionsToggle && event) {
+        try {
+          if (DOM.sideActionsToggle.hasPointerCapture(event.pointerId)) {
+            DOM.sideActionsToggle.releasePointerCapture(event.pointerId);
+          }
+        } catch {
+          // Ignore pointer capture release failures.
+        }
+      }
+    },
+
+    bind() {
+      if (!DOM.sideActions || !DOM.sideActionsToggle || !DOM.sideActionsMenu) {
+        return;
+      }
+      this.setExpanded(false);
+      this.restorePosition();
+
+      DOM.sideActionsToggle.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (this.suppressToggleUntilMs > Date.now()) {
+          return;
+        }
+        this.toggle();
+      });
+      DOM.sideActionsToggle.addEventListener(
+        'pointerdown',
+        (event) => {
+          this.beginDrag(event);
+        },
+        { passive: true }
+      );
+      DOM.sideActionsToggle.addEventListener(
+        'pointermove',
+        (event) => {
+          this.updateDrag(event);
+        },
+        { passive: false }
+      );
+      DOM.sideActionsToggle.addEventListener('pointerup', (event) => {
+        this.endDrag(event);
+      });
+      DOM.sideActionsToggle.addEventListener('pointercancel', (event) => {
+        this.endDrag(event);
+      });
+      DOM.sideActionsToggle.addEventListener('lostpointercapture', (event) => {
+        this.endDrag(event);
+      });
+
+      if (DOM.spawnSessionBtn) {
+        DOM.spawnSessionBtn.addEventListener('click', (event) => {
+          event.preventDefault();
+          this.collapse();
+          Actions.spawn();
+        });
+      }
+
+      if (DOM.quickKeysToggle) {
+        DOM.quickKeysToggle.addEventListener('click', () => {
+          window.setTimeout(() => {
+            this.collapse();
+          }, 0);
+        });
+      }
+
+      if (DOM.dockHandle) {
+        DOM.dockHandle.addEventListener('click', () => {
+          window.setTimeout(() => {
+            this.collapse();
+          }, 0);
+        });
+      }
+
+      document.addEventListener(
+        'pointerdown',
+        (event) => {
+          if (!this.expanded || !DOM.sideActions) {
+            return;
+          }
+          if (event.target instanceof Node && DOM.sideActions.contains(event.target)) {
+            return;
+          }
+          this.collapse();
+        },
+        { passive: true, capture: true }
+      );
+
+      document.addEventListener('keydown', (event) => {
+        if (!this.expanded || event.key !== 'Escape') {
+          return;
+        }
+        this.collapse();
+      });
+      window.addEventListener(
+        'resize',
+        () => {
+          this.nudgeIntoViewport({ persist: true });
+        },
+        { passive: true }
+      );
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener(
+          'resize',
+          () => {
+            this.nudgeIntoViewport({ persist: true });
+          },
+          { passive: true }
+        );
+      }
     }
   };
 
@@ -799,7 +1144,7 @@ export function createUi({ getControl, getTerm }) {
           if (!(event.target instanceof Element)) {
             return;
           }
-          if (!event.target.closest('.session-tab, .session-tab-add')) {
+          if (!event.target.closest('.session-tab')) {
             return;
           }
           suppressTerminalFocusFromSessionToolbar();
@@ -812,14 +1157,8 @@ export function createUi({ getControl, getTerm }) {
           suppressClick = false;
           return;
         }
-        if (event.target instanceof Element && event.target.closest('.session-tab, .session-tab-add')) {
+        if (event.target instanceof Element && event.target.closest('.session-tab')) {
           suppressTerminalFocusFromSessionToolbar();
-        }
-        const addButton = event.target.closest('.session-tab-add');
-        if (addButton) {
-          hideDeleteMenu();
-          Actions.spawn();
-          return;
         }
         const tab = event.target.closest('.session-tab[data-session-id]');
         if (!tab) {
@@ -842,7 +1181,7 @@ export function createUi({ getControl, getTerm }) {
 
       DOM.sessionTabs.addEventListener('pointerdown', (event) => {
         const tab = event.target.closest('.session-tab[data-session-id]');
-        if (!tab || tab.classList.contains('session-tab-add')) {
+        if (!tab) {
           hideDeleteMenu();
           resetLongPressTracking();
           return;
@@ -938,11 +1277,6 @@ export function createUi({ getControl, getTerm }) {
       DOM.sessionTabs.textContent = '';
 
       const fragment = document.createDocumentFragment();
-      if (DOM.dockHandle) {
-        DOM.dockHandle.classList.add('session-toolbar-icon');
-        syncDockHandleVisual(DOM.dockHandle, !!(DOM.dock && DOM.dock.classList.contains('is-expanded')));
-        fragment.appendChild(DOM.dockHandle);
-      }
 
       sessions.forEach((session, index) => {
         const active = session.id === State.currentSessionId;
@@ -985,21 +1319,6 @@ export function createUi({ getControl, getTerm }) {
         }
         fragment.appendChild(item);
       });
-
-      const add = document.createElement('button');
-      add.type = 'button';
-      add.className = 'session-tab session-tab-add session-toolbar-icon';
-      add.setAttribute('aria-label', '添加新终端');
-      add.title = '添加新终端';
-      const addIcon = document.createElement('span');
-      addIcon.className = 'session-tab-icon';
-      addIcon.textContent = '+';
-      add.appendChild(addIcon);
-      const addLabel = document.createElement('span');
-      addLabel.className = 'visually-hidden';
-      addLabel.textContent = '新建终端';
-      add.appendChild(addLabel);
-      fragment.appendChild(add);
 
       DOM.sessionTabs.appendChild(fragment);
       DOM.sessionTabs.hidden = false;
@@ -1306,7 +1625,6 @@ export function createUi({ getControl, getTerm }) {
       this.render();
       this.setVisible(false, { skipMeasure: true, keepTerminalFocus: false });
       if (DOM.quickKeysToggle) {
-        DOM.quickKeysToggle.classList.remove('session-toolbar-icon');
         syncQuickKeysToggleVisual(DOM.quickKeysToggle, this.visible);
       }
       if (DOM.quickKeysToggle) {
@@ -1379,6 +1697,7 @@ export function createUi({ getControl, getTerm }) {
           event.preventDefault();
           this.togglePointerHandledUntilMs = Date.now() + 420;
           this.toggle({ keepTerminalFocus: false, preserveDockInputFocus: preserveInputFocus });
+          SideActions.collapse();
           if (preserveInputFocus) {
             preserveDockInputFocus(dockInputEl);
           }
@@ -1404,6 +1723,7 @@ export function createUi({ getControl, getTerm }) {
           }
           event.preventDefault();
           this.toggle({ keepTerminalFocus: false, preserveDockInputFocus: preserveInputFocus });
+          SideActions.collapse();
           if (preserveInputFocus) {
             preserveDockInputFocus(dockInputEl);
           }
@@ -2010,12 +2330,13 @@ export function createUi({ getControl, getTerm }) {
 
     SessionTabs.bind();
     Dock.bind();
+    Actions.bind();
+    SideActions.bind();
     Dock.updateHeight();
     QuickKeys.bind();
     restoreUiStateSnapshot();
     bindUiStatePersistence();
     bindSessionCopy();
-    Actions.bind();
     const authReady = Auth.init()
       .finally(() => {
         term.init();
