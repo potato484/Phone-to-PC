@@ -1,5 +1,6 @@
 import { DOM } from './state.js';
 import {
+  computeVerticalFallbackLineDelta,
   computeHorizontalScrollUpdate,
   resolveDirectionLock
 } from './gesture-scroll-policy.js';
@@ -21,7 +22,12 @@ const TWO_FINGER_PINCH_SCALE_EPSILON = 0.015;
 const TWO_FINGER_PINCH_UPDATE_MIN_INTERVAL_MS = 24;
 const TWO_FINGER_PARALLEL_MOVE_THRESHOLD_PX = 2;
 const TWO_FINGER_SCROLL_LINE_PX = 14;
-const SINGLE_FINGER_SCROLL_MOVE_EPSILON_PX = 0.5;
+const SINGLE_FINGER_SCROLL_MOVE_EPSILON_PX = 0;
+const SINGLE_FINGER_SCROLL_LINE_PX = 6;
+const SINGLE_FINGER_SCROLL_LINE_PX_NO_VIEWPORT = 0.35;
+const SINGLE_FINGER_FORCE_LINE_DY_NO_VIEWPORT = 0.08;
+const SINGLE_FINGER_FALLBACK_MAX_LINES_PER_MOVE = 4;
+const VIEWPORT_SCROLL_WRITE_EPSILON_PX = 0;
 const TOUCH_SELECTION_AUTO_SCROLL_EDGE_PX = 28;
 const TOUCH_SELECTION_AUTO_SCROLL_INTERVAL_MS = 60;
 const GESTURE_DEBUG_STORAGE_KEY = 'c2p_debug_gestures';
@@ -63,7 +69,7 @@ function scrollViewportByDeltaY(viewportEl, dy) {
     return false;
   }
   const nextScrollTop = Math.max(0, Math.min(maxScrollTop, viewportEl.scrollTop - safeDy));
-  if (Math.abs(nextScrollTop - viewportEl.scrollTop) <= 0.5) {
+  if (Math.abs(nextScrollTop - viewportEl.scrollTop) <= VIEWPORT_SCROLL_WRITE_EPSILON_PX) {
     return false;
   }
   viewportEl.scrollTop = nextScrollTop;
@@ -604,7 +610,7 @@ export function createGestures({ getTerm, toast }) {
     touch,
     viewportEl,
     horizontalScrollTarget = null,
-    blockNativeScroll = false
+    blockNativeScroll = true
   ) {
     if (!(touch && Number.isFinite(touch.clientX) && Number.isFinite(touch.clientY))) {
       singleFingerRejectReason = 'invalid-touch-coordinates';
@@ -694,6 +700,23 @@ export function createGestures({ getTerm, toast }) {
     return true;
   }
 
+  function beginSingleFingerScrollGesture(touch) {
+    resetSwipeTracking();
+    clearLongPress();
+    longPressPoint = {
+      x: touch.clientX,
+      y: touch.clientY
+    };
+    longPressTimer = window.setTimeout(() => {
+      longPressTimer = 0;
+      if (!longPressPoint) {
+        return;
+      }
+      endSingleFingerScrollMode();
+      beginTerminalSelectionOrOpenClipboardMenu(longPressPoint);
+    }, LONG_PRESS_MS);
+  }
+
   function updateSingleFingerScrollMode(touch) {
     if (!singleFingerScrollState) {
       return false;
@@ -725,7 +748,7 @@ export function createGestures({ getTerm, toast }) {
     const dy = currentY - singleFingerScrollState.lastY;
     singleFingerScrollState.lastY = currentY;
     let consumedVertical = false;
-    if (!consumedHorizontal && Math.abs(dy) < SINGLE_FINGER_SCROLL_MOVE_EPSILON_PX) {
+    if (!consumedHorizontal && Math.abs(dy) <= Number.EPSILON) {
       return false;
     }
 
@@ -738,6 +761,8 @@ export function createGestures({ getTerm, toast }) {
     if (viewportEl instanceof HTMLElement) {
       singleFingerScrollState.viewportEl = viewportEl;
     }
+    const viewportMaxScrollTop =
+      viewportEl instanceof HTMLElement ? Math.max(0, viewportEl.scrollHeight - viewportEl.clientHeight) : 0;
 
     if (scrollViewportByDeltaY(singleFingerScrollState.viewportEl, dy)) {
       consumedVertical = true;
@@ -745,26 +770,54 @@ export function createGestures({ getTerm, toast }) {
       return consumedHorizontal || consumedVertical;
     }
 
-    singleFingerScrollState.pendingScrollPx -= dy;
-    const rawLines = singleFingerScrollState.pendingScrollPx / TWO_FINGER_SCROLL_LINE_PX;
-    let lineDelta = 0;
-    if (rawLines > 0) {
-      lineDelta = Math.floor(rawLines);
-    } else if (rawLines < 0) {
-      lineDelta = Math.ceil(rawLines);
+    const fallbackLineUpdate = computeVerticalFallbackLineDelta({
+      pendingScrollPx: singleFingerScrollState.pendingScrollPx,
+      dy,
+      lineStepPx:
+        viewportMaxScrollTop > 0 ? SINGLE_FINGER_SCROLL_LINE_PX : SINGLE_FINGER_SCROLL_LINE_PX_NO_VIEWPORT,
+      maxLinesPerMove: SINGLE_FINGER_FALLBACK_MAX_LINES_PER_MOVE
+    });
+    singleFingerScrollState.pendingScrollPx = fallbackLineUpdate.nextPendingScrollPx;
+    let lineDelta = fallbackLineUpdate.lineDelta;
+    let requestedLineDelta = fallbackLineUpdate.requestedLineDelta;
+    if (!lineDelta && viewportMaxScrollTop <= 0 && Math.abs(dy) >= SINGLE_FINGER_FORCE_LINE_DY_NO_VIEWPORT) {
+      lineDelta = dy < 0 ? 1 : -1;
+      requestedLineDelta = lineDelta;
+      singleFingerScrollState.pendingScrollPx = 0;
     }
     if (!lineDelta) {
-      if (Math.abs(dy) < 1) {
-        return consumedHorizontal;
+      if (Math.abs(dy) >= 1 && isGestureDebugEnabled()) {
+        const now = Date.now();
+        if (now - lastSingleFingerNoConsumeDebugAt > 200) {
+          lastSingleFingerNoConsumeDebugAt = now;
+          debugGesture('single-finger-fallback-wait-threshold', {
+            dy,
+            pendingScrollPx: singleFingerScrollState.pendingScrollPx,
+            requestedLineDelta,
+            fallbackUsed: singleFingerFallbackUsed
+          });
+        }
       }
-      lineDelta = dy < 0 ? 1 : -1;
-      singleFingerScrollState.pendingScrollPx = 0;
-    } else {
-      singleFingerScrollState.pendingScrollPx -= lineDelta * TWO_FINGER_SCROLL_LINE_PX;
-    }
-    if (!term) {
       return consumedHorizontal;
     }
+
+    if (!term) {
+      if (Math.abs(dy) >= 1 && isGestureDebugEnabled()) {
+        const now = Date.now();
+        if (now - lastSingleFingerNoConsumeDebugAt > 200) {
+          lastSingleFingerNoConsumeDebugAt = now;
+          debugGesture('single-finger-fallback-term-missing', {
+            dy,
+            lineDelta,
+            requestedLineDelta,
+            pendingScrollPx: singleFingerScrollState.pendingScrollPx,
+            fallbackUsed: singleFingerFallbackUsed
+          });
+        }
+      }
+      return consumedHorizontal;
+    }
+
     const tryScrollByLines = (deltaLines) => {
       const safeDeltaLines = Number.isFinite(deltaLines) ? Math.trunc(deltaLines) : 0;
       if (!safeDeltaLines) {
@@ -784,6 +837,7 @@ export function createGestures({ getTerm, toast }) {
     };
     if (tryScrollByLines(lineDelta)) {
       consumedVertical = true;
+      singleFingerScrollState.pendingScrollPx = 0;
       return consumedHorizontal || consumedVertical;
     }
     if (typeof term.scrollActivePaneByLines === 'function') {
@@ -800,6 +854,7 @@ export function createGestures({ getTerm, toast }) {
           debugGesture('single-finger-move-not-consumed', {
             dy,
             lineDelta,
+            requestedLineDelta,
             pendingScrollPx: singleFingerScrollState.pendingScrollPx,
             viewportScrollTop: viewportForDebug ? viewportForDebug.scrollTop : null,
             viewportMaxScrollTop,
@@ -813,6 +868,7 @@ export function createGestures({ getTerm, toast }) {
       debugGesture('single-finger-move-no-scroll-api', {
         dy,
         lineDelta,
+        requestedLineDelta,
         fallbackUsed: singleFingerFallbackUsed
       });
     }
@@ -997,23 +1053,29 @@ export function createGestures({ getTerm, toast }) {
         twoFingerState = null;
         const touch = touches[0];
         if (startedInTerminal && beginSingleFingerScrollMode(touch, event.target)) {
-          resetSwipeTracking();
-          clearLongPress();
-          if (startedInTerminal) {
-            longPressPoint = {
-              x: touch.clientX,
-              y: touch.clientY
-            };
-            longPressTimer = window.setTimeout(() => {
-              longPressTimer = 0;
-              if (!longPressPoint) {
-                return;
-              }
-              endSingleFingerScrollMode();
-              beginTerminalSelectionOrOpenClipboardMenu(longPressPoint);
-            }, LONG_PRESS_MS);
-          }
+          beginSingleFingerScrollGesture(touch);
           return;
+        }
+        if (startedInTerminal && singleFingerRejectReason === 'scroll-mode-disabled') {
+          const term = getTerm();
+          const enabled =
+            term && typeof term.setActivePaneTouchScrollMode === 'function'
+              ? term.setActivePaneTouchScrollMode(true)
+              : false;
+          if (enabled && beginSingleFingerScrollMode(touch, event.target)) {
+            debugGesture('single-finger-auto-enable-scroll-mode', {
+              targetTag: event.target instanceof Element ? event.target.tagName : '',
+              targetClass:
+                event.target instanceof Element
+                  ? typeof event.target.className === 'string'
+                    ? event.target.className
+                    : ''
+                  : ''
+            });
+            beginSingleFingerScrollGesture(touch);
+            event.preventDefault();
+            return;
+          }
         }
         if (startedInTerminal) {
           const term = getTerm();

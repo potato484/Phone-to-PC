@@ -1,5 +1,7 @@
 const DEFAULT_EDGE_EPSILON_PX = 0.5;
 const DEFAULT_WRITE_EPSILON_PX = 0.5;
+const DEFAULT_VERTICAL_LINE_STEP_PX = 14;
+const DEFAULT_VERTICAL_MAX_LINES_PER_MOVE = 4;
 
 function toFiniteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -57,6 +59,45 @@ export function computeHorizontalScrollUpdate(scroller, startScrollLeft, dx, opt
     nextScrollLeft,
     canScroll,
     shouldConsume
+  };
+}
+
+export function computeVerticalFallbackLineDelta(options = {}) {
+  const pendingScrollPx = toFiniteNumber(options.pendingScrollPx, 0);
+  const dy = toFiniteNumber(options.dy, 0);
+  const lineStepPx = Math.max(
+    1,
+    toFiniteNumber(options.lineStepPx, DEFAULT_VERTICAL_LINE_STEP_PX)
+  );
+  const maxLinesPerMove = Math.max(
+    1,
+    Math.floor(
+      toFiniteNumber(options.maxLinesPerMove, DEFAULT_VERTICAL_MAX_LINES_PER_MOVE)
+    )
+  );
+
+  const accumulatedPendingScrollPx = pendingScrollPx - dy;
+  const rawLines = accumulatedPendingScrollPx / lineStepPx;
+  let requestedLineDelta = 0;
+  if (rawLines > 0) {
+    requestedLineDelta = Math.floor(rawLines);
+  } else if (rawLines < 0) {
+    requestedLineDelta = Math.ceil(rawLines);
+  }
+
+  if (!requestedLineDelta) {
+    return {
+      lineDelta: 0,
+      requestedLineDelta: 0,
+      nextPendingScrollPx: accumulatedPendingScrollPx
+    };
+  }
+
+  const lineDelta = clamp(requestedLineDelta, -maxLinesPerMove, maxLinesPerMove);
+  return {
+    lineDelta,
+    requestedLineDelta,
+    nextPendingScrollPx: accumulatedPendingScrollPx - lineDelta * lineStepPx
   };
 }
 

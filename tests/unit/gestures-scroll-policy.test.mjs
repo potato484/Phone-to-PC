@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  computeVerticalFallbackLineDelta,
   computeHorizontalScrollUpdate,
   resolveDirectionLock
 } from '../../public/lib/gesture-scroll-policy.js';
@@ -104,4 +105,56 @@ test('resolveDirectionLock recovers from horizontal to vertical when horizontal 
   });
 
   assert.equal(directionLock, 'y');
+});
+
+test('computeVerticalFallbackLineDelta waits until threshold before producing line delta', () => {
+  const update = computeVerticalFallbackLineDelta({
+    pendingScrollPx: 0,
+    dy: -6,
+    lineStepPx: 14,
+    maxLinesPerMove: 4
+  });
+
+  assert.equal(update.lineDelta, 0);
+  assert.equal(update.requestedLineDelta, 0);
+  assert.equal(update.nextPendingScrollPx, 6);
+});
+
+test('computeVerticalFallbackLineDelta emits line delta when accumulated movement crosses threshold', () => {
+  const update = computeVerticalFallbackLineDelta({
+    pendingScrollPx: 6,
+    dy: -10,
+    lineStepPx: 14,
+    maxLinesPerMove: 4
+  });
+
+  assert.equal(update.lineDelta, 1);
+  assert.equal(update.requestedLineDelta, 1);
+  assert.equal(update.nextPendingScrollPx, 2);
+});
+
+test('computeVerticalFallbackLineDelta caps per-move line delta and preserves residual pending distance', () => {
+  const update = computeVerticalFallbackLineDelta({
+    pendingScrollPx: 0,
+    dy: -140,
+    lineStepPx: 14,
+    maxLinesPerMove: 4
+  });
+
+  assert.equal(update.lineDelta, 4);
+  assert.equal(update.requestedLineDelta, 10);
+  assert.equal(update.nextPendingScrollPx, 84);
+});
+
+test('computeVerticalFallbackLineDelta handles reverse direction with the same cap', () => {
+  const update = computeVerticalFallbackLineDelta({
+    pendingScrollPx: 0,
+    dy: 84,
+    lineStepPx: 14,
+    maxLinesPerMove: 4
+  });
+
+  assert.equal(update.lineDelta, -4);
+  assert.equal(update.requestedLineDelta, -6);
+  assert.equal(update.nextPendingScrollPx, -28);
 });

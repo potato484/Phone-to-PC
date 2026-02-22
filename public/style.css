@@ -296,7 +296,7 @@ select {
 .terminal-pane.is-touch-scroll-mode .terminal-pane-terminal,
 .terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm,
 .terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm-viewport {
-  touch-action: pan-y;
+  touch-action: none;
 }
 .terminal-pane.is-touch-scroll-mode .terminal-pane-terminal .xterm-viewport {
   overflow-y: auto;
