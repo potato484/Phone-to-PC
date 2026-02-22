@@ -53,6 +53,8 @@ const DOCK_TOGGLE_TEXT_SHOW = '展开控制面板';
 const DOCK_TOGGLE_TEXT_HIDE = '收起控制面板';
 const SIDE_ACTIONS_TOGGLE_TEXT_SHOW = '展开快捷操作';
 const SIDE_ACTIONS_TOGGLE_TEXT_HIDE = '收起快捷操作';
+const TERMINAL_SCROLL_MODE_TOGGLE_TEXT_ENABLE = '进入滑动模式';
+const TERMINAL_SCROLL_MODE_TOGGLE_TEXT_DISABLE = '退出滑动模式';
 const SIDE_ACTIONS_POSITION_STORAGE_KEY = 'c2p_side_actions_pos_v1';
 const SIDE_ACTIONS_DRAG_THRESHOLD_PX = 8;
 const SIDE_ACTIONS_VIEWPORT_MARGIN_PX = 6;
@@ -127,6 +129,21 @@ function syncSideActionsToggleVisual(button, expanded) {
   button.setAttribute('aria-pressed', nextExpanded ? 'true' : 'false');
   button.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
   button.classList.toggle('is-active', nextExpanded);
+}
+
+function syncTerminalScrollModeToggleVisual(button, enabled) {
+  if (!button) {
+    return;
+  }
+  const nextEnabled = !!enabled;
+  button.textContent = '↕';
+  button.setAttribute(
+    'aria-label',
+    nextEnabled ? TERMINAL_SCROLL_MODE_TOGGLE_TEXT_DISABLE : TERMINAL_SCROLL_MODE_TOGGLE_TEXT_ENABLE
+  );
+  button.title = nextEnabled ? TERMINAL_SCROLL_MODE_TOGGLE_TEXT_DISABLE : TERMINAL_SCROLL_MODE_TOGGLE_TEXT_ENABLE;
+  button.setAttribute('aria-pressed', nextEnabled ? 'true' : 'false');
+  button.classList.toggle('is-active', nextEnabled);
 }
 
 function isTruthyQueryValue(value) {
@@ -344,6 +361,18 @@ export function createUi({ getControl, getTerm }) {
       },
       { passive: true }
     );
+  }
+
+  function syncActivePaneTouchScrollModeToggle() {
+    if (!DOM.terminalScrollModeToggle) {
+      return;
+    }
+    const term = getTerm();
+    const enabled =
+      term && typeof term.isActivePaneTouchScrollModeEnabled === 'function'
+        ? !!term.isActivePaneTouchScrollModeEnabled()
+        : false;
+    syncTerminalScrollModeToggleVisual(DOM.terminalScrollModeToggle, enabled);
   }
 
   const Toast = {
@@ -719,6 +748,9 @@ export function createUi({ getControl, getTerm }) {
         DOM.sideActionsMenu.hidden = !nextExpanded;
       }
       syncSideActionsToggleVisual(DOM.sideActionsToggle, nextExpanded);
+      if (nextExpanded) {
+        syncActivePaneTouchScrollModeToggle();
+      }
     },
 
     collapse() {
@@ -826,6 +858,7 @@ export function createUi({ getControl, getTerm }) {
       }
       this.setExpanded(false);
       this.restorePosition();
+      syncActivePaneTouchScrollModeToggle();
 
       DOM.sideActionsToggle.addEventListener('click', (event) => {
         event.preventDefault();
@@ -863,6 +896,24 @@ export function createUi({ getControl, getTerm }) {
           event.preventDefault();
           this.collapse();
           Actions.spawn();
+        });
+      }
+
+      if (DOM.terminalScrollModeToggle) {
+        DOM.terminalScrollModeToggle.addEventListener('click', (event) => {
+          event.preventDefault();
+          const term = getTerm();
+          if (!term || typeof term.toggleActivePaneTouchScrollMode !== 'function') {
+            Toast.show('终端尚未就绪', 'warn');
+            return;
+          }
+          if (!term.toggleActivePaneTouchScrollMode()) {
+            return;
+          }
+          syncActivePaneTouchScrollModeToggle();
+          window.setTimeout(() => {
+            this.collapse();
+          }, 0);
         });
       }
 
@@ -2364,6 +2415,7 @@ export function createUi({ getControl, getTerm }) {
     }
     StatusBar.setSession(sessionId || '');
     SessionTabs.renderActiveState();
+    syncActivePaneTouchScrollModeToggle();
     setActionButtonsEnabled(!!sessionId && !State.killInFlight);
   }
 
@@ -2396,6 +2448,7 @@ export function createUi({ getControl, getTerm }) {
     Dock.bind();
     Actions.bind();
     SideActions.bind();
+    syncActivePaneTouchScrollModeToggle();
     Dock.updateHeight();
     QuickKeys.bind();
     restoreUiStateSnapshot();
