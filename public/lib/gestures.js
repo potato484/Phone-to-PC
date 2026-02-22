@@ -1,4 +1,5 @@
 import { DOM } from './state.js';
+import { writeClipboardText } from './clipboard.js';
 import {
   computeVerticalFallbackLineDelta,
   computeHorizontalScrollUpdate,
@@ -259,13 +260,13 @@ export function createGestures({ getTerm, toast }) {
           hideMenu();
           return;
         }
-        if (!navigator.clipboard || !navigator.clipboard.writeText) {
-          toast.show('当前环境不支持复制', 'warn');
-          hideMenu();
-          return;
-        }
         try {
-          await navigator.clipboard.writeText(text);
+          const copied = await writeClipboardText(text);
+          if (!copied) {
+            toast.show('复制失败', 'danger');
+            hideMenu();
+            return;
+          }
           if (typeof term.clearActiveSelection === 'function') {
             term.clearActiveSelection();
           }

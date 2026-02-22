@@ -18,6 +18,7 @@ import {
   setActionButtonsEnabled,
   setSignalState
 } from './state.js';
+import { writeClipboardText } from './clipboard.js';
 import { createThemeManager } from './theme.js';
 import {
   clampScrollDeltaToRemaining,
@@ -2360,12 +2361,12 @@ export function createUi({ getControl, getTerm }) {
       if (!sessionId) {
         return;
       }
-      if (!navigator.clipboard || !navigator.clipboard.writeText) {
-        Toast.show('当前环境不支持复制', 'warn');
-        return;
-      }
       try {
-        await navigator.clipboard.writeText(sessionId);
+        const copied = await writeClipboardText(sessionId);
+        if (!copied) {
+          Toast.show('复制会话 ID 失败', 'danger');
+          return;
+        }
         Toast.show('会话 ID 已复制', 'success');
       } catch {
         Toast.show('复制会话 ID 失败', 'danger');
