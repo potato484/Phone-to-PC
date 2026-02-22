@@ -21,6 +21,7 @@ import {
   createWsAuthMessage,
   decodeTerminalFrame,
   encodeTerminalFrame,
+  fetchSessionLogBytes,
   getSessionOffset,
   setSessionOffset,
   persistTerminalFontSize,
@@ -29,7 +30,14 @@ import {
   textEncoder,
   wsUrl
 } from './state.js';
-import { sanitizeInitialAttachData, shouldBlockPrivateModeParams } from './terminal-escape-policy.js';
+import { extractScrollbackClearSequence } from './terminal-clear-policy.js';
+import { parseInputLineForExplicitClear } from './terminal-input-policy.js';
+import { applyReplayDropBarrier } from './terminal-replay-drop-policy.js';
+import {
+  sanitizeInitialAttachData,
+  shouldBlockOscColorQueryPayload,
+  shouldBlockPrivateModeParams
+} from './terminal-escape-policy.js';
 import { resolveMobileTerminalScrollback } from './terminal-scrollback-policy.js';
 
 const DEFAULT_FONT_SIZE = 14;
@@ -38,7 +46,96 @@ const INITIAL_ATTACH_SANITIZE_WINDOW_MS = 120000;
 const DESKTOP_SCROLLBACK = 30000;
 const TERMINAL_WRITE_BATCH_TARGET_BYTES = 24 * 1024;
 const TERMINAL_CLEAR_SCREEN_SEQUENCE = '\x1b[2J\x1b[H';
+const REPLAY_DROP_PENDING_OFFSET = Number.MAX_SAFE_INTEGER;
+const REPLAY_DROP_MAX_HOLD_MS = 1800;
+const REPLAY_DROP_LARGE_GAP_BYTES = 4096;
+const REPLAY_DROP_SMALL_CHUNK_PASSTHROUGH_BYTES = 256;
+const TERMINAL_CLEAR_DEBUG_ENABLED = false;
+const TERMINAL_CLEAR_DEBUG_MAX_EVENTS = 400;
+const TERMINAL_CLEAR_DEBUG_EXPORT_MAX_EVENTS = 300;
 const ENABLE_WEBGL_RENDERER = false;
+
+function emitTerminalClearDebug(eventName, details = {}) {
+  if (!TERMINAL_CLEAR_DEBUG_ENABLED) {
+    return;
+  }
+  const entry = {
+    at: Date.now(),
+    event: eventName,
+    ...details
+  };
+  if (typeof console !== 'undefined' && typeof console.log === 'function') {
+    console.log('[c2p-clear-debug]', entry);
+  }
+  if (typeof window !== 'undefined') {
+    const history = Array.isArray(window.__c2pClearDebugEvents) ? window.__c2pClearDebugEvents : [];
+    history.push(entry);
+    if (history.length > TERMINAL_CLEAR_DEBUG_MAX_EVENTS) {
+      history.splice(0, history.length - TERMINAL_CLEAR_DEBUG_MAX_EVENTS);
+    }
+    window.__c2pClearDebugEvents = history;
+  }
+}
+
+function formatTerminalInputForDebug(data, maxChars = 120) {
+  const text = typeof data === 'string' ? data : '';
+  if (!text) {
+    return '';
+  }
+  const clipped = text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+  return clipped
+    .replace(/\u001b/g, '\\e')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t');
+}
+
+async function exportTerminalClearDebugEvents(toast) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const history = Array.isArray(window.__c2pClearDebugEvents) ? window.__c2pClearDebugEvents : [];
+  const payload = JSON.stringify(history.slice(-TERMINAL_CLEAR_DEBUG_EXPORT_MAX_EVENTS), null, 2);
+  emitTerminalClearDebug('debug-ui.export-clicked', {
+    records: history.length,
+    exportedRecords: Math.min(history.length, TERMINAL_CLEAR_DEBUG_EXPORT_MAX_EVENTS)
+  });
+
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(payload);
+      if (toast && typeof toast.show === 'function') {
+        toast.show(`已复制 clear 调试日志（最近 ${Math.min(history.length, TERMINAL_CLEAR_DEBUG_EXPORT_MAX_EVENTS)} 条）`, 'success');
+      }
+      return;
+    }
+  } catch {
+    // fallback below
+  }
+
+  try {
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'c2p-clear-debug.json';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    if (toast && typeof toast.show === 'function') {
+      toast.show('已下载 clear 调试日志文件', 'success');
+    }
+    return;
+  } catch {
+    // fallback below
+  }
+
+  if (typeof window.prompt === 'function') {
+    window.prompt('复制 clear 调试日志', payload);
+  }
+}
 
 function resolveTerminalScrollback() {
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
@@ -70,6 +167,73 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
   let activePaneId = '';
   let reconnectProgressTimer = 0;
   let suppressPaneFocusUntilMs = 0;
+
+  function logClearDebug(eventName, pane, details = {}) {
+    if (!TERMINAL_CLEAR_DEBUG_ENABLED) {
+      return;
+    }
+    const base = {
+      paneId: pane && pane.id ? pane.id : '',
+      sessionId: pane && pane.sessionId ? pane.sessionId : '',
+      pendingExplicitClearActive: !!(pane && pane.pendingExplicitClearActive),
+      pendingExplicitClearUntil:
+        pane && Number.isFinite(pane.pendingExplicitClearUntil) ? pane.pendingExplicitClearUntil : 0,
+      replayDropUntilOffset:
+        pane && Number.isFinite(pane.replayDropUntilOffset) ? pane.replayDropUntilOffset : 0,
+      replayDropForcedReleaseAt:
+        pane && Number.isFinite(pane.replayDropForcedReleaseAt) ? pane.replayDropForcedReleaseAt : 0,
+      writeInProgress: !!(pane && pane.writeInProgress),
+      writeQueueLength: pane && Array.isArray(pane.writeQueue) ? pane.writeQueue.length : 0,
+      clearAfterWriteComplete: !!(pane && pane.clearAfterWriteComplete)
+    };
+    if (base.sessionId) {
+      base.sessionOffset = getSessionOffset(base.sessionId);
+    }
+    emitTerminalClearDebug(eventName, {
+      ...base,
+      ...details
+    });
+  }
+
+  function mountTerminalClearDebugExportButton() {
+    if (typeof document === 'undefined' || !document.body) {
+      return;
+    }
+    const existingButton = document.getElementById('c2p-clear-debug-export-btn');
+    if (!TERMINAL_CLEAR_DEBUG_ENABLED) {
+      if (existingButton) {
+        existingButton.remove();
+      }
+      return;
+    }
+    if (existingButton) {
+      return;
+    }
+    const button = document.createElement('button');
+    button.id = 'c2p-clear-debug-export-btn';
+    button.type = 'button';
+    button.textContent = '导出Clear日志';
+    button.setAttribute('aria-label', '导出 clear 调试日志');
+    Object.assign(button.style, {
+      position: 'fixed',
+      right: '12px',
+      bottom: '12px',
+      zIndex: '2147483647',
+      border: 'none',
+      borderRadius: '999px',
+      background: '#0b7285',
+      color: '#ffffff',
+      fontSize: '12px',
+      lineHeight: '1',
+      padding: '10px 12px',
+      boxShadow: '0 6px 20px rgba(0, 0, 0, 0.32)'
+    });
+    button.addEventListener('click', () => {
+      void exportTerminalClearDebugEvents(toast);
+    });
+    document.body.appendChild(button);
+  }
+  mountTerminalClearDebugExportButton();
 
   function isPaneFocusSuppressed() {
     return suppressPaneFocusUntilMs > Date.now();
@@ -296,6 +460,19 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     pane.writeQueuedBytes = 0;
     pane.writeInProgress = false;
     pane.writeBackpressured = false;
+    pane.outputControlCarry = '';
+    pane.inputLineBuffer = '';
+    pane.pendingExplicitClearUntil = 0;
+    pane.pendingExplicitClearActive = false;
+    pane.pendingExplicitClearQuietSince = 0;
+    pane.replayDropUntilOffset = 0;
+    pane.replayDropForcedReleaseAt = 0;
+    clearPaneReplayDropForceReleaseTimer(pane);
+    pane.clearAfterWriteComplete = false;
+    pane.replayDropFetchToken =
+      Number.isFinite(pane.replayDropFetchToken) && pane.replayDropFetchToken >= 0
+        ? pane.replayDropFetchToken + 1
+        : 1;
   }
 
   function sendPaneTerminalInput(pane, socket, data) {
@@ -344,7 +521,48 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     if (!data) {
       return true;
     }
+    const containsInputSubmit = data.includes('\r') || data.includes('\n');
+    if (containsInputSubmit || /clear/i.test(data)) {
+      logClearDebug('input.chunk', pane, {
+        inputChars: data.length,
+        inputPreview: formatTerminalInputForDebug(data),
+        inputLineBufferBefore: pane.inputLineBuffer
+      });
+    }
     pane.initialAttachSanitizeUntil = 0;
+    const parsedInput = parseInputLineForExplicitClear(pane.inputLineBuffer, data);
+    pane.inputLineBuffer = parsedInput.lineBuffer;
+    if (parsedInput.clearCommandDetected) {
+      logClearDebug('input.clear.detected', pane, {
+        inputChars: data.length,
+        inputLineBufferLength: pane.inputLineBuffer.length
+      });
+      // Keep pending window disabled to avoid over-clearing fresh prompt/output chunks.
+      pane.pendingExplicitClearActive = false;
+      pane.pendingExplicitClearUntil = 0;
+      pane.pendingExplicitClearQuietSince = 0;
+      if (pane.writeInProgress) {
+        // Let the in-flight old chunk finish, then clear once more deterministically.
+        pane.clearAfterWriteComplete = true;
+        logClearDebug('input.clear.defer-until-write-complete', pane);
+      }
+      clearPaneScrollback(pane, 'input-clear-command');
+      discardPaneQueuedOutputBeforeClear(pane);
+      armReplayDropBarrierForExplicitClear(pane);
+    } else if (pane.pendingExplicitClearActive && parsedInput.lineBuffer.length > 0) {
+      // User started typing a new command, stop clear hold mode immediately.
+      pane.pendingExplicitClearActive = false;
+      pane.pendingExplicitClearUntil = 0;
+      pane.pendingExplicitClearQuietSince = 0;
+      logClearDebug('input.clear.cancelled-by-next-command', pane, {
+        nextLineBufferLength: parsedInput.lineBuffer.length
+      });
+    } else if (containsInputSubmit && !parsedInput.clearCommandDetected) {
+      logClearDebug('input.submit.no-clear-match', pane, {
+        inputPreview: formatTerminalInputForDebug(data),
+        inputLineBufferAfter: parsedInput.lineBuffer
+      });
+    }
 
     if (shouldBypassPaneInputBatching(pane)) {
       if (pane.inputRafId) {
@@ -426,6 +644,121 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     });
   }
 
+  function clearPaneScrollback(pane, reason = '') {
+    if (!pane || !pane.terminal || typeof pane.terminal.clear !== 'function') {
+      return;
+    }
+    logClearDebug('terminal.clear', pane, { reason });
+    pane.terminal.clear();
+    if (typeof pane.terminal.scrollToBottom === 'function') {
+      pane.terminal.scrollToBottom();
+    }
+    schedulePaneRefresh(pane);
+  }
+
+  function clearPaneReplayDropForceReleaseTimer(pane) {
+    if (!pane || !pane.replayDropForceReleaseTimer) {
+      return;
+    }
+    window.clearTimeout(pane.replayDropForceReleaseTimer);
+    pane.replayDropForceReleaseTimer = 0;
+  }
+
+  function releaseReplayDropBarrier(pane, reason, details = {}) {
+    if (!pane) {
+      return;
+    }
+    clearPaneReplayDropForceReleaseTimer(pane);
+    pane.replayDropUntilOffset = 0;
+    pane.replayDropForcedReleaseAt = 0;
+    logClearDebug(reason, pane, details);
+    clearPaneScrollback(pane, reason);
+    discardPaneQueuedOutputBeforeClear(pane);
+  }
+
+  function armReplayDropBarrierForExplicitClear(pane) {
+    if (!pane || !pane.sessionId) {
+      return;
+    }
+    const sessionId = pane.sessionId;
+    const fetchToken =
+      Number.isFinite(pane.replayDropFetchToken) && pane.replayDropFetchToken >= 0
+        ? pane.replayDropFetchToken + 1
+        : 1;
+    pane.replayDropFetchToken = fetchToken;
+    const currentOffset = getSessionOffset(sessionId);
+    // Enter drop mode immediately so in-flight replay chunks cannot leak through.
+    pane.replayDropUntilOffset = REPLAY_DROP_PENDING_OFFSET;
+    pane.replayDropForcedReleaseAt = Date.now() + REPLAY_DROP_MAX_HOLD_MS;
+    clearPaneReplayDropForceReleaseTimer(pane);
+    pane.replayDropForceReleaseTimer = window.setTimeout(() => {
+      if (!pane || !panes.has(pane.id)) {
+        return;
+      }
+      if (pane.replayDropFetchToken !== fetchToken) {
+        return;
+      }
+      if (pane.sessionId !== sessionId) {
+        return;
+      }
+      if (!(pane.replayDropUntilOffset > 0)) {
+        return;
+      }
+      releaseReplayDropBarrier(pane, 'replay-drop.force-release-timeout', {
+        now: Date.now(),
+        replayDropForcedReleaseAt: pane.replayDropForcedReleaseAt
+      });
+    }, REPLAY_DROP_MAX_HOLD_MS);
+    logClearDebug('replay-drop.arm', pane, {
+      fetchToken,
+      sessionOffsetAtArm: currentOffset,
+      replayDropUntilOffset: pane.replayDropUntilOffset,
+      replayDropForcedReleaseAt: pane.replayDropForcedReleaseAt
+    });
+
+    void fetchSessionLogBytes(sessionId)
+      .then((logBytes) => {
+        if (!pane || !panes.has(pane.id)) {
+          return;
+        }
+        if (pane.replayDropFetchToken !== fetchToken) {
+          return;
+        }
+        if (pane.sessionId !== sessionId) {
+          return;
+        }
+        const safeLogBytes = Number.isFinite(logBytes) && logBytes > 0 ? Math.floor(logBytes) : 0;
+        const currentOffset = getSessionOffset(sessionId);
+        const nextDropUntil = Math.max(currentOffset, safeLogBytes);
+        logClearDebug('replay-drop.fetch.success', pane, {
+          fetchToken,
+          fetchedLogBytes: safeLogBytes,
+          sessionOffsetAtFetch: currentOffset,
+          nextDropUntil
+        });
+        pane.replayDropUntilOffset = nextDropUntil;
+        if (pane.replayDropUntilOffset <= currentOffset) {
+          releaseReplayDropBarrier(pane, 'replay-drop-fetch-already-caught-up');
+        }
+      })
+      .catch((error) => {
+        if (!pane || !panes.has(pane.id)) {
+          return;
+        }
+        if (pane.replayDropFetchToken !== fetchToken) {
+          return;
+        }
+        if (pane.sessionId !== sessionId) {
+          return;
+        }
+        logClearDebug('replay-drop.fetch.failed', pane, {
+          fetchToken,
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+        releaseReplayDropBarrier(pane, 'replay-drop-fetch-failed');
+      });
+  }
+
   function takePaneOutputBatch(pane) {
     const firstChunk = pane.writeQueue.shift();
     if (!firstChunk) {
@@ -436,6 +769,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     let queueBytes = firstChunk.queueBytes;
     let logBytes = firstChunk.logBytes;
     let sessionId = firstChunk.sessionId;
+    let clearScrollback = !!firstChunk.clearScrollback;
 
     while (pane.writeQueue.length > 0 && queueBytes < TERMINAL_WRITE_BATCH_TARGET_BYTES) {
       const nextChunk = pane.writeQueue[0];
@@ -456,13 +790,17 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       if (!sessionId && nextChunk.sessionId) {
         sessionId = nextChunk.sessionId;
       }
+      if (nextChunk.clearScrollback) {
+        clearScrollback = true;
+      }
     }
 
     return {
       data: dataParts.length === 1 ? dataParts[0] : dataParts.join(''),
       queueBytes,
       logBytes,
-      sessionId
+      sessionId,
+      clearScrollback
     };
   }
 
@@ -480,9 +818,32 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
 
     pane.writeInProgress = true;
     pane.writeQueuedBytes = Math.max(0, pane.writeQueuedBytes - chunk.queueBytes);
-    pane.terminal.write(chunk.data, () => {
+    logClearDebug('output.write.start', pane, {
+      chunkQueueBytes: chunk.queueBytes,
+      chunkLogBytes: chunk.logBytes,
+      chunkTextChars: chunk.data ? chunk.data.length : 0,
+      chunkClearScrollback: !!chunk.clearScrollback
+    });
+    const finalizeChunk = () => {
       pane.writeInProgress = false;
-      schedulePaneRefresh(pane);
+      const clearAfterWriteComplete = pane.clearAfterWriteComplete;
+      if (clearAfterWriteComplete) {
+        pane.clearAfterWriteComplete = false;
+        logClearDebug('output.write.complete-triggered-clear-after-write', pane, {
+          chunkClearScrollback: !!chunk.clearScrollback,
+          chunkLogBytes: chunk.logBytes
+        });
+      }
+      if (chunk.clearScrollback || clearAfterWriteComplete) {
+        const clearReason = chunk.clearScrollback
+          ? clearAfterWriteComplete
+            ? 'output-chunk-clear-and-after-write'
+            : 'output-chunk-clear'
+          : 'after-write-complete';
+        clearPaneScrollback(pane, clearReason);
+      } else {
+        schedulePaneRefresh(pane);
+      }
       if (chunk.sessionId && chunk.logBytes > 0) {
         addSessionOffset(chunk.sessionId, chunk.logBytes);
       }
@@ -490,25 +851,81 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         pane.writeBackpressured = false;
       }
       if (pane.writeQueue.length === 0) {
+        logClearDebug('output.write.complete', pane, {
+          chunkLogBytes: chunk.logBytes,
+          queueEmpty: true
+        });
         return;
       }
+      logClearDebug('output.write.complete', pane, {
+        chunkLogBytes: chunk.logBytes,
+        queueEmpty: false,
+        queueLengthAfterWrite: pane.writeQueue.length
+      });
       if (pane.writeBackpressured) {
         schedulePaneOutputDrain(pane);
         return;
       }
       drainPaneOutput(pane);
+    };
+    if (chunk.data) {
+      pane.terminal.write(chunk.data, finalizeChunk);
+      return;
+    }
+    finalizeChunk();
+  }
+
+  function discardPaneQueuedOutputBeforeClear(pane) {
+    if (!pane || !Array.isArray(pane.writeQueue) || pane.writeQueue.length === 0) {
+      return;
+    }
+    const droppedQueueEntries = pane.writeQueue.length;
+    const droppedLogBytesBySession = new Map();
+    pane.writeQueue.forEach((entry) => {
+      if (!entry || !entry.sessionId || !Number.isFinite(entry.logBytes) || entry.logBytes <= 0) {
+        return;
+      }
+      const previous = droppedLogBytesBySession.get(entry.sessionId) || 0;
+      droppedLogBytesBySession.set(entry.sessionId, previous + Math.floor(entry.logBytes));
+    });
+    pane.writeQueue.length = 0;
+    pane.writeQueuedBytes = 0;
+    pane.writeBackpressured = false;
+    const droppedLogBytes = {};
+    droppedLogBytesBySession.forEach((logBytes, sessionId) => {
+      droppedLogBytes[sessionId] = logBytes;
+      addSessionOffset(sessionId, logBytes);
+    });
+    logClearDebug('output.queue.discard-before-clear', pane, {
+      droppedQueueEntries,
+      droppedLogBytes
     });
   }
 
   function queuePaneOutput(pane, data, options = {}) {
-    if (!pane.terminal || !data) {
+    if (!pane.terminal) {
       return;
     }
+    const textData = typeof data === 'string' ? data : '';
+    const clearScrollback = !!options.clearScrollback;
+    const logBytes = Number.isFinite(options.logBytes) ? Math.max(0, Math.floor(options.logBytes)) : 0;
+    if (!textData && !clearScrollback && logBytes <= 0) {
+      return;
+    }
+    if (clearScrollback) {
+      // Once a clear-scrollback command arrives, queued pre-clear output is obsolete.
+      logClearDebug('output.queue.enqueue-with-clear', pane, {
+        textChars: textData.length,
+        logBytes
+      });
+      discardPaneQueuedOutputBeforeClear(pane);
+    }
     const queueEntry = {
-      data,
-      queueBytes: data.length,
+      data: textData,
+      queueBytes: textData.length,
       sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
-      logBytes: Number.isFinite(options.logBytes) ? Math.max(0, Math.floor(options.logBytes)) : 0
+      logBytes,
+      clearScrollback
     };
     pane.writeQueue.push(queueEntry);
     pane.writeQueuedBytes += queueEntry.queueBytes;
@@ -680,10 +1097,107 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
           data = textDecoder.decode(event.data);
         }
       }
-      if (data) {
-        const sanitizedData = sanitizeInitialAttachData(data, pane.initialAttachSanitizeUntil);
-        if (sanitizedData) {
-          queuePaneOutput(pane, sanitizedData, { sessionId, logBytes });
+      if (data || logBytes > 0) {
+        if (
+          pane.replayDropUntilOffset > 0 &&
+          Number.isFinite(pane.replayDropForcedReleaseAt) &&
+          pane.replayDropForcedReleaseAt > 0 &&
+          Date.now() >= pane.replayDropForcedReleaseAt
+        ) {
+          releaseReplayDropBarrier(pane, 'replay-drop.force-release-timeout', {
+            now: Date.now(),
+            replayDropForcedReleaseAt: pane.replayDropForcedReleaseAt
+          });
+        }
+        if (pane.replayDropUntilOffset > 0 || pane.pendingExplicitClearActive) {
+          logClearDebug('output.chunk.received', pane, {
+            incomingLogBytes: logBytes,
+            incomingTextChars: data ? data.length : 0
+          });
+        }
+        if (pane.replayDropUntilOffset > 0 && logBytes > 0) {
+          const currentOffset = getSessionOffset(sessionId);
+          const gapBytes = Math.max(0, pane.replayDropUntilOffset - currentOffset);
+          if (
+            gapBytes > REPLAY_DROP_LARGE_GAP_BYTES &&
+            logBytes <= REPLAY_DROP_SMALL_CHUNK_PASSTHROUGH_BYTES
+          ) {
+            // Large inferred gap can be stale; do not swallow tiny prompt-sized chunks.
+            releaseReplayDropBarrier(pane, 'replay-drop.release-small-chunk', {
+              currentOffset,
+              gapBytes,
+              incomingLogBytes: logBytes,
+              incomingTextChars: data ? data.length : 0
+            });
+          }
+        }
+        if (pane.replayDropUntilOffset > 0 && logBytes > 0) {
+          const currentOffset = getSessionOffset(sessionId);
+          logClearDebug('replay-drop.apply.before', pane, {
+            currentOffset,
+            dropUntilOffset: pane.replayDropUntilOffset,
+            incomingLogBytes: logBytes,
+            incomingTextChars: data ? data.length : 0
+          });
+          const replayDrop = applyReplayDropBarrier(data, {
+            logBytes,
+            currentOffset,
+            dropUntilOffset: pane.replayDropUntilOffset,
+            encodeText: (text) => textEncoder.encode(text),
+            decodeBytes: (bytes) => textDecoder.decode(bytes)
+          });
+          if (replayDrop.droppedLogBytes > 0) {
+            addSessionOffset(sessionId, replayDrop.droppedLogBytes);
+          }
+          logClearDebug('replay-drop.apply.after', pane, {
+            droppedLogBytes: replayDrop.droppedLogBytes,
+            remainingLogBytes: replayDrop.logBytes,
+            remainingTextChars: replayDrop.text ? replayDrop.text.length : 0,
+            barrierReached: replayDrop.barrierReached
+          });
+          if (replayDrop.barrierReached) {
+            // Finalize explicit clear after replay drop catches up.
+            releaseReplayDropBarrier(pane, 'replay-drop.barrier-reached', {
+              droppedLogBytes: replayDrop.droppedLogBytes
+            });
+          }
+          data = replayDrop.text;
+          logBytes = replayDrop.logBytes;
+        }
+
+        if (!data && logBytes <= 0) {
+          if (pane.pendingExplicitClearActive || pane.replayDropUntilOffset > 0) {
+            logClearDebug('output.chunk.fully-dropped', pane);
+          }
+          return;
+        }
+
+        if (data) {
+          const sanitizedData = sanitizeInitialAttachData(data, pane.initialAttachSanitizeUntil);
+          if (sanitizedData || pane.outputControlCarry) {
+            const terminalOutput = extractScrollbackClearSequence(sanitizedData || '', pane.outputControlCarry);
+            pane.outputControlCarry = terminalOutput.carry;
+            const shouldClearScrollback = terminalOutput.shouldClearScrollback;
+            if (terminalOutput.text || shouldClearScrollback) {
+              if (shouldClearScrollback) {
+                logClearDebug('output.chunk.queue-for-clear', pane, {
+                  shouldClearScrollback,
+                  outputTextChars: terminalOutput.text ? terminalOutput.text.length : 0,
+                  outputCarryChars: pane.outputControlCarry.length,
+                  outputLogBytes: logBytes
+                });
+              }
+              queuePaneOutput(pane, terminalOutput.text, {
+                sessionId,
+                logBytes,
+                clearScrollback: shouldClearScrollback
+              });
+            } else if (logBytes > 0) {
+              addSessionOffset(sessionId, logBytes);
+            }
+          } else if (logBytes > 0) {
+            addSessionOffset(sessionId, logBytes);
+          }
         } else if (logBytes > 0) {
           addSessionOffset(sessionId, logBytes);
         }
@@ -889,6 +1403,22 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       };
       registerCsiGuard({ prefix: '?', final: 'h' }, (params) => shouldBlockPrivateModeParams(params));
       registerCsiGuard({ prefix: '?', final: 'l' }, (params) => shouldBlockPrivateModeParams(params));
+      if (typeof terminal.parser.registerOscHandler === 'function') {
+        const registerOscGuard = (identifier, handler) => {
+          try {
+            const disposable = terminal.parser.registerOscHandler(identifier, handler);
+            if (disposable && typeof disposable.dispose === 'function') {
+              parserGuardDisposables.push(disposable);
+            }
+          } catch {
+            // Ignore parser registration failures and keep terminal functional.
+          }
+        };
+        const blockOscColorQuery = (payload) => shouldBlockOscColorQueryPayload(payload);
+        registerOscGuard(10, blockOscColorQuery);
+        registerOscGuard(11, blockOscColorQuery);
+        registerOscGuard(12, blockOscColorQuery);
+      }
       if (typeof terminal.parser.registerEscHandler === 'function') {
         try {
           const disposable = terminal.parser.registerEscHandler({ final: 'c' }, () => true);
@@ -948,6 +1478,16 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       reconnectStartedAt: 0,
       reconnectTimer: 0,
       initialAttachSanitizeUntil: 0,
+      outputControlCarry: '',
+      inputLineBuffer: '',
+      pendingExplicitClearUntil: 0,
+      pendingExplicitClearActive: false,
+      pendingExplicitClearQuietSince: 0,
+      replayDropUntilOffset: 0,
+      replayDropForcedReleaseAt: 0,
+      replayDropForceReleaseTimer: 0,
+      clearAfterWriteComplete: false,
+      replayDropFetchToken: 0,
       connectSeq: 0,
       sessionId: '',
       cwd: '',
