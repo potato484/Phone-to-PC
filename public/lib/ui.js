@@ -1380,7 +1380,8 @@ export function createUi({ getControl, getTerm }) {
         ? control.send({
             type: 'spawn',
             cli: 'shell',
-            cwd: preferredCwd || State.cwd || undefined,
+            // Keep terminal default cwd controlled by server (typically Linux home "~").
+            cwd: preferredCwd || undefined,
             cols: State.terminal.cols,
             rows: State.terminal.rows
           })
