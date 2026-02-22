@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { sanitizeInitialAttachData, shouldBlockPrivateModeParams } from '../../public/lib/terminal-escape-policy.js';
+import {
+  sanitizeInitialAttachData,
+  shouldBlockOscColorQueryPayload,
+  shouldBlockPrivateModeParams
+} from '../../public/lib/terminal-escape-policy.js';
 
 test('sanitizeInitialAttachData keeps CSI 3J clear scrollback sequence', () => {
   const source = `before\x1b[3Jafter`;
@@ -44,4 +48,15 @@ test('shouldBlockPrivateModeParams supports parser-like parameter containers', (
 test('shouldBlockPrivateModeParams ignores unrelated values', () => {
   assert.equal(shouldBlockPrivateModeParams([3]), false);
   assert.equal(shouldBlockPrivateModeParams([]), false);
+});
+
+test('shouldBlockOscColorQueryPayload detects OSC query payloads', () => {
+  assert.equal(shouldBlockOscColorQueryPayload('?'), true);
+  assert.equal(shouldBlockOscColorQueryPayload('rgb:cdcd/d6d6/f4f4;?'), true);
+});
+
+test('shouldBlockOscColorQueryPayload keeps regular color payloads', () => {
+  assert.equal(shouldBlockOscColorQueryPayload('rgb:cdcd/d6d6/f4f4'), false);
+  assert.equal(shouldBlockOscColorQueryPayload('#cdd6f4'), false);
+  assert.equal(shouldBlockOscColorQueryPayload(''), false);
 });

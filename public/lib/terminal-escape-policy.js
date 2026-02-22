@@ -51,3 +51,10 @@ export function shouldBlockPrivateModeParams(params) {
   }
   return parsedValues.some((value) => BLOCKED_TERMINAL_PRIVATE_MODES.has(Number(value)));
 }
+
+export function shouldBlockOscColorQueryPayload(payload) {
+  if (typeof payload !== 'string' || payload.length === 0) {
+    return false;
+  }
+  return payload.split(';').some((entry) => entry.trim() === '?');
+}
