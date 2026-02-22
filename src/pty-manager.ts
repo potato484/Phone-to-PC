@@ -18,6 +18,16 @@ const OSC52_ST = '\u001b\\';
 const OSC52_MAX_CARRY_CHARS = 8192;
 const OSC52_MAX_TEXT_BYTES = 128 * 1024;
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9-]+$/;
+const TMUX_STATUS_BAR_MODE = (process.env.C2P_TMUX_STATUS_BAR ?? 'hide').trim().toLowerCase();
+
+function shouldHideTmuxStatusBar(): boolean {
+  return !(
+    TMUX_STATUS_BAR_MODE === 'show' ||
+    TMUX_STATUS_BAR_MODE === 'on' ||
+    TMUX_STATUS_BAR_MODE === '1' ||
+    TMUX_STATUS_BAR_MODE === 'true'
+  );
+}
 
 export interface SpawnOptions {
   id: string;
@@ -507,6 +517,16 @@ export class PtyManager {
     });
   }
 
+  private applySessionDisplayOptions(sessionId: string): void {
+    if (!shouldHideTmuxStatusBar()) {
+      return;
+    }
+    this.runTmux(['set-option', '-t', toTmuxSessionName(sessionId), 'status', 'off'], {
+      allowFailure: true,
+      allowNoServer: true
+    });
+  }
+
   private addOrUpdateSession(info: SessionInfo): void {
     const logPath = this.resolveSessionLogPath(info.id);
     if (!logPath) {
@@ -518,6 +538,7 @@ export class PtyManager {
       },
       logPath
     });
+    this.applySessionDisplayOptions(info.id);
     this.ensureSessionLogPipe(info.id, logPath);
   }
 
