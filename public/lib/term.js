@@ -37,6 +37,7 @@ const RECONNECT_PROGRESS_TICK_MS = 80;
 const INITIAL_ATTACH_SANITIZE_WINDOW_MS = 120000;
 const INITIAL_ATTACH_ALT_SCREEN_ENTER_RE = /\x1b(?:\x1b)?\[\?(?:47|1047|1049)(?:;[0-9]+)*h/g;
 const INITIAL_ATTACH_CLEAR_SCROLLBACK_RE = /\x1b(?:\x1b)?\[3J/g;
+const INITIAL_ATTACH_CURSOR_POSITION_QUERY_RE = /\x1b(?:\x1b)?\[\??6n/g;
 const INITIAL_ATTACH_RESET_RE = /\x1bc/g;
 const BLOCKED_TERMINAL_PRIVATE_MODES = new Set([47, 1047, 1048, 1049]);
 const DESKTOP_SCROLLBACK = 30000;
@@ -77,6 +78,7 @@ function sanitizeInitialAttachData(data, sanitizeUntilMs) {
   return data
     .replace(INITIAL_ATTACH_ALT_SCREEN_ENTER_RE, '')
     .replace(INITIAL_ATTACH_CLEAR_SCROLLBACK_RE, '')
+    .replace(INITIAL_ATTACH_CURSOR_POSITION_QUERY_RE, '')
     .replace(INITIAL_ATTACH_RESET_RE, '');
 }
 
@@ -129,7 +131,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
   const paneOrder = [];
   let paneCounter = 0;
   let activePaneId = '';
-  let touchScrollModePaneId = '';
   let reconnectProgressTimer = 0;
   let suppressPaneFocusUntilMs = 0;
 
@@ -154,7 +155,12 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
   }
 
   function getActivePane() {
-    return getPane(activePaneId);
+    const activePane = getPane(activePaneId);
+    if (activePane) {
+      return activePane;
+    }
+    const fallbackPaneId = paneOrder[0] || '';
+    return getPane(fallbackPaneId);
   }
 
   function setPaneConnectionState(pane, state) {
@@ -162,51 +168,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       return;
     }
     pane.rootEl.dataset.connection = state;
-  }
-
-  function isPaneTouchScrollModeEnabled(pane) {
-    return !!(pane && pane.id && pane.id === touchScrollModePaneId);
-  }
-
-  function syncTouchScrollModeUi() {
-    panes.forEach((pane) => {
-      const enabled = isPaneTouchScrollModeEnabled(pane);
-      if (pane.rootEl) {
-        pane.rootEl.classList.toggle('is-touch-scroll-mode', enabled);
-      }
-      if (pane.scrollToggleBtnEl) {
-        pane.scrollToggleBtnEl.classList.toggle('is-active', enabled);
-        pane.scrollToggleBtnEl.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-        pane.scrollToggleBtnEl.setAttribute('aria-label', enabled ? '退出滚动模式' : '进入滚动模式');
-        pane.scrollToggleBtnEl.title = enabled ? '退出滚动模式' : '进入滚动模式';
-      }
-    });
-    document.documentElement.classList.toggle('is-terminal-scroll-mode', !!touchScrollModePaneId);
-  }
-
-  function setPaneTouchScrollMode(pane, enabled) {
-    if (!pane) {
-      return false;
-    }
-    const nextEnabled = !!enabled;
-    touchScrollModePaneId = nextEnabled ? pane.id : touchScrollModePaneId === pane.id ? '' : touchScrollModePaneId;
-    syncTouchScrollModeUi();
-    if (nextEnabled) {
-      // Ensure viewport metrics are ready immediately after entering touch scroll mode.
-      schedulePaneRefresh(pane);
-      window.requestAnimationFrame(() => {
-        if (!pane || !panes.has(pane.id) || !isPaneTouchScrollModeEnabled(pane)) {
-          return;
-        }
-        if (!pane.terminal || !pane.fitAddon) {
-          return;
-        }
-        pane.fitAddon.fit();
-        sendResizeForPane(pane);
-        schedulePaneRefresh(pane);
-      });
-    }
-    return true;
   }
 
   function updatePaneTitle(pane) {
@@ -315,7 +276,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     panes.forEach((entry) => {
       entry.rootEl.classList.toggle('is-active', entry.id === pane.id);
     });
-    syncTouchScrollModeUi();
     if (options.focus !== false && !isPaneFocusSuppressed()) {
       pane.terminal.focus();
     }
@@ -1110,14 +1070,12 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       const target = event.target;
       const shouldFocus =
         target instanceof Element &&
-        !!target.closest('.terminal-pane-terminal, .xterm, .xterm-helper-textarea') &&
-        !isPaneTouchScrollModeEnabled(pane);
+        !!target.closest('.terminal-pane-terminal, .xterm, .xterm-helper-textarea');
       setActivePane(pane.id, { focus: shouldFocus });
     });
 
     panes.set(pane.id, pane);
     paneOrder.push(pane.id);
-    syncTouchScrollModeUi();
     setPaneConnectionState(pane, 'idle');
     updatePaneTitle(pane);
     updatePaneOrderingAndLayout();
@@ -1153,9 +1111,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       });
       pane.parserGuardDisposables.length = 0;
     }
-    if (touchScrollModePaneId === pane.id) {
-      touchScrollModePaneId = '';
-    }
     pane.terminal.dispose();
     pane.rootEl.remove();
     panes.delete(paneId);
@@ -1171,7 +1126,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     } else {
       syncLegacyStateFromActivePane();
     }
-    syncTouchScrollModeUi();
     updatePaneOrderingAndLayout();
     return true;
   }
@@ -1686,25 +1640,15 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     },
 
     isActivePaneTouchScrollModeEnabled() {
-      const pane = getActivePane();
-      return isPaneTouchScrollModeEnabled(pane);
+      return !!getActivePane();
     },
 
-    setActivePaneTouchScrollMode(enabled) {
-      const pane = getActivePane();
-      if (!pane) {
-        return false;
-      }
-      return setPaneTouchScrollMode(pane, enabled);
+    setActivePaneTouchScrollMode() {
+      return !!getActivePane();
     },
 
     toggleActivePaneTouchScrollMode() {
-      const pane = getActivePane();
-      if (!pane) {
-        return false;
-      }
-      const nextEnabled = !isPaneTouchScrollModeEnabled(pane);
-      return setPaneTouchScrollMode(pane, nextEnabled);
+      return !!getActivePane();
     },
 
     getActivePaneViewportElement() {
