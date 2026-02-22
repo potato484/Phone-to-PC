@@ -29,16 +29,12 @@ import {
   textEncoder,
   wsUrl
 } from './state.js';
+import { sanitizeInitialAttachData, shouldBlockPrivateModeParams } from './terminal-escape-policy.js';
 import { resolveMobileTerminalScrollback } from './terminal-scrollback-policy.js';
 
 const DEFAULT_FONT_SIZE = 14;
 const RECONNECT_PROGRESS_TICK_MS = 80;
 const INITIAL_ATTACH_SANITIZE_WINDOW_MS = 120000;
-const INITIAL_ATTACH_ALT_SCREEN_ENTER_RE = /\x1b(?:\x1b)?\[\?(?:47|1047|1049)(?:;[0-9]+)*h/g;
-const INITIAL_ATTACH_CLEAR_SCROLLBACK_RE = /\x1b(?:\x1b)?\[3J/g;
-const INITIAL_ATTACH_CURSOR_POSITION_QUERY_RE = /\x1b(?:\x1b)?\[\??6n/g;
-const INITIAL_ATTACH_RESET_RE = /\x1bc/g;
-const BLOCKED_TERMINAL_PRIVATE_MODES = new Set([47, 1047, 1048, 1049]);
 const DESKTOP_SCROLLBACK = 30000;
 const TERMINAL_WRITE_BATCH_TARGET_BYTES = 24 * 1024;
 const TERMINAL_CLEAR_SCREEN_SEQUENCE = '\x1b[2J\x1b[H';
@@ -65,64 +61,6 @@ function withReconnectJitter(baseDelayMs) {
   const safeBase = Math.max(300, Math.floor(baseDelayMs));
   const jitter = Math.round(safeBase * ((Math.random() * 0.4) - 0.2));
   return Math.max(300, safeBase + jitter);
-}
-
-function sanitizeInitialAttachData(data, sanitizeUntilMs) {
-  if (typeof data !== 'string' || !data || data.indexOf('\x1b') < 0) {
-    return data;
-  }
-  if (!Number.isFinite(sanitizeUntilMs) || sanitizeUntilMs <= 0 || Date.now() > sanitizeUntilMs) {
-    return data;
-  }
-  return data
-    .replace(INITIAL_ATTACH_ALT_SCREEN_ENTER_RE, '')
-    .replace(INITIAL_ATTACH_CLEAR_SCROLLBACK_RE, '')
-    .replace(INITIAL_ATTACH_CURSOR_POSITION_QUERY_RE, '')
-    .replace(INITIAL_ATTACH_RESET_RE, '');
-}
-
-function normalizeParserParams(params) {
-  if (Array.isArray(params)) {
-    return params;
-  }
-  if (!params || typeof params !== 'object') {
-    return [];
-  }
-  if (typeof params.toArray === 'function') {
-    try {
-      const values = params.toArray();
-      return Array.isArray(values) ? values : [];
-    } catch {
-      return [];
-    }
-  }
-  if (Array.isArray(params.params)) {
-    return params.params;
-  }
-  if (typeof params.length === 'number' && typeof params.get === 'function') {
-    const values = [];
-    for (let index = 0; index < params.length; index += 1) {
-      values.push(params.get(index));
-    }
-    return values;
-  }
-  return [];
-}
-
-function shouldBlockPrivateModeParams(params) {
-  const parsedValues = normalizeParserParams(params);
-  if (parsedValues.length === 0) {
-    return false;
-  }
-  return parsedValues.some((value) => BLOCKED_TERMINAL_PRIVATE_MODES.has(Number(value)));
-}
-
-function shouldBlockClearScrollbackParams(params) {
-  const parsedValues = normalizeParserParams(params);
-  if (parsedValues.length === 0) {
-    return false;
-  }
-  return parsedValues.some((value) => Number(value) === 3);
 }
 
 export function createTerm({ getControl, statusBar, toast, onActiveSessionChange }) {
@@ -951,7 +889,6 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       };
       registerCsiGuard({ prefix: '?', final: 'h' }, (params) => shouldBlockPrivateModeParams(params));
       registerCsiGuard({ prefix: '?', final: 'l' }, (params) => shouldBlockPrivateModeParams(params));
-      registerCsiGuard({ final: 'J' }, (params) => shouldBlockClearScrollbackParams(params));
       if (typeof terminal.parser.registerEscHandler === 'function') {
         try {
           const disposable = terminal.parser.registerEscHandler({ final: 'c' }, () => true);
