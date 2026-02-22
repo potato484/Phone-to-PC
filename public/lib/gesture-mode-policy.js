@@ -1,5 +1,5 @@
-export function shouldAllowSingleFingerTerminalScroll(paneInTouchScrollMode) {
-  return !!paneInTouchScrollMode;
+export function shouldAllowSingleFingerTerminalScroll() {
+  return true;
 }
 
 export function computePinchScale(startDistance, currentDistance) {

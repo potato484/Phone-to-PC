@@ -6,7 +6,6 @@ import {
 } from './gesture-scroll-policy.js';
 import {
   computePinchScale,
-  shouldAllowSingleFingerTerminalScroll,
   shouldApplyPinchScale
 } from './gesture-mode-policy.js';
 
@@ -652,11 +651,6 @@ export function createGestures({ getTerm, toast }) {
     }
     const paneBodyEl = target.closest('.terminal-pane-body');
     const paneEl = paneBodyEl instanceof HTMLElement ? paneBodyEl.closest('.terminal-pane') : target.closest('.terminal-pane');
-    const paneInTouchScrollMode = paneEl instanceof HTMLElement && paneEl.classList.contains('is-touch-scroll-mode');
-    if (!shouldAllowSingleFingerTerminalScroll(paneInTouchScrollMode)) {
-      singleFingerRejectReason = 'scroll-mode-disabled';
-      return false;
-    }
     const viewportEl =
       resolveTerminalViewport(target) ||
       (typeof term.getActivePaneViewportElement === 'function' ? term.getActivePaneViewportElement() : null);
@@ -1056,37 +1050,9 @@ export function createGestures({ getTerm, toast }) {
           beginSingleFingerScrollGesture(touch);
           return;
         }
-        if (startedInTerminal && singleFingerRejectReason === 'scroll-mode-disabled') {
-          const term = getTerm();
-          const enabled =
-            term && typeof term.setActivePaneTouchScrollMode === 'function'
-              ? term.setActivePaneTouchScrollMode(true)
-              : false;
-          if (enabled && beginSingleFingerScrollMode(touch, event.target)) {
-            debugGesture('single-finger-auto-enable-scroll-mode', {
-              targetTag: event.target instanceof Element ? event.target.tagName : '',
-              targetClass:
-                event.target instanceof Element
-                  ? typeof event.target.className === 'string'
-                    ? event.target.className
-                    : ''
-                  : ''
-            });
-            beginSingleFingerScrollGesture(touch);
-            event.preventDefault();
-            return;
-          }
-        }
         if (startedInTerminal) {
-          const term = getTerm();
-          const activePaneTouchScrollModeEnabled =
-            term && typeof term.isActivePaneTouchScrollModeEnabled === 'function'
-              ? term.isActivePaneTouchScrollModeEnabled()
-              : false;
-          const shouldAllowSelectionFallback = singleFingerRejectReason === 'scroll-mode-disabled';
           debugGesture('single-finger-start-rejected', {
             reason: singleFingerRejectReason || 'unknown',
-            activePaneTouchScrollModeEnabled,
             targetTag: event.target instanceof Element ? event.target.tagName : '',
             targetClass:
               event.target instanceof Element
@@ -1095,12 +1061,6 @@ export function createGestures({ getTerm, toast }) {
                   : ''
                 : ''
           });
-          if (!shouldAllowSelectionFallback) {
-            event.preventDefault();
-            resetSwipeTracking();
-            endSingleFingerScrollMode();
-            return;
-          }
         }
         endSingleFingerScrollMode();
         const horizontalScrollTarget = startedInTerminal ? null : resolveHorizontalScrollTarget(event.target);

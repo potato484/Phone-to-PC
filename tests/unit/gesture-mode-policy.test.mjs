@@ -6,9 +6,10 @@ import {
   shouldApplyPinchScale
 } from '../../public/lib/gesture-mode-policy.js';
 
-test('shouldAllowSingleFingerTerminalScroll gates single-finger scroll mode', () => {
+test('shouldAllowSingleFingerTerminalScroll always allows single-finger scroll', () => {
   assert.equal(shouldAllowSingleFingerTerminalScroll(true), true);
-  assert.equal(shouldAllowSingleFingerTerminalScroll(false), false);
+  assert.equal(shouldAllowSingleFingerTerminalScroll(false), true);
+  assert.equal(shouldAllowSingleFingerTerminalScroll(), true);
 });
 
 test('computePinchScale returns relative distance ratio', () => {
