@@ -9,6 +9,7 @@ export const DOM = {
   cwdText: document.getElementById('cwd-text'),
   controlSignal: document.getElementById('control-signal'),
   terminalSignal: document.getElementById('terminal-signal'),
+  qualitySignal: document.getElementById('quality-signal'),
   sessionPill: document.getElementById('session-pill'),
   sideActions: document.getElementById('side-actions'),
   sideActionsToggle: document.getElementById('side-actions-toggle'),
@@ -65,6 +66,9 @@ export const DOM = {
 export const TOKEN_STORAGE_KEY = 'c2p_token';
 export const TOKEN_EXPIRES_AT_STORAGE_KEY = 'c2p_token_expires_at';
 export const TERMINAL_FONT_SIZE_STORAGE_KEY = 'c2p_terminal_font_size';
+const FEATURE_FLAGS_QUERY_KEY = 'flags';
+const FEATURE_FLAGS_STORAGE_KEY = 'flags';
+const EDGE_RELAY_HOST_STORAGE_KEY = 'c2p_edge_host';
 
 function safeStorageGet(storage, key) {
   if (!storage) {
@@ -97,6 +101,116 @@ function safeStorageRemove(storage, key) {
   } catch {
     // Ignore storage write failures (quota/privacy mode).
   }
+}
+
+function parseFlagList(rawValue) {
+  if (typeof rawValue !== 'string') {
+    return [];
+  }
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return [];
+  }
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fallback to comma split.
+    }
+  }
+  return trimmed.split(',');
+}
+
+function normalizeFlagName(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readFlagsFromLocationSearch() {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    const raw = params.get(FEATURE_FLAGS_QUERY_KEY) || '';
+    return parseFlagList(raw).map(normalizeFlagName).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function readFlagsFromStorage(storage) {
+  return parseFlagList(safeStorageGet(storage, FEATURE_FLAGS_STORAGE_KEY)).map(normalizeFlagName).filter(Boolean);
+}
+
+const FEATURE_FLAGS = new Set([
+  ...readFlagsFromLocationSearch(),
+  ...readFlagsFromStorage(typeof window !== 'undefined' ? window.localStorage : null)
+]);
+
+export function featureEnabled(name) {
+  const normalized = normalizeFlagName(name);
+  return !!normalized && FEATURE_FLAGS.has(normalized);
+}
+
+function normalizeEdgeRelayHost(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) {
+    return '';
+  }
+  try {
+    if (raw.includes('://')) {
+      return new URL(raw).host;
+    }
+  } catch {
+    // Try best-effort normalization below.
+  }
+  return raw
+    .replace(/^wss?:\/\//i, '')
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '')
+    .replace(/\/.*/, '');
+}
+
+function readEdgeRelayHost() {
+  if (typeof window === 'undefined') {
+    return '';
+  }
+  const queryHost = (() => {
+    try {
+      const params = new URLSearchParams(window.location.search || '');
+      return params.get('edgeHost') || '';
+    } catch {
+      return '';
+    }
+  })();
+  const candidates = [
+    window.__C2P_EDGE_HOST__,
+    queryHost,
+    safeStorageGet(window.localStorage, EDGE_RELAY_HOST_STORAGE_KEY)
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeEdgeRelayHost(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return '';
+}
+
+const EDGE_RELAY_HOST = readEdgeRelayHost();
+
+export function getEdgeRelayHost() {
+  return EDGE_RELAY_HOST;
+}
+
+export function markEdgeRelayUnavailable() {
+  if (!featureEnabled('edgeRelay') || !EDGE_RELAY_HOST) {
+    return;
+  }
+  State.edgeRelayForceDirect = true;
 }
 
 export function persistTokenExpiry(expiresAt) {
@@ -250,6 +364,8 @@ export const State = {
   tokenExpiresAt: '',
   tokenRefreshTimer: 0,
   tokenWarningTimer: 0,
+  edgeRelayForceDirect: false,
+  controlConnectedOnce: false,
   controlSocket: null,
   terminalSocket: null,
   terminal: null,
@@ -355,7 +471,9 @@ export function apiUrl(path) {
 
 export function wsUrl(path, extraParams) {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = new URL(path, `${protocol}//${window.location.host}`);
+  const useEdgeRelay = featureEnabled('edgeRelay') && !!EDGE_RELAY_HOST && !State.edgeRelayForceDirect;
+  const host = useEdgeRelay ? EDGE_RELAY_HOST : window.location.host;
+  const url = new URL(path, `${protocol}//${host}`);
   if (extraParams) {
     Object.keys(extraParams).forEach((key) => {
       const value = extraParams[key];

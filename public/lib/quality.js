@@ -1,7 +1,8 @@
-import { State } from './state.js';
+import { DOM, State } from './state.js';
 
 const HEARTBEAT_INTERVAL_MS = 2_000;
 const HEARTBEAT_TIMEOUT_MS = 4_000;
+const HEARTBEAT_MAX_TIMEOUT_STREAK = 3;
 const SAMPLE_LIMIT = 40;
 const PROFILE_ORDER = {
   low: 0,
@@ -86,11 +87,29 @@ function computeQuality(samples, connected) {
   };
 }
 
+function resolveSignalLevelFromGrade(grade) {
+  if (grade === 'excellent') {
+    return '4';
+  }
+  if (grade === 'good') {
+    return '3';
+  }
+  if (grade === 'fair') {
+    return '2';
+  }
+  if (grade === 'poor') {
+    return '1';
+  }
+  return '0';
+}
+
 export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
   let heartbeatTimer = 0;
   let heartbeatSeq = 0;
   let connected = false;
   let desktopProfile = 'balanced';
+  let timeoutStreak = 0;
+  let forcedCloseTriggered = false;
   let riseStreak = 0;
   let dropStreak = 0;
   const pending = new Map();
@@ -132,6 +151,7 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
 
   function publishSnapshot(reason) {
     const quality = computeQuality(samples, connected);
+    const grade = gradeFromScore(quality.score, connected);
     const recommendedProfile = profileFromScore(quality.score);
     const currentOrder = PROFILE_ORDER[desktopProfile];
     const recommendedOrder = PROFILE_ORDER[recommendedProfile];
@@ -158,7 +178,7 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
     const snapshot = {
       connected,
       score: quality.score,
-      grade: gradeFromScore(quality.score, connected),
+      grade,
       rttMs: quality.rttMs,
       jitterMs: quality.jitterMs,
       lossPercent: quality.lossPercent,
@@ -169,9 +189,24 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
 
     State.desktopQualityProfile = desktopProfile;
     State.connectionQualitySnapshot = snapshot;
+    if (DOM.qualitySignal) {
+      DOM.qualitySignal.dataset.level = resolveSignalLevelFromGrade(grade);
+    }
     if (typeof onSnapshot === 'function') {
       onSnapshot(snapshot);
     }
+  }
+
+  function maybeCloseStaleControlSocket(reason) {
+    if (!connected || forcedCloseTriggered || timeoutStreak < HEARTBEAT_MAX_TIMEOUT_STREAK) {
+      return;
+    }
+    const ws = State.controlSocket;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    forcedCloseTriggered = true;
+    ws.close(4002, reason || 'heartbeat_timeout');
   }
 
   function sendHeartbeatPing() {
@@ -181,32 +216,39 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
     heartbeatSeq += 1;
     const seq = heartbeatSeq;
     const sentAt = Date.now();
+    const currentQuality = computeQuality(samples, connected);
+    const currentGrade = gradeFromScore(currentQuality.score, connected);
     const sent = typeof sendHeartbeat === 'function'
       ? sendHeartbeat({
           type: 'heartbeat.ping',
           seq,
-          sentAt
+          sentAt,
+          rttGrade: currentGrade === 'offline' ? undefined : currentGrade
         })
       : false;
 
     if (!sent) {
+      timeoutStreak += 1;
       pushSample({
         at: Date.now(),
         lost: true,
         rttMs: null
       });
       publishSnapshot('heartbeat_send_failed');
+      maybeCloseStaleControlSocket('heartbeat_send_failed');
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
       pending.delete(seq);
+      timeoutStreak += 1;
       pushSample({
         at: Date.now(),
         lost: true,
         rttMs: null
       });
       publishSnapshot('heartbeat_timeout');
+      maybeCloseStaleControlSocket('heartbeat_timeout');
     }, HEARTBEAT_TIMEOUT_MS);
 
     pending.set(seq, {
@@ -218,6 +260,8 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
   return {
     onControlReady() {
       connected = true;
+      timeoutStreak = 0;
+      forcedCloseTriggered = false;
       clearHeartbeatTimer();
       clearPending();
 
@@ -228,6 +272,8 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
 
     onControlClosed() {
       connected = false;
+      timeoutStreak = 0;
+      forcedCloseTriggered = false;
       clearHeartbeatTimer();
       clearPending();
       publishSnapshot('control_closed');
@@ -245,12 +291,16 @@ export function createQualityMonitor({ sendHeartbeat, onSnapshot }) {
       if (pendingEntry) {
         window.clearTimeout(pendingEntry.timeoutId);
         pending.delete(seq);
+        timeoutStreak = 0;
+        forcedCloseTriggered = false;
         pushSample({
           at: Date.now(),
           lost: false,
           rttMs: Math.max(0, Date.now() - pendingEntry.sentAt)
         });
       } else if (sentAt > 0) {
+        timeoutStreak = 0;
+        forcedCloseTriggered = false;
         pushSample({
           at: Date.now(),
           lost: false,
