@@ -1,0 +1,16 @@
+name = "c2p-terminal-relay"
+main = "src/index.ts"
+compatibility_date = "2026-03-03"
+
+[durable_objects]
+bindings = [
+  { name = "TERMINAL_RELAY", class_name = "TerminalRelay" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TerminalRelay"]
+
+[vars]
+# Example: wss://origin.example.com
+UPSTREAM_WS_BASE = ""
