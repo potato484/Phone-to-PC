@@ -7,13 +7,16 @@ import {
   createWsAuthMessage,
   fetchSessionReplayOffset,
   fetchSessionLogBytes,
+  getEdgeRelayHost,
   getSessionOffset,
+  markEdgeRelayUnavailable,
   persistTokenExpiry,
   setActionButtonsEnabled,
   setSessionOffset,
   wsUrl
 } from './state.js';
 import { writeClipboardText } from './clipboard.js';
+import { vibrate } from './haptic.js';
 import { bootstrapSessionReplayOffset } from './session-replay-offset-policy.js';
 
 function withReconnectJitter(baseDelayMs) {
@@ -37,7 +40,94 @@ async function reconnectSessionWithBootstrappedOffset(term, sessionId) {
 }
 
 export function createControl({ term, sessionTabs, statusBar, toast, actions, qualityMonitor }) {
+  const pendingAcks = new Map();
+
+  function clearPendingAck(requestId) {
+    if (!requestId) {
+      return false;
+    }
+    const pending = pendingAcks.get(requestId);
+    if (!pending) {
+      return false;
+    }
+    pendingAcks.delete(requestId);
+    if (pending.timerId) {
+      window.clearTimeout(pending.timerId);
+    }
+    return true;
+  }
+
+  function resolvePendingAck(requestId, status, payload) {
+    if (!requestId) {
+      return false;
+    }
+    const pending = pendingAcks.get(requestId);
+    if (!pending) {
+      return false;
+    }
+    pendingAcks.delete(requestId);
+    if (pending.timerId) {
+      window.clearTimeout(pending.timerId);
+    }
+    if (status === 'ack') {
+      if (typeof pending.onAck === 'function') {
+        pending.onAck(payload);
+      }
+      return true;
+    }
+    if (typeof pending.onError === 'function') {
+      pending.onError(payload);
+    }
+    return true;
+  }
+
+  function failAllPendingAcks(reasonPayload) {
+    const entries = Array.from(pendingAcks.values());
+    pendingAcks.clear();
+    entries.forEach((pending) => {
+      if (pending.timerId) {
+        window.clearTimeout(pending.timerId);
+      }
+      if (typeof pending.onError === 'function') {
+        pending.onError(reasonPayload);
+      }
+    });
+  }
+
   return {
+    registerPendingAck(options) {
+      const requestId = options && typeof options.requestId === 'string' ? options.requestId.trim() : '';
+      if (!requestId) {
+        return false;
+      }
+      clearPendingAck(requestId);
+      const timeoutMs =
+        options && Number.isFinite(options.timeoutMs) ? Math.max(1, Math.floor(options.timeoutMs)) : 3000;
+      const pending = {
+        requestId,
+        onAck: options && typeof options.onAck === 'function' ? options.onAck : null,
+        onError: options && typeof options.onError === 'function' ? options.onError : null,
+        onTimeout: options && typeof options.onTimeout === 'function' ? options.onTimeout : null,
+        timerId: 0
+      };
+      pending.timerId = window.setTimeout(() => {
+        pendingAcks.delete(requestId);
+        if (typeof pending.onTimeout === 'function') {
+          pending.onTimeout();
+        }
+      }, timeoutMs);
+      pendingAcks.set(requestId, pending);
+      return true;
+    },
+
+    resolvePendingAck(requestId, status, payload) {
+      return resolvePendingAck(requestId, status, payload);
+    },
+
+    clearPendingAck(requestId) {
+      return clearPendingAck(requestId);
+    },
+
     send(payload) {
       if (!State.controlSocket || State.controlSocket.readyState !== WebSocket.OPEN) {
         return false;
@@ -64,10 +154,15 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
       }
 
       if (payload.type === 'auth.ok') {
+        const shouldVibrateRecovery = !!State.controlConnectedOnce;
         State.controlConnected = true;
+        State.controlConnectedOnce = true;
         if (typeof payload.expiresAt === 'string' && payload.expiresAt) {
           State.tokenExpiresAt = payload.expiresAt;
           persistTokenExpiry(payload.expiresAt);
+        }
+        if (shouldVibrateRecovery) {
+          vibrate('medium');
         }
         statusBar.setControl('online');
         statusBar.setText('控制通道已鉴权');
@@ -94,6 +189,9 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
       }
 
       if (payload.type === 'spawned' && payload.sessionId) {
+        if (typeof payload.requestId === 'string' && payload.requestId) {
+          resolvePendingAck(payload.requestId, 'ack', payload);
+        }
         State.currentSessionId = payload.sessionId;
         State.killRequested = false;
         actions.resetKillRequest();
@@ -110,6 +208,16 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         const cli = payload.cli || 'shell';
         statusBar.setText(`已启动 ${cli}`);
         toast.show(`已启动 ${cli}，会话已附加`, 'success');
+        return;
+      }
+
+      if (payload.type === 'resized' && payload.sessionId) {
+        if (typeof payload.requestId === 'string' && payload.requestId) {
+          resolvePendingAck(payload.requestId, 'ack', payload);
+        }
+        if (typeof term.handleResizeAck === 'function') {
+          term.handleResizeAck(payload);
+        }
         return;
       }
 
@@ -217,6 +325,17 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
       }
 
       if (payload.type === 'error') {
+        const ackHandled =
+          typeof payload.requestId === 'string' && payload.requestId
+            ? resolvePendingAck(payload.requestId, 'error', payload)
+            : false;
+        const resizeHandled =
+          !ackHandled && payload.requestType === 'resize' && typeof term.handleResizeError === 'function'
+            ? term.handleResizeError(payload)
+            : false;
+        if (ackHandled || resizeHandled) {
+          return;
+        }
         const message = payload.message || '控制通道错误';
         statusBar.setText(message);
         toast.show(message, 'danger');
@@ -259,7 +378,19 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
 
       statusBar.setControl('warn');
       statusBar.setText('正在连接控制通道...');
-      const socket = new WebSocket(wsUrl('/ws/control'));
+      const socketUrl = wsUrl('/ws/control');
+      const edgeRelayHost = getEdgeRelayHost();
+      const socketUsesEdgeRelay = (() => {
+        if (!edgeRelayHost) {
+          return false;
+        }
+        try {
+          return new URL(socketUrl).host === edgeRelayHost;
+        } catch {
+          return false;
+        }
+      })();
+      const socket = new WebSocket(socketUrl);
       State.controlSocket = socket;
 
       socket.onopen = () => {
@@ -281,9 +412,13 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         if (State.controlSocket !== socket) {
           return;
         }
+        const wasAuthed = State.controlConnected;
         State.controlSocket = null;
         State.controlConnected = false;
         State.serverCapabilities = [];
+        failAllPendingAcks({
+          message: '控制通道断开'
+        });
         if (qualityMonitor && typeof qualityMonitor.onControlClosed === 'function') {
           qualityMonitor.onControlClosed();
         }
@@ -303,6 +438,9 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
           statusBar.setText('访问令牌无效，请重新使用 #token 链接登录');
           toast.show('认证已失效，请重新登录', 'danger');
           return;
+        }
+        if (socketUsesEdgeRelay && !wasAuthed) {
+          markEdgeRelayUnavailable();
         }
         statusBar.setControl('warn');
         statusBar.setText('控制通道已断开，正在自动重连（可等待重连，或刷新页面并检查网络）');

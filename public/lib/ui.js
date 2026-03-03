@@ -19,6 +19,7 @@ import {
   setSignalState
 } from './state.js';
 import { writeClipboardText } from './clipboard.js';
+import { vibrate } from './haptic.js';
 import { createThemeManager } from './theme.js';
 import {
   clampScrollDeltaToRemaining,
@@ -62,6 +63,7 @@ const KEYBOARD_INSET_APPLY_DELAY_MS = 120;
 const DOCK_INPUT_PRESERVE_MS = 2000;
 const UI_STATE_STORAGE_KEY = 'c2p_ui_state_v1';
 const UI_STATE_WRITE_DEBOUNCE_MS = 120;
+const CONTROL_ACK_TIMEOUT_MS = 3000;
 const NON_TEXT_INPUT_TYPES = new Set([
   'button',
   'checkbox',
@@ -243,8 +245,15 @@ function tryLockPortraitOrientation() {
   });
 }
 
+function createControlRequestId(prefix) {
+  const base = typeof prefix === 'string' && prefix ? prefix : 'req';
+  const random = Math.random().toString(36).slice(2, 8);
+  return `${base}-${Date.now().toString(36)}-${random}`;
+}
+
 export function createUi({ getControl, getTerm }) {
   let sessionCache = [];
+  const pendingSpawnPlaceholders = new Map();
   let preserveDockInputUntilMs = 0;
   let uiStateWriteTimer = 0;
   let keyboardAlignmentScope = '';
@@ -938,6 +947,28 @@ export function createUi({ getControl, getTerm }) {
   };
 
   const SessionTabs = {
+    addSpawnPlaceholder(requestId) {
+      const safeRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+      if (!safeRequestId || pendingSpawnPlaceholders.has(safeRequestId)) {
+        return;
+      }
+      pendingSpawnPlaceholders.set(safeRequestId, {
+        id: `pending-spawn-${safeRequestId}`,
+        cli: 'shell',
+        cwd: '启动中...',
+        pendingSpawn: true
+      });
+      this.update(sessionCache);
+    },
+
+    removeSpawnPlaceholder(requestId) {
+      const safeRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+      if (!safeRequestId || !pendingSpawnPlaceholders.delete(safeRequestId)) {
+        return;
+      }
+      this.update(sessionCache);
+    },
+
     getById(sessionId) {
       return sessionCache.find((entry) => entry.id === sessionId) || null;
     },
@@ -982,6 +1013,7 @@ export function createUi({ getControl, getTerm }) {
       if (showStatusText) {
         StatusBar.setText(`已切换到${resolveSessionDisplayName(sessionId)}`);
       }
+      vibrate('light');
     },
 
     switchByOffset(offset) {
@@ -1184,6 +1216,10 @@ export function createUi({ getControl, getTerm }) {
           return;
         }
         const sessionId = tab.dataset.sessionId;
+        if (tab.dataset.pending === '1') {
+          hideDeleteMenu();
+          return;
+        }
         if (!sessionId) {
           hideDeleteMenu();
           return;
@@ -1290,13 +1326,16 @@ export function createUi({ getControl, getTerm }) {
         return [];
       }
       const sessions = Array.isArray(list) ? list.map((item) => normalizeSessionEntry(item)).filter(Boolean) : [];
+      const placeholderEntries = Array.from(pendingSpawnPlaceholders.values());
+      const displaySessions = [...sessions, ...placeholderEntries];
       sessionCache = sessions;
       pruneSessionOffsets(sessions.map((session) => session.id));
       DOM.sessionTabs.textContent = '';
 
       const fragment = document.createDocumentFragment();
 
-      sessions.forEach((session, index) => {
+      displaySessions.forEach((session, index) => {
+        const pendingSpawn = !!session.pendingSpawn;
         const active = session.id === State.currentSessionId;
         const pending = active && State.killInFlight;
         const terminalName = `终端${index + 1}`;
@@ -1304,26 +1343,38 @@ export function createUi({ getControl, getTerm }) {
         const item = document.createElement('div');
         item.className = active ? 'session-tab-item is-active' : 'session-tab-item';
         item.dataset.sessionId = session.id;
+        if (pendingSpawn) {
+          item.classList.add('is-pending-spawn');
+        }
 
         const button = document.createElement('button');
         button.type = 'button';
         button.className = active ? 'session-tab is-active' : 'session-tab';
         button.dataset.sessionId = session.id;
         button.dataset.sessionIndex = String(index + 1);
+        if (pendingSpawn) {
+          button.dataset.pending = '1';
+        }
         const cliLabel = session.cli || 'session';
-        button.setAttribute('aria-label', terminalName);
-        if (session.cwd) {
+        button.setAttribute('aria-label', pendingSpawn ? `${terminalName}（启动中）` : terminalName);
+        if (pendingSpawn) {
+          button.title = `${terminalName}\n正在创建终端...`;
+        } else if (session.cwd) {
           button.dataset.cwd = session.cwd;
           button.title = `${terminalName}\n${session.cwd}`;
         } else {
           button.title = terminalName;
         }
         button.setAttribute('role', 'tab');
-        button.setAttribute('aria-selected', active ? 'true' : 'false');
+        button.setAttribute('aria-selected', pendingSpawn ? 'false' : active ? 'true' : 'false');
+        button.disabled = pendingSpawn;
+        if (pendingSpawn) {
+          button.setAttribute('aria-disabled', 'true');
+        }
 
         const icon = document.createElement('span');
         icon.className = 'session-tab-icon';
-        icon.textContent = resolveSessionIcon(cliLabel);
+        icon.textContent = pendingSpawn ? '…' : resolveSessionIcon(cliLabel);
         button.appendChild(icon);
 
         const srLabel = document.createElement('span');
@@ -1376,10 +1427,36 @@ export function createUi({ getControl, getTerm }) {
       const preferredCwd = typeof options.cwd === 'string' ? options.cwd.trim() : '';
       this.resetKillRequest();
       State.killRequested = false;
+      const requestId = createControlRequestId('spawn');
+      SessionTabs.addSpawnPlaceholder(requestId);
+      if (control && typeof control.registerPendingAck === 'function') {
+        control.registerPendingAck({
+          requestId,
+          timeoutMs: CONTROL_ACK_TIMEOUT_MS,
+          onAck: () => {
+            SessionTabs.removeSpawnPlaceholder(requestId);
+          },
+          onError: (errorPayload) => {
+            SessionTabs.removeSpawnPlaceholder(requestId);
+            const message =
+              errorPayload && typeof errorPayload.message === 'string' && errorPayload.message
+                ? errorPayload.message
+                : '启动失败';
+            StatusBar.setText(message);
+            Toast.show(message, 'danger');
+          },
+          onTimeout: () => {
+            SessionTabs.removeSpawnPlaceholder(requestId);
+            StatusBar.setText('启动超时，已回滚');
+            Toast.show('启动超时，已回滚', 'warn');
+          }
+        });
+      }
       const ok = control
         ? control.send({
             type: 'spawn',
             cli: 'shell',
+            requestId,
             // Keep terminal default cwd controlled by server (typically Linux home "~").
             cwd: preferredCwd || undefined,
             cols: State.terminal.cols,
@@ -1387,11 +1464,15 @@ export function createUi({ getControl, getTerm }) {
           })
         : false;
       if (!ok) {
+        SessionTabs.removeSpawnPlaceholder(requestId);
+        if (control && typeof control.clearPendingAck === 'function') {
+          control.clearPendingAck(requestId);
+        }
         StatusBar.setText('控制通道未就绪');
         Toast.show('控制通道未就绪', 'warn');
         return;
       }
-      StatusBar.setText('启动请求已发送');
+      StatusBar.setText('正在启动新终端...');
       Dock.collapse();
     },
 

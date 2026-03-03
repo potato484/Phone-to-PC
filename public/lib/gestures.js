@@ -22,6 +22,10 @@ const TWO_FINGER_PINCH_SCALE_EPSILON = 0.015;
 const TWO_FINGER_PINCH_UPDATE_MIN_INTERVAL_MS = 24;
 const TWO_FINGER_PARALLEL_MOVE_THRESHOLD_PX = 2;
 const TWO_FINGER_SCROLL_LINE_PX = 14;
+const TWO_FINGER_SESSION_SWIPE_THRESHOLD_PX = 80;
+const TWO_FINGER_SESSION_SWIPE_MIN_SPEED_PX_PER_SEC = 300;
+const TWO_FINGER_SESSION_SWIPE_DOMINANCE_RATIO = 1.15;
+const TWO_FINGER_SESSION_SWIPE_VERTICAL_TOLERANCE_PX = 72;
 const SINGLE_FINGER_SCROLL_MOVE_EPSILON_PX = 0;
 const SINGLE_FINGER_SCROLL_LINE_PX = 6;
 const SINGLE_FINGER_SCROLL_LINE_PX_NO_VIEWPORT = 0.35;
@@ -1016,10 +1020,12 @@ export function createGestures({ getTerm, toast }) {
           const distance = touchDistance(touches[0], touches[1]);
           twoFingerState = {
             mode: '',
+            startAtMs: Date.now(),
             startCenterX: center.x,
             startCenterY: center.y,
             centerX: center.x,
             centerY: center.y,
+            swipeDirection: '',
             startDistance: distance,
             distance,
             pendingScrollPx: 0,
@@ -1158,17 +1164,31 @@ export function createGestures({ getTerm, toast }) {
             center.x - twoFingerState.startCenterX,
             center.y - twoFingerState.startCenterY
           );
+          const dxFromStart = center.x - twoFingerState.startCenterX;
+          const dyFromStart = center.y - twoFingerState.startCenterY;
+          const absDxFromStart = Math.abs(dxFromStart);
+          const absDyFromStart = Math.abs(dyFromStart);
           const pinchDeltaFromStart = Math.abs(distance - twoFingerState.startDistance);
+          const elapsedMs = Math.max(1, Date.now() - twoFingerState.startAtMs);
+          const horizontalSpeedPxPerSec = (absDxFromStart / elapsedMs) * 1000;
           if (!twoFingerState.mode) {
             const pinchIntent =
               pinchDeltaFromStart >= TWO_FINGER_PINCH_LOCK_THRESHOLD_PX &&
               pinchDeltaFromStart > centerDeltaFromStart * TWO_FINGER_PINCH_DOMINANCE_RATIO;
-            const scrollIntent = centerDeltaFromStart >= TWO_FINGER_SCROLL_LOCK_THRESHOLD_PX;
-            if (parallelVerticalIntent && scrollIntent) {
+            const verticalScrollIntent = absDyFromStart >= TWO_FINGER_SCROLL_LOCK_THRESHOLD_PX;
+            const sessionSwipeIntent =
+              absDxFromStart >= TWO_FINGER_SESSION_SWIPE_THRESHOLD_PX &&
+              horizontalSpeedPxPerSec >= TWO_FINGER_SESSION_SWIPE_MIN_SPEED_PX_PER_SEC &&
+              absDxFromStart > absDyFromStart * TWO_FINGER_SESSION_SWIPE_DOMINANCE_RATIO &&
+              absDyFromStart <= TWO_FINGER_SESSION_SWIPE_VERTICAL_TOLERANCE_PX;
+            if (sessionSwipeIntent && !pinchIntent) {
+              twoFingerState.mode = 'session-swipe';
+              twoFingerState.swipeDirection = dxFromStart > 0 ? 'right' : 'left';
+            } else if (parallelVerticalIntent && verticalScrollIntent) {
               twoFingerState.mode = 'scroll';
             } else if (pinchIntent) {
               twoFingerState.mode = 'pinch';
-            } else if (scrollIntent) {
+            } else if (verticalScrollIntent) {
               twoFingerState.mode = 'scroll';
             }
           }
@@ -1206,6 +1226,18 @@ export function createGestures({ getTerm, toast }) {
             twoFingerState.centerY = center.y;
             twoFingerState.distance = distance;
             event.preventDefault();
+            return;
+          }
+
+          if (twoFingerState.mode === 'session-swipe') {
+            event.preventDefault();
+            twoFingerState.centerX = center.x;
+            twoFingerState.centerY = center.y;
+            twoFingerState.distance = distance;
+            twoFingerState.touchALastX = touches[0].clientX;
+            twoFingerState.touchALastY = touches[0].clientY;
+            twoFingerState.touchBLastX = touches[1].clientX;
+            twoFingerState.touchBLastY = touches[1].clientY;
             return;
           }
 
@@ -1334,11 +1366,17 @@ export function createGestures({ getTerm, toast }) {
         }
         if (twoFingerState && event.touches.length < 2) {
           const mode = twoFingerState.mode;
+          const swipeDirection = twoFingerState.swipeDirection;
           twoFingerState = null;
           if (mode === 'pinch') {
             const term = getTerm();
             if (term && typeof term.scheduleResize === 'function') {
               term.scheduleResize(true);
+            }
+          } else if (mode === 'session-swipe') {
+            const term = getTerm();
+            if (term && typeof term.switchToAdjacentPane === 'function' && swipeDirection) {
+              term.switchToAdjacentPane(swipeDirection);
             }
           }
           resetSwipeTracking();

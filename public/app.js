@@ -20,6 +20,7 @@ term = createTerm({
   getControl,
   statusBar: ui.StatusBar,
   toast: ui.Toast,
+  switchSessionByOffset: (offset) => ui.SessionTabs.switchByOffset(offset),
   onActiveSessionChange: (sessionId) => {
     ui.onActiveSessionChanged(sessionId);
   }

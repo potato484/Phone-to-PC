@@ -1,3 +1,5 @@
+import { vibrate } from './haptic.js';
+
 function resolveClipboard(adapters = {}) {
   if (Object.prototype.hasOwnProperty.call(adapters, 'clipboard')) {
     return adapters.clipboard;
@@ -68,6 +70,7 @@ export async function writeClipboardText(text, adapters = {}) {
   if (clipboard && typeof clipboard.writeText === 'function') {
     try {
       await clipboard.writeText(value);
+      vibrate('light');
       return true;
     } catch {
       // continue with execCommand fallback
@@ -75,5 +78,9 @@ export async function writeClipboardText(text, adapters = {}) {
   }
 
   const doc = resolveDocument(adapters);
-  return copyWithExecCommand(value, doc);
+  const copied = copyWithExecCommand(value, doc);
+  if (copied) {
+    vibrate('light');
+  }
+  return copied;
 }

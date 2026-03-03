@@ -21,6 +21,7 @@ import {
   createWsAuthMessage,
   decodeTerminalFrame,
   encodeTerminalFrame,
+  featureEnabled,
   fetchSessionLogBytes,
   getSessionOffset,
   setSessionOffset,
@@ -38,6 +39,7 @@ import {
   shouldBlockOscColorQueryPayload,
   shouldBlockPrivateModeParams
 } from './terminal-escape-policy.js';
+import { PredictionEngine } from './prediction.js';
 import { resolveMobileTerminalScrollback } from './terminal-scrollback-policy.js';
 
 const DEFAULT_FONT_SIZE = 14;
@@ -53,7 +55,14 @@ const REPLAY_DROP_SMALL_CHUNK_PASSTHROUGH_BYTES = 256;
 const TERMINAL_CLEAR_DEBUG_ENABLED = false;
 const TERMINAL_CLEAR_DEBUG_MAX_EVENTS = 400;
 const TERMINAL_CLEAR_DEBUG_EXPORT_MAX_EVENTS = 300;
+const RESIZE_ACK_TIMEOUT_MS = 3000;
 const ENABLE_WEBGL_RENDERER = false;
+
+function createControlRequestId(prefix) {
+  const base = typeof prefix === 'string' && prefix ? prefix : 'req';
+  const random = Math.random().toString(36).slice(2, 8);
+  return `${base}-${Date.now().toString(36)}-${random}`;
+}
 
 function emitTerminalClearDebug(eventName, details = {}) {
   if (!TERMINAL_CLEAR_DEBUG_ENABLED) {
@@ -160,7 +169,7 @@ function withReconnectJitter(baseDelayMs) {
   return Math.max(300, safeBase + jitter);
 }
 
-export function createTerm({ getControl, statusBar, toast, onActiveSessionChange }) {
+export function createTerm({ getControl, statusBar, toast, onActiveSessionChange, switchSessionByOffset }) {
   const panes = new Map();
   const paneOrder = [];
   let paneCounter = 0;
@@ -400,6 +409,82 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     DOM.terminalGrid.dataset.paneCount = String(panes.size);
   }
 
+  function clearPanePendingResizeAck(pane, options = {}) {
+    if (!pane || !pane.pendingResizeAck) {
+      return;
+    }
+    const pending = pane.pendingResizeAck;
+    pane.pendingResizeAck = null;
+    if (options.cancelControlAck) {
+      const control = getControl();
+      if (control && typeof control.clearPendingAck === 'function') {
+        control.clearPendingAck(pending.requestId);
+      }
+    }
+  }
+
+  function acknowledgePaneResize(pane, requestId) {
+    if (!pane || !pane.pendingResizeAck) {
+      return false;
+    }
+    const pending = pane.pendingResizeAck;
+    if (requestId && pending.requestId !== requestId) {
+      return false;
+    }
+    pane.pendingResizeAck = null;
+    pane.lastResizeSessionId = pending.sessionId;
+    pane.lastResizeCols = pending.nextCols;
+    pane.lastResizeRows = pending.nextRows;
+    return true;
+  }
+
+  function rollbackPaneResize(pane, requestId, message) {
+    if (!pane || !pane.pendingResizeAck) {
+      return false;
+    }
+    const pending = pane.pendingResizeAck;
+    if (requestId && pending.requestId !== requestId) {
+      return false;
+    }
+    pane.pendingResizeAck = null;
+    if (
+      pane.sessionId === pending.sessionId &&
+      pane.terminal &&
+      Number.isFinite(pending.previousCols) &&
+      Number.isFinite(pending.previousRows) &&
+      pending.previousCols > 0 &&
+      pending.previousRows > 0 &&
+      typeof pane.terminal.resize === 'function'
+    ) {
+      pane.terminal.resize(pending.previousCols, pending.previousRows);
+      schedulePaneRefresh(pane);
+      pane.lastResizeSessionId = pending.sessionId;
+      pane.lastResizeCols = pending.previousCols;
+      pane.lastResizeRows = pending.previousRows;
+    }
+    if (pane.id === activePaneId) {
+      const text = message || '窗口尺寸同步失败，已回滚';
+      statusBar.setText(text);
+      toast.show(text, 'warn');
+    }
+    return true;
+  }
+
+  function findPaneByPendingResizeRequest(requestId) {
+    if (!requestId) {
+      return null;
+    }
+    for (const pane of panes.values()) {
+      if (!pane || !pane.pendingResizeAck) {
+        continue;
+      }
+      if (pane.pendingResizeAck.requestId === requestId) {
+        return pane;
+      }
+    }
+    return null;
+  }
+
   function sendResizeForPane(pane) {
     if (!pane || !pane.sessionId || !pane.terminal) {
       return;
@@ -415,15 +500,54 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     }
 
     const control = getControl();
+    const requestId = createControlRequestId('resize');
+    const previousCols =
+      pane.lastResizeSessionId === pane.sessionId && pane.lastResizeCols > 0 ? pane.lastResizeCols : cols;
+    const previousRows =
+      pane.lastResizeSessionId === pane.sessionId && pane.lastResizeRows > 0 ? pane.lastResizeRows : rows;
+    clearPanePendingResizeAck(pane, {
+      cancelControlAck: true
+    });
+    pane.pendingResizeAck = {
+      requestId,
+      sessionId: pane.sessionId,
+      previousCols,
+      previousRows,
+      nextCols: cols,
+      nextRows: rows
+    };
+    if (control && typeof control.registerPendingAck === 'function') {
+      control.registerPendingAck({
+        requestId,
+        timeoutMs: RESIZE_ACK_TIMEOUT_MS,
+        onAck: () => {
+          acknowledgePaneResize(pane, requestId);
+        },
+        onError: (errorPayload) => {
+          const errorMessage =
+            errorPayload && typeof errorPayload.message === 'string' && errorPayload.message
+              ? errorPayload.message
+              : '窗口尺寸同步失败，已回滚';
+          rollbackPaneResize(pane, requestId, errorMessage);
+        },
+        onTimeout: () => {
+          rollbackPaneResize(pane, requestId, '窗口尺寸同步超时，已回滚');
+        }
+      });
+    }
     const sent = control
       ? control.send({
           type: 'resize',
           sessionId: pane.sessionId,
           cols,
-          rows
+          rows,
+          requestId
         })
       : false;
     if (!sent) {
+      clearPanePendingResizeAck(pane, {
+        cancelControlAck: true
+      });
       return;
     }
     pane.lastResizeSessionId = pane.sessionId;
@@ -465,6 +589,12 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
     pane.pendingExplicitClearUntil = 0;
     pane.pendingExplicitClearActive = false;
     pane.pendingExplicitClearQuietSince = 0;
+    clearPanePendingResizeAck(pane, {
+      cancelControlAck: true
+    });
+    if (pane.predictionEngine && typeof pane.predictionEngine.reset === 'function') {
+      pane.predictionEngine.reset();
+    }
     pane.replayDropUntilOffset = 0;
     pane.replayDropForcedReleaseAt = 0;
     clearPaneReplayDropForceReleaseTimer(pane);
@@ -1097,6 +1227,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
           data = textDecoder.decode(event.data);
         }
       }
+      if (data && pane.predictionEngine) {
+        pane.predictionEngine.onRawOutput(data);
+        pane.predictionEngine.onServerFrame(data);
+      }
       if (data || logBytes > 0) {
         if (
           pane.replayDropUntilOffset > 0 &&
@@ -1450,6 +1584,10 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       }
     }
 
+    const predictionEngine = featureEnabled('localEcho')
+      ? new PredictionEngine(terminal)
+      : { onInput() {}, onRawOutput() {}, onServerFrame() {}, reset() {}, dispose() {} };
+
     const pane = {
       id: paneId,
       index: paneOrder.length + 1,
@@ -1459,6 +1597,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       terminal,
       fitAddon,
       webglAddon,
+      predictionEngine,
       parserGuardDisposables,
       socket: null,
       inputDisposable: null,
@@ -1493,7 +1632,8 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       cwd: '',
       lastResizeSessionId: '',
       lastResizeCols: 0,
-      lastResizeRows: 0
+      lastResizeRows: 0,
+      pendingResizeAck: null
     };
 
     if (typeof terminal.attachCustomKeyEventHandler === 'function') {
@@ -1539,6 +1679,7 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
       if (activePaneId !== pane.id) {
         setActivePane(pane.id, { focus: false });
       }
+      pane.predictionEngine.onInput(data);
       sendDataOnPane(pane, data);
     });
 
@@ -1586,6 +1727,9 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         }
       });
       pane.parserGuardDisposables.length = 0;
+    }
+    if (pane.predictionEngine && typeof pane.predictionEngine.dispose === 'function') {
+      pane.predictionEngine.dispose();
     }
     pane.terminal.dispose();
     pane.rootEl.remove();
@@ -1988,6 +2132,91 @@ export function createTerm({ getControl, statusBar, toast, onActiveSessionChange
         disconnectPane(pane, { clearSession: true });
       });
       syncLegacyStateFromActivePane();
+    },
+
+    handleResizeAck(payload) {
+      if (!payload || typeof payload !== 'object') {
+        return false;
+      }
+      const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+      if (requestId) {
+        const pane = findPaneByPendingResizeRequest(requestId);
+        if (!pane) {
+          return false;
+        }
+        return acknowledgePaneResize(pane, requestId);
+      }
+      const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
+      if (!sessionId) {
+        return false;
+      }
+      for (const pane of panes.values()) {
+        if (!pane || !pane.pendingResizeAck) {
+          continue;
+        }
+        if (pane.pendingResizeAck.sessionId !== sessionId) {
+          continue;
+        }
+        return acknowledgePaneResize(pane, pane.pendingResizeAck.requestId);
+      }
+      return false;
+    },
+
+    handleResizeError(payload) {
+      if (!payload || typeof payload !== 'object') {
+        return false;
+      }
+      const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+      const message =
+        typeof payload.message === 'string' && payload.message ? payload.message : '窗口尺寸同步失败，已回滚';
+      if (requestId) {
+        const pane = findPaneByPendingResizeRequest(requestId);
+        if (!pane) {
+          return false;
+        }
+        return rollbackPaneResize(pane, requestId, message);
+      }
+      const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
+      if (!sessionId) {
+        return false;
+      }
+      for (const pane of panes.values()) {
+        if (!pane || !pane.pendingResizeAck) {
+          continue;
+        }
+        if (pane.pendingResizeAck.sessionId !== sessionId) {
+          continue;
+        }
+        return rollbackPaneResize(pane, pane.pendingResizeAck.requestId, message);
+      }
+      return false;
+    },
+
+    switchToAdjacentPane(direction) {
+      const normalizedDirection = typeof direction === 'string' ? direction.trim().toLowerCase() : '';
+      const sessionOffset = normalizedDirection === 'left' ? 1 : normalizedDirection === 'right' ? -1 : 0;
+      if (sessionOffset && typeof switchSessionByOffset === 'function') {
+        const switchedSession = switchSessionByOffset(sessionOffset);
+        if (switchedSession) {
+          return true;
+        }
+      }
+      if (paneOrder.length <= 1) {
+        return false;
+      }
+      const currentIndex = paneOrder.indexOf(activePaneId);
+      const startIndex = currentIndex >= 0 ? currentIndex : 0;
+      const paneOffset = normalizedDirection === 'left' ? 1 : normalizedDirection === 'right' ? -1 : 0;
+      if (!paneOffset) {
+        return false;
+      }
+      const nextIndex = (startIndex + paneOffset + paneOrder.length) % paneOrder.length;
+      const nextPaneId = paneOrder[nextIndex];
+      if (!nextPaneId) {
+        return false;
+      }
+      setActivePane(nextPaneId, { focus: false });
+      return true;
     },
 
     closePanesBySession(sessionId) {

@@ -10,7 +10,12 @@ import { getClientIp, type MemoryRateLimiter } from '../security.js';
 import type { C2PStore, CliKind, TaskRecord, TaskStatus } from '../store.js';
 import { requireWsAuth } from './auth-gate.js';
 import type { WsChannel } from './channel.js';
-import { attachWsHeartbeat } from './heartbeat.js';
+import {
+  attachWsHeartbeat,
+  resolveWsHeartbeatOptionsByGrade,
+  type WsHeartbeatGrade,
+  updateWsHeartbeatOptions
+} from './heartbeat.js';
 import { WS_PER_MESSAGE_DEFLATE } from './ws-config.js';
 
 interface ControlHelloMessage {
@@ -25,6 +30,7 @@ interface ControlSpawnMessage {
   cwd?: string;
   cols?: number;
   rows?: number;
+  requestId?: string;
 }
 
 interface ControlResizeMessage {
@@ -32,6 +38,7 @@ interface ControlResizeMessage {
   sessionId: string;
   cols?: number;
   rows?: number;
+  requestId?: string;
 }
 
 interface ControlKillMessage {
@@ -43,6 +50,7 @@ interface ControlHeartbeatPingMessage {
   type: 'heartbeat.ping';
   seq?: number;
   sentAt?: number;
+  rttGrade?: WsHeartbeatGrade;
 }
 
 type ControlMessage =
@@ -52,15 +60,24 @@ type ControlMessage =
   | ControlKillMessage
   | ControlHeartbeatPingMessage;
 
+type ControlRequestType = 'spawn' | 'resize';
+
 type ControlOutbound =
   | { type: 'auth.ok'; expiresAt: string }
   | { type: 'hello'; version: 1; capabilities: string[] }
-  | { type: 'spawned'; sessionId: string; cli: CliKind; cwd: string }
+  | { type: 'spawned'; sessionId: string; cli: CliKind; cwd: string; requestId?: string }
+  | { type: 'resized'; sessionId: string; cols: number; rows: number; requestId?: string }
   | { type: 'exited'; sessionId: string; exitCode: number }
   | { type: 'clipboard'; sessionId: string; text: string }
   | { type: 'sessions'; list: unknown[] }
   | { type: 'heartbeat.pong'; seq: number; sentAt: number; serverAt: number }
-  | { type: 'error'; message: string };
+  | {
+      type: 'error';
+      message: string;
+      requestId?: string;
+      requestType?: ControlRequestType;
+      sessionId?: string;
+    };
 
 interface ControlChannelDeps {
   ptyManager: PtyManager;
@@ -97,6 +114,25 @@ function normalizeHeartbeatNumber(value: unknown): number {
     return 0;
   }
   return Math.max(0, Math.floor(num));
+}
+
+function normalizeRequestId(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.slice(0, 120);
+}
+
+function normalizeHeartbeatGrade(value: unknown): WsHeartbeatGrade | undefined {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'excellent' || normalized === 'good' || normalized === 'fair' || normalized === 'poor') {
+    return normalized;
+  }
+  return undefined;
 }
 
 function normalizeCapabilities(value: unknown): string[] {
@@ -174,7 +210,8 @@ function parseControlMessage(raw: RawData): ControlMessage | undefined {
       cli: candidate.cli,
       cwd: typeof candidate.cwd === 'string' ? candidate.cwd : undefined,
       cols: typeof candidate.cols === 'number' ? candidate.cols : undefined,
-      rows: typeof candidate.rows === 'number' ? candidate.rows : undefined
+      rows: typeof candidate.rows === 'number' ? candidate.rows : undefined,
+      requestId: normalizeRequestId(candidate.requestId)
     };
   }
 
@@ -183,7 +220,8 @@ function parseControlMessage(raw: RawData): ControlMessage | undefined {
       type: 'resize',
       sessionId: candidate.sessionId,
       cols: typeof candidate.cols === 'number' ? candidate.cols : undefined,
-      rows: typeof candidate.rows === 'number' ? candidate.rows : undefined
+      rows: typeof candidate.rows === 'number' ? candidate.rows : undefined,
+      requestId: normalizeRequestId(candidate.requestId)
     };
   }
 
@@ -198,7 +236,8 @@ function parseControlMessage(raw: RawData): ControlMessage | undefined {
     return {
       type: 'heartbeat.ping',
       seq: normalizeHeartbeatNumber(candidate.seq),
-      sentAt: normalizeHeartbeatNumber(candidate.sentAt)
+      sentAt: normalizeHeartbeatNumber(candidate.sentAt),
+      rttGrade: normalizeHeartbeatGrade(candidate.rttGrade)
     };
   }
 
@@ -317,6 +356,10 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
         }
 
         if (message.type === 'heartbeat.ping') {
+          const heartbeatOptions = resolveWsHeartbeatOptionsByGrade(message.rttGrade);
+          if (heartbeatOptions) {
+            updateWsHeartbeatOptions(ws, heartbeatOptions);
+          }
           sendControlMessage(ws, {
             type: 'heartbeat.pong',
             seq: normalizeHeartbeatNumber(message.seq),
@@ -375,7 +418,13 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
               }
             });
 
-            sendControlMessage(ws, { type: 'spawned', sessionId, cli: message.cli, cwd: info.cwd });
+            sendControlMessage(ws, {
+              type: 'spawned',
+              sessionId,
+              cli: message.cli,
+              cwd: info.cwd,
+              requestId: message.requestId
+            });
             broadcastSessions();
           } catch (error) {
             const text = error instanceof Error ? error.message : 'spawn failed';
@@ -390,7 +439,12 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
                 tokenJti: authContext.claims.jti
               }
             });
-            sendControlMessage(ws, { type: 'error', message: text });
+            sendControlMessage(ws, {
+              type: 'error',
+              message: text,
+              requestId: message.requestId,
+              requestType: 'spawn'
+            });
           }
           return;
         }
@@ -398,13 +452,41 @@ export function createControlChannel(deps: ControlChannelDeps): WsChannel {
         if (message.type === 'resize') {
           const cols = normalizeDimension(message.cols, 100);
           const rows = normalizeDimension(message.rows, 30);
-          ptyManager.resize(message.sessionId, cols, rows);
-          store.updateSession(message.sessionId, {
-            cols,
-            rows,
-            status: 'running',
-            updatedAt: new Date().toISOString()
-          });
+          if (!ptyManager.hasSession(message.sessionId)) {
+            sendControlMessage(ws, {
+              type: 'error',
+              message: 'session not found',
+              requestId: message.requestId,
+              requestType: 'resize',
+              sessionId: message.sessionId
+            });
+            return;
+          }
+          try {
+            ptyManager.resize(message.sessionId, cols, rows);
+            store.updateSession(message.sessionId, {
+              cols,
+              rows,
+              status: 'running',
+              updatedAt: new Date().toISOString()
+            });
+            sendControlMessage(ws, {
+              type: 'resized',
+              sessionId: message.sessionId,
+              cols,
+              rows,
+              requestId: message.requestId
+            });
+          } catch (error) {
+            const text = error instanceof Error ? error.message : 'resize failed';
+            sendControlMessage(ws, {
+              type: 'error',
+              message: text,
+              requestId: message.requestId,
+              requestType: 'resize',
+              sessionId: message.sessionId
+            });
+          }
           return;
         }
 
