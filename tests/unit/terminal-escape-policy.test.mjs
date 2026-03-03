@@ -18,6 +18,12 @@ test('sanitizeInitialAttachData strips blocked init-time escape sequences in san
   assert.equal(sanitized, 'ABCD');
 });
 
+test('sanitizeInitialAttachData strips device-attributes queries and leaked xterm responses', () => {
+  const source = `A\x1b[>cB\x1b[cC\r\n0;276;0c\r\nD`;
+  const sanitized = sanitizeInitialAttachData(source, 120, 0);
+  assert.equal(sanitized, 'ABC\r\n\r\nD');
+});
+
 test('sanitizeInitialAttachData returns original text after sanitize window expires', () => {
   const source = `\x1b[?1049h`;
   const sanitized = sanitizeInitialAttachData(source, 10, 20);

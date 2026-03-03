@@ -1,6 +1,8 @@
 const INITIAL_ATTACH_ALT_SCREEN_ENTER_RE = /\x1b(?:\x1b)?\[\?(?:47|1047|1049)(?:;[0-9]+)*h/g;
 const INITIAL_ATTACH_CURSOR_POSITION_QUERY_RE = /\x1b(?:\x1b)?\[\??6n/g;
 const INITIAL_ATTACH_RESET_RE = /\x1bc/g;
+const INITIAL_ATTACH_DEVICE_ATTRIBUTES_QUERY_RE = /\x1b(?:\x1b)?\[(?:>|=)?(?:[0-9]+(?:;[0-9]+)*)?c/g;
+const INITIAL_ATTACH_DEVICE_ATTRIBUTES_BARE_RESPONSE_RE = /(^|[\r\n])0;[0-9]+;0c(?=$|[\r\n])/g;
 const BLOCKED_TERMINAL_PRIVATE_MODES = new Set([47, 1047, 1048, 1049]);
 
 export function sanitizeInitialAttachData(data, sanitizeUntilMs, nowMs = Date.now()) {
@@ -13,7 +15,9 @@ export function sanitizeInitialAttachData(data, sanitizeUntilMs, nowMs = Date.no
   return data
     .replace(INITIAL_ATTACH_ALT_SCREEN_ENTER_RE, '')
     .replace(INITIAL_ATTACH_CURSOR_POSITION_QUERY_RE, '')
-    .replace(INITIAL_ATTACH_RESET_RE, '');
+    .replace(INITIAL_ATTACH_RESET_RE, '')
+    .replace(INITIAL_ATTACH_DEVICE_ATTRIBUTES_QUERY_RE, '')
+    .replace(INITIAL_ATTACH_DEVICE_ATTRIBUTES_BARE_RESPONSE_RE, '$1');
 }
 
 function normalizeParserParams(params) {
