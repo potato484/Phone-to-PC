@@ -42,7 +42,7 @@ const QUICK_KEY_ROWS = [
     { id: 'enter', label: '⏎' }
   ]
 ];
-const SERVICE_WORKER_URL = '/sw.js?v=75';
+const SERVICE_WORKER_URL = '/sw.js?v=76';
 const LEGACY_QUICK_KEY_STORAGE_KEY = 'c2p_quick_keys_v1';
 const SESSION_TAB_LONG_PRESS_MS = 520;
 const SESSION_TAB_FOCUS_SUPPRESS_MS = 700;
@@ -139,7 +139,16 @@ function isTruthyQueryValue(value) {
 function shouldBypassServiceWorkerInDebug() {
   try {
     const params = new URLSearchParams(window.location.search || '');
-    return SERVICE_WORKER_DEBUG_BYPASS_QUERY_KEYS.some((key) => isTruthyQueryValue(params.get(key)));
+    return SERVICE_WORKER_DEBUG_BYPASS_QUERY_KEYS.some((key) => {
+      if (!params.has(key)) {
+        return false;
+      }
+      const value = params.get(key);
+      if (value === '') {
+        return true;
+      }
+      return isTruthyQueryValue(value);
+    });
   } catch {
     return false;
   }

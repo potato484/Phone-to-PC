@@ -1,7 +1,7 @@
 import { DOM, State } from './state.js';
 
 const HEARTBEAT_INTERVAL_MS = 2_000;
-const HEARTBEAT_TIMEOUT_MS = 4_000;
+const HEARTBEAT_TIMEOUT_MS = 8_000;
 const HEARTBEAT_MAX_TIMEOUT_STREAK = 3;
 const SAMPLE_LIMIT = 40;
 const PROFILE_ORDER = {
@@ -26,23 +26,23 @@ function gradeFromScore(score, connected) {
   if (!connected) {
     return 'offline';
   }
-  if (score >= 85) {
+  if (score >= 80) {
     return 'excellent';
   }
-  if (score >= 70) {
+  if (score >= 60) {
     return 'good';
   }
-  if (score >= 55) {
+  if (score >= 40) {
     return 'fair';
   }
   return 'poor';
 }
 
 function profileFromScore(score) {
-  if (score >= 82) {
+  if (score >= 75) {
     return 'high';
   }
-  if (score >= 58) {
+  if (score >= 45) {
     return 'balanced';
   }
   return 'low';
@@ -60,23 +60,27 @@ function computeQuality(samples, connected) {
 
   let jitterMs = 0;
   if (successful.length > 1) {
-    let deltaSum = 0;
+    const deltas = [];
     for (let i = 1; i < successful.length; i += 1) {
       const previous = successful[i - 1].rttMs || 0;
       const current = successful[i].rttMs || 0;
-      deltaSum += Math.abs(current - previous);
+      deltas.push(Math.abs(current - previous));
     }
-    jitterMs = deltaSum / (successful.length - 1);
+    deltas.sort((a, b) => a - b);
+    const q1 = Math.floor(deltas.length * 0.25);
+    const q3 = Math.ceil(deltas.length * 0.75);
+    const trimmed = q3 > q1 ? deltas.slice(q1, q3) : deltas;
+    jitterMs = trimmed.reduce((sum, d) => sum + d, 0) / trimmed.length;
   }
 
   const lossPercent = samples.length > 0 ? (losses / samples.length) * 100 : 0;
 
   let score = 0;
   if (connected && samples.length > 0) {
-    const rttScore = clamp(100 - rttMs * 0.55, 0, 100);
-    const jitterScore = clamp(100 - jitterMs * 1.8, 0, 100);
+    const rttScore = clamp(110 - 25 * Math.log10(Math.max(1, rttMs)), 0, 100);
+    const jitterScore = clamp(105 - 30 * Math.log10(Math.max(1, jitterMs)), 0, 100);
     const lossScore = clamp(100 - lossPercent * 6, 0, 100);
-    score = Math.round(rttScore * 0.5 + jitterScore * 0.2 + lossScore * 0.3);
+    score = Math.round(rttScore * 0.3 + jitterScore * 0.1 + lossScore * 0.6);
   }
 
   return {

@@ -183,6 +183,60 @@ app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(publicDir));
 
+function normalizeInjectedHost(value: string | undefined): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) {
+    return '';
+  }
+  try {
+    if (raw.includes('://')) {
+      return new URL(raw).host;
+    }
+  } catch {
+    // Best-effort normalization below.
+  }
+  return raw
+    .replace(/^wss?:\/\//i, '')
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '')
+    .replace(/\/.*/, '');
+}
+
+function parseInjectedFlags(value: string | undefined): string[] {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) {
+    return [];
+  }
+  if (raw.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()).filter(Boolean);
+      }
+    } catch {
+      // Fallback to comma split.
+    }
+  }
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+app.get('/config.js', (_req, res) => {
+  const edgeHost = normalizeInjectedHost(process.env.C2P_EDGE_RELAY_HOST || process.env.C2P_EDGE_HOST);
+  const flags = parseInjectedFlags(process.env.C2P_DEFAULT_FLAGS);
+
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(200).send(
+    [
+      `window.__C2P_EDGE_HOST__ = ${JSON.stringify(edgeHost)};`,
+      `window.__C2P_FLAGS__ = ${JSON.stringify(flags)};`
+    ].join('\n')
+  );
+});
+
 app.get('/healthz', (_req, res) => {
   res.status(200).json({
     status: 'ok',

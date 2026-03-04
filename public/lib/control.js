@@ -441,6 +441,7 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         }
         if (socketUsesEdgeRelay && !wasAuthed) {
           markEdgeRelayUnavailable();
+          toast.show('边缘 Relay 连接失败，已回退直连', 'warn');
         }
         statusBar.setControl('warn');
         statusBar.setText('控制通道已断开，正在自动重连（可等待重连，或刷新页面并检查网络）');

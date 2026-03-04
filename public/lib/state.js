@@ -145,7 +145,57 @@ function readFlagsFromStorage(storage) {
   return parseFlagList(safeStorageGet(storage, FEATURE_FLAGS_STORAGE_KEY)).map(normalizeFlagName).filter(Boolean);
 }
 
+function readFlagsFromInjectedConfig() {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+  const injected = window.__C2P_FLAGS__;
+  if (Array.isArray(injected)) {
+    return injected.map(normalizeFlagName).filter(Boolean);
+  }
+  if (typeof injected === 'string') {
+    return parseFlagList(injected).map(normalizeFlagName).filter(Boolean);
+  }
+  return [];
+}
+
+function isTruthyOrPresentQueryParam(params, key) {
+  if (!params || !key || typeof params.has !== 'function') {
+    return false;
+  }
+  if (!params.has(key)) {
+    return false;
+  }
+  const rawValue = params.get(key);
+  if (rawValue === '') {
+    return true;
+  }
+  const normalized = (rawValue || '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'off' || normalized === 'no') {
+    return false;
+  }
+  return normalized === '1' || normalized === 'true' || normalized === 'on' || normalized === 'yes';
+}
+
+function readFlagsFromDebugDefaults() {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    // Debug bypass mode implies "I care about freshest behavior"; enable latency-hiding echo.
+    return isTruthyOrPresentQueryParam(params, 'noSW') ? ['localEcho'] : [];
+  } catch {
+    return [];
+  }
+}
+
 const FEATURE_FLAGS = new Set([
+  ...readFlagsFromInjectedConfig(),
+  ...readFlagsFromDebugDefaults(),
   ...readFlagsFromLocationSearch(),
   ...readFlagsFromStorage(typeof window !== 'undefined' ? window.localStorage : null)
 ]);
@@ -187,8 +237,8 @@ function readEdgeRelayHost() {
     }
   })();
   const candidates = [
-    window.__C2P_EDGE_HOST__,
     queryHost,
+    window.__C2P_EDGE_HOST__,
     safeStorageGet(window.localStorage, EDGE_RELAY_HOST_STORAGE_KEY)
   ];
   for (const candidate of candidates) {
@@ -470,8 +520,8 @@ export function apiUrl(path) {
 }
 
 export function wsUrl(path, extraParams) {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const useEdgeRelay = featureEnabled('edgeRelay') && !!EDGE_RELAY_HOST && !State.edgeRelayForceDirect;
+  const protocol = useEdgeRelay ? 'wss:' : window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = useEdgeRelay ? EDGE_RELAY_HOST : window.location.host;
   const url = new URL(path, `${protocol}//${host}`);
   if (extraParams) {

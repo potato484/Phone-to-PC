@@ -24,7 +24,7 @@ const HEARTBEAT_OPTIONS_BY_GRADE: Record<WsHeartbeatGrade, Required<WsHeartbeatO
   excellent: { pingIntervalMs: 30_000, pongTimeoutMs: 10_000 },
   good: { pingIntervalMs: 15_000, pongTimeoutMs: 5_000 },
   fair: { pingIntervalMs: 5_000, pongTimeoutMs: 3_000 },
-  poor: { pingIntervalMs: 2_000, pongTimeoutMs: 2_000 }
+  poor: { pingIntervalMs: 3_000, pongTimeoutMs: 5_000 }
 };
 
 function normalizeHeartbeatOptions(

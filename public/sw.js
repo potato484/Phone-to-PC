@@ -1,4 +1,4 @@
-const CACHE_NAME = 'c2p-v75';
+const CACHE_NAME = 'c2p-v76';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -7,6 +7,7 @@ const APP_SHELL_ASSETS = [
   '/app.js',
   '/lib/state.js',
   '/lib/term.js',
+  '/lib/prediction.js',
   '/lib/terminal-clear-policy.js',
   '/lib/terminal-input-policy.js',
   '/lib/terminal-replay-drop-policy.js',
@@ -37,7 +38,7 @@ function shouldBypassRequest(url, request) {
   if (url.origin !== self.location.origin) {
     return true;
   }
-  if (url.pathname === '/sw.js' || url.pathname === '/reset-cache.html') {
+  if (url.pathname === '/sw.js' || url.pathname === '/reset-cache.html' || url.pathname === '/config.js') {
     return true;
   }
   return url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws/');

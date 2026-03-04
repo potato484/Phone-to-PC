@@ -168,7 +168,7 @@ export function createTerminalChannel(deps: TerminalChannelDeps): WsChannel {
       auditLogger,
       metrics,
       authFailureLimiter: wsAuthFailureLimiter,
-      timeoutMs: 2000
+      timeoutMs: 10_000
     }).then((authContext) => {
       if (!authContext || ws.readyState !== WebSocket.OPEN) {
         return;
