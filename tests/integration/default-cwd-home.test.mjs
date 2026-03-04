@@ -14,6 +14,7 @@ import WebSocket from 'ws';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const serverEntry = path.join(repoRoot, 'dist', 'server.js');
 const fakeTmuxPath = path.join(repoRoot, 'tests', 'helpers', 'fake-tmux.mjs');
+const fakeTailscalePath = path.join(repoRoot, 'tests', 'helpers', 'fake-tailscale.mjs');
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -217,7 +218,8 @@ test('server defaults runtime and spawn cwd to home when --cwd is omitted', asyn
     env: {
       ...process.env,
       PORT: String(port),
-      TUNNEL: 'off',
+      TUNNEL: 'tailscale',
+      C2P_TAILSCALE_BIN: fakeTailscalePath,
       C2P_TMUX_BIN: fakeTmuxPath,
       FAKE_TMUX_STATE_FILE: fakeStatePath,
       C2P_ALLOW_EMPTY_ORIGIN: '1'
@@ -321,7 +323,8 @@ test('spawn cwd still defaults to home when --cwd is provided', async (t) => {
     env: {
       ...process.env,
       PORT: String(port),
-      TUNNEL: 'off',
+      TUNNEL: 'tailscale',
+      C2P_TAILSCALE_BIN: fakeTailscalePath,
       C2P_TMUX_BIN: fakeTmuxPath,
       FAKE_TMUX_STATE_FILE: fakeStatePath,
       C2P_ALLOW_EMPTY_ORIGIN: '1'

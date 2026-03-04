@@ -13,6 +13,7 @@ import WebSocket from 'ws';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const serverEntry = path.join(repoRoot, 'dist', 'server.js');
 const fakeTmuxPath = path.join(repoRoot, 'tests', 'helpers', 'fake-tmux.mjs');
+const fakeTailscalePath = path.join(repoRoot, 'tests', 'helpers', 'fake-tailscale.mjs');
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -193,7 +194,8 @@ async function startServer({ runtimeDir, stateFile, port }) {
     env: {
       ...process.env,
       PORT: String(port),
-      TUNNEL: 'off',
+      TUNNEL: 'tailscale',
+      C2P_TAILSCALE_BIN: fakeTailscalePath,
       C2P_TMUX_BIN: fakeTmuxPath,
       FAKE_TMUX_STATE_FILE: stateFile,
       C2P_ALLOW_EMPTY_ORIGIN: '1'

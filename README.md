@@ -7,14 +7,10 @@
 - 主要面向有 Linux/WSL 主机的个人开发者、运维、实验室/家庭自托管用户。
 - 核心诉求是“手机随时接管电脑终端”，并且要求低延迟、稳定连接。
 
-## 连通方案（强烈推荐 Tailscale）
+## 连通方案（Tailscale Only）
 
-`Tailscale` 是本项目推荐的默认连通方式。  
-原因：在本项目的实际远程交互场景里，`cloudflare` 的连接效果通常明显差于 `tailscale`（更高延迟、更容易抖动）。
-
-结论：
-- 生产/日常使用：优先 `Tailscale`
-- `cloudflare`：仅作为兜底或临时排障，不建议作为常态连接方案
+`Tailscale` 是本项目唯一支持的连通方式。  
+生产/日常使用请直接使用 `tailscale`。
 
 ## 功能概览
 
@@ -117,9 +113,9 @@ cp .env.example .env
 | 变量 | 代码默认值 | 推荐值 | 说明 |
 |------|------------|--------|------|
 | `PORT` | `3000` | `3000` | 服务监听端口 |
-| `TUNNEL` | `auto` | `tailscale` | 隧道模式：`tailscale` / `cloudflare` / `off` / `auto` |
+| `TUNNEL` | `tailscale` | `tailscale` | 隧道模式（仅支持 `tailscale`） |
 | `TAILSCALE_FUNNEL` | `false` | `false` | `true`=公网，`false`=仅 Tailnet 内 |
-| `TUNNEL_HOSTNAME` | 空 | 空 | Cloudflare 命名隧道域名（仅 cloudflare 模式） |
+| `C2P_TAILSCALE_BIN` | `tailscale` | `tailscale` | 可选：覆盖 tailscale 可执行文件路径 |
 
 ### 认证配置
 
@@ -169,8 +165,8 @@ pnpm start -- --cwd=/path/to/workspace
 
 1. 访问 URL 必须带 `#token`
 - 正确格式：`https://<域名或IP>/#token=<bootstrap_token>`
-- 例如：`https://xxxx.trycloudflare.com/#token=...`
-- 仅打开 `https://xxxx.trycloudflare.com`（不带 `#token`）会被视为未登录
+- 例如：`https://your-node.tailnet.ts.net/#token=...`
+- 仅打开 `https://your-node.tailnet.ts.net`（不带 `#token`）会被视为未登录
 
 2. `bootstrap token` 获取方式
 - 默认保存在服务端工作目录：`.auth-token`
@@ -203,27 +199,8 @@ c2pctl logs --user <user>
 
 ## 隧道模式说明
 
-### `tailscale`（推荐）
-
 - 程序会自动执行 `tailscale serve` 或 `tailscale funnel`（按 `TAILSCALE_FUNNEL` 决定）。
 - 你只需要确保：`tailscale up` 已登录且在线。
-
-### `cloudflare`（不推荐，兜底）
-
-- 在本项目中，`cloudflare` 实测通常比 `tailscale` 连接体验差，仅建议临时使用。
-- 使用方式：
-  - 设置 `TUNNEL=cloudflare`
-  - 可选设置 `TUNNEL_HOSTNAME` 走命名隧道
-  - 不设置则走 Quick Tunnel
-- 重启服务后，以日志输出的 `tunnel: https://.../#token=...` 为准直接访问
-
-### `off`
-
-- 关闭隧道，仅局域网访问。
-
-### `auto`
-
-- 按代码逻辑自动选择，不建议用于生产可控场景。
 
 ## 常用命令
 

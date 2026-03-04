@@ -210,20 +210,17 @@ ensure_env_file() {
   fi
 
   local default_port="3000"
-  local default_tunnel="tailscale"
   local default_funnel="false"
 
   if [[ $NON_INTERACTIVE -eq 0 ]]; then
     read -r -p "PORT [$default_port]: " input_port || true
-    read -r -p "TUNNEL mode (tailscale/off) [$default_tunnel]: " input_tunnel || true
     read -r -p "TAILSCALE_FUNNEL (true/false) [$default_funnel]: " input_funnel || true
     [[ -n "${input_port:-}" ]] && default_port="$input_port"
-    [[ -n "${input_tunnel:-}" ]] && default_tunnel="$input_tunnel"
     [[ -n "${input_funnel:-}" ]] && default_funnel="$input_funnel"
   fi
 
   upsert_missing_env "$env_file" "PORT" "$default_port"
-  upsert_missing_env "$env_file" "TUNNEL" "$default_tunnel"
+  upsert_missing_env "$env_file" "TUNNEL" "tailscale"
   upsert_missing_env "$env_file" "TAILSCALE_FUNNEL" "$default_funnel"
   upsert_missing_env "$env_file" "C2P_ACCESS_TOKEN_TTL_SECONDS" "86400"
 }

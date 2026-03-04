@@ -7,9 +7,7 @@ import {
   createWsAuthMessage,
   fetchSessionReplayOffset,
   fetchSessionLogBytes,
-  getEdgeRelayHost,
   getSessionOffset,
-  markEdgeRelayUnavailable,
   persistTokenExpiry,
   setActionButtonsEnabled,
   setSessionOffset,
@@ -379,17 +377,6 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
       statusBar.setControl('warn');
       statusBar.setText('正在连接控制通道...');
       const socketUrl = wsUrl('/ws/control');
-      const edgeRelayHost = getEdgeRelayHost();
-      const socketUsesEdgeRelay = (() => {
-        if (!edgeRelayHost) {
-          return false;
-        }
-        try {
-          return new URL(socketUrl).host === edgeRelayHost;
-        } catch {
-          return false;
-        }
-      })();
       const socket = new WebSocket(socketUrl);
       State.controlSocket = socket;
 
@@ -412,7 +399,6 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
         if (State.controlSocket !== socket) {
           return;
         }
-        const wasAuthed = State.controlConnected;
         State.controlSocket = null;
         State.controlConnected = false;
         State.serverCapabilities = [];
@@ -438,10 +424,6 @@ export function createControl({ term, sessionTabs, statusBar, toast, actions, qu
           statusBar.setText('访问令牌无效，请重新使用 #token 链接登录');
           toast.show('认证已失效，请重新登录', 'danger');
           return;
-        }
-        if (socketUsesEdgeRelay && !wasAuthed) {
-          markEdgeRelayUnavailable();
-          toast.show('边缘 Relay 连接失败，已回退直连', 'warn');
         }
         statusBar.setControl('warn');
         statusBar.setText('控制通道已断开，正在自动重连（可等待重连，或刷新页面并检查网络）');

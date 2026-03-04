@@ -104,6 +104,13 @@ const cliOptions = parseServerCliOptions(process.argv.slice(2));
 const defaultWorkingDirectory = resolveDefaultWorkingDirectory(cliOptions.cwd);
 const defaultTerminalWorkingDirectory = resolveHomeDirectoryFallback();
 const port = Number(process.env.PORT ?? 3000);
+try {
+  resolveTunnelMode();
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(message);
+  process.exit(1);
+}
 
 const store = new C2PStore();
 const bootstrapToken = ensureAuthToken();
@@ -183,25 +190,6 @@ app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(publicDir));
 
-function normalizeInjectedHost(value: string | undefined): string {
-  const raw = typeof value === 'string' ? value.trim() : '';
-  if (!raw) {
-    return '';
-  }
-  try {
-    if (raw.includes('://')) {
-      return new URL(raw).host;
-    }
-  } catch {
-    // Best-effort normalization below.
-  }
-  return raw
-    .replace(/^wss?:\/\//i, '')
-    .replace(/^https?:\/\//i, '')
-    .replace(/\/+$/, '')
-    .replace(/\/.*/, '');
-}
-
 function parseInjectedFlags(value: string | undefined): string[] {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) {
@@ -224,14 +212,12 @@ function parseInjectedFlags(value: string | undefined): string[] {
 }
 
 app.get('/config.js', (_req, res) => {
-  const edgeHost = normalizeInjectedHost(process.env.C2P_EDGE_RELAY_HOST || process.env.C2P_EDGE_HOST);
   const flags = parseInjectedFlags(process.env.C2P_DEFAULT_FLAGS);
 
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
   res.status(200).send(
     [
-      `window.__C2P_EDGE_HOST__ = ${JSON.stringify(edgeHost)};`,
       `window.__C2P_FLAGS__ = ${JSON.stringify(flags)};`
     ].join('\n')
   );
@@ -518,15 +504,17 @@ server.listen(port, async () => {
     console.log(`[c2p] lan bootstrap: http://${lan}:${port}/#token=${bootstrapToken}`);
   }
 
-  const tunnelUrl = await startTunnel(port, bootstrapToken);
-  if (tunnelUrl) {
-    if (resolveTunnelMode() === 'tailscale') {
-      const tunnelCommand = isEnabledEnvFlag(process.env.TAILSCALE_FUNNEL) ? 'funnel' : 'serve';
-      console.log(`[c2p] tunnel: tailscale ${tunnelCommand} -> ${tunnelUrl}`);
-    } else {
-      console.log(`[c2p] tunnel: ${tunnelUrl}`);
-    }
+  try {
+    const tunnelUrl = await startTunnel(port, bootstrapToken);
+    const tunnelCommand = isEnabledEnvFlag(process.env.TAILSCALE_FUNNEL) ? 'funnel' : 'serve';
+    console.log(`[c2p] tunnel: tailscale ${tunnelCommand} -> ${tunnelUrl}`);
     console.log('[c2p] scan to connect:');
     qrcode.generate(tunnelUrl, { small: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[c2p] tunnel startup failed: ${message}`);
+    server.close(() => {
+      process.exit(1);
+    });
   }
 });
