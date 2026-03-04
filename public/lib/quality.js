@@ -80,7 +80,7 @@ function computeQuality(samples, connected) {
     const rttScore = clamp(110 - 25 * Math.log10(Math.max(1, rttMs)), 0, 100);
     const jitterScore = clamp(105 - 30 * Math.log10(Math.max(1, jitterMs)), 0, 100);
     const lossScore = clamp(100 - lossPercent * 6, 0, 100);
-    score = Math.round(rttScore * 0.3 + jitterScore * 0.1 + lossScore * 0.6);
+    score = Math.round(rttScore * 0.5 + jitterScore * 0.2 + lossScore * 0.3);
   }
 
   return {

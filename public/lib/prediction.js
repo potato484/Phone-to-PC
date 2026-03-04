@@ -1,6 +1,15 @@
+import { State } from './state.js';
+
 const ALT_SCREEN_ENTER_RE = /\x1b\[\?(?:1049|1047|47)h/g;
 const ALT_SCREEN_EXIT_RE = /\x1b\[\?(?:1049|1047|47)l/g;
-const PREDICTION_TIMEOUT_MS = 120;
+
+function getPredictionTimeoutMs() {
+  const snap = State.connectionQualitySnapshot;
+  if (snap && Number.isFinite(snap.rttMs) && snap.rttMs > 0) {
+    return Math.min(3000, Math.max(150, Math.round(snap.rttMs + 2 * (snap.jitterMs || 0))));
+  }
+  return 150;
+}
 const ALT_SEQUENCE_CARRY_LIMIT = 32;
 const PREDICTION_MAX_PENDING = 256;
 
@@ -139,7 +148,7 @@ export class PredictionEngine {
     this.terminal.write(key);
     prediction.timeoutId = window.setTimeout(() => {
       this.#markTimeout(prediction.id);
-    }, PREDICTION_TIMEOUT_MS);
+    }, getPredictionTimeoutMs());
     this.pending.push(prediction);
   }
 

@@ -193,6 +193,7 @@ function readFlagsFromDebugDefaults() {
 }
 
 const FEATURE_FLAGS = new Set([
+  'localEcho',
   ...readFlagsFromInjectedConfig(),
   ...readFlagsFromDebugDefaults(),
   ...readFlagsFromLocationSearch(),
